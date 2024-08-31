@@ -1,16 +1,10 @@
 ---
+import Base from "../Layouts/App.astro"
 import CesiumWrapper from "../components/CesiumWrapper"
+import SatelliteInterface from "../components/SatelliteInterface"
 ---
 
-<html lang="en">
-	<head>
-		<meta charset="utf-8" />
-		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-		<meta name="viewport" content="width=device-width" />
-		<meta name="generator" content={Astro.generator} />
-		<title>Commandant</title>
-	</head>
-	<body>
-		<CesiumWrapper client:load/>
-	</body>
-</html>
+<Base>
+	<CesiumWrapper client:only="react"/>
+	<SatelliteInterface client:load/>
+</Base>
