@@ -6,6 +6,6 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
-export function generateUUID(): string {
+export function generateId(): string {
   return uuidv4();
 }

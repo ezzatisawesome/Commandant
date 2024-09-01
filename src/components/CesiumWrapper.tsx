@@ -14,7 +14,7 @@ import {
 } from "cesium";
 import "cesium/Build/Cesium/Widgets/widgets.css";
 
-import envs from "../services/config";
+import envs from "../lib/config";
 import { propagate } from "../services/api";
 
 

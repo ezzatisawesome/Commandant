@@ -1,36 +1,27 @@
 import { persistentAtom } from '@nanostores/persistent';
+import type { Orbit } from '@/types/orbits';
 
-// Define the classical orbital elements with an id
-interface OrbitalElements {
-  id: string;
-  semiMajorAxis: number;
-  eccentricity: number;
-  inclination: number;
-  rightAscension: number;
-  argumentOfPeriapsis: number;
-  trueAnomaly: number;
-}
 
 // Initialize the store with an empty array
-export const $orbitalElementsStore = persistentAtom<OrbitalElements[]>('orbitalElementsStore', [], {
+export const $orbitalElementsStore = persistentAtom<Orbit[]>('orbitalElementsStore', [], {
   encode: JSON.stringify,
   decode: JSON.parse
 });
 
 // Helper function to add orbital elements
-export function addOrbitalElement(element: OrbitalElements) {
+export function addOrbitalElement(element: Orbit) {
   const currentElements = $orbitalElementsStore.get();
   $orbitalElementsStore.set([...currentElements, element]);
 }
 
 // Helper function to get an orbital element by id
-export function getOrbitalElementById(id: string): OrbitalElements | undefined {
+export function getOrbitalElementById(id: string): Orbit | undefined {
   const currentElements = $orbitalElementsStore.get();
   return currentElements.find(element => element.id === id);
 }
 
 // Helper function to update an orbital element by id
-export function updateOrbitalElementById(id: string, updatedElement: OrbitalElements) {
+export function updateOrbitalElementById(id: string, updatedElement: Orbit) {
   const currentElements = $orbitalElementsStore.get();
   const newElements = currentElements.map(element => (element.id === id ? updatedElement : element));
   $orbitalElementsStore.set(newElements);

@@ -1,7 +1,9 @@
-
 import { useState } from 'react';
-import { PlusCircledIcon } from '@radix-ui/react-icons';
+import { useStore } from "@nanostores/react"
 
+import type { ClassicalOrbitalElements } from '@/types/orbits';
+import { generateId } from '@/lib/utils';
+import { $orbitalElementsStore } from '@/stores/satellite.store';
 import { Button } from '@/ui/button';
 import { Input } from '@/ui/input';
 import { Label } from "@/ui/label"
@@ -12,23 +14,21 @@ import {
 } from "@/components/ui/popover"
 
 
-type OrbitalParams = {
-    semiMajorAxis: number,
-    eccentricity: number,
-    inclination: number,
-    longitudeAscendingNode: number,
-    argumentOfPeriapses: number,
-    trueAnomaly: number,
-}
-
 export default function SatelliteInterface() {
-    const [orbitalParams, setOrbitalParams] = useState<OrbitalParams>();
+    const $orbitalElements = useStore($orbitalElementsStore);
+    const [orbitalParams, setOrbitalParams] = useState<ClassicalOrbitalElements>($orbitalElements[0]);
 
-    const handleChange = (param: keyof OrbitalParams, value: number) => {
+    const handleChange = (param: keyof ClassicalOrbitalElements, value: number) => {
         setOrbitalParams(prevParams => ({
             ...prevParams,
             [param]: value,
-        } as OrbitalParams));
+        } as ClassicalOrbitalElements));
+
+        // Save the changes to the store
+        $orbitalElementsStore.set([{
+            id: generateId(),
+            ...orbitalParams,
+        }]);
     };
 
     return (
