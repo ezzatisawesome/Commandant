@@ -8,14 +8,17 @@ type PropagateResponse = {
 };
 
 const propagate = async (	
-    time: number,
-	coes: number[],
+	time: number,
+	elements: number[], // Either coes or state vector
 	propagationSpan: number,
-	propagationStep: number
+	propagationStep: number,
+	fromState: boolean = false,
 ) : Promise<PropagateResponse> => {
+
 	const payload = {
+		from_state: fromState,
 		time,
-		coes,
+		elements,
 		propagation_span: propagationSpan,
 		propagation_step: propagationStep,
 	};
