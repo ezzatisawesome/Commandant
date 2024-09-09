@@ -7,18 +7,30 @@ import "cesium/Build/Cesium/Widgets/widgets.css";
 
 import { Satellite } from "@/services/Satellite";
 import { $statesStore } from "@/stores/states.store";
+import { $viewerStore } from "@/stores/cesium.store";
 
 export default function Test() {
 	const $states = useStore($statesStore);
+	const $viewer = useStore($viewerStore);
 
 	const stateRef = useRef<number>(0);
-	const viewerRef = useRef<Viewer>(); // Ref to store the Cesium viewer instance
 	const satelliteRef = useRef<Satellite>(); // Ref to store the Satellite instance
 	const startJulianDateRef = useRef<JulianDate>(); // Ref to store the Julian start date
 
 	// Initialize Cesium Viewer and Satellite only once on component mount
 	useEffect(() => {
-		viewerRef.current = new Viewer("cesiumContainer");
+		const viewer = new Viewer("cesiumContainer", {
+			timeline: false,
+			geocoder: false, // Search button
+			homeButton: false,
+			navigationHelpButton: false,
+			baseLayerPicker: false, // Imagery layer picker
+			sceneModePicker: false, // Need this functionality
+			animation: false,
+			fullscreenButton: false,
+		});
+		viewer.creditDisplay.container.style.display = "none"; // Hide Cesium logo
+		$viewerStore.set(viewer);
 
 		// Set up satellite
 		const satellite = new Satellite([7641.8, 0.00000001, 100.73, 0, 0, 90]);
@@ -27,20 +39,20 @@ export default function Test() {
 
 		// Set up initial Julian Date
 		startJulianDateRef.current = JulianDate.fromDate(new Date(2024, 2, 20, 0, 0, 0)); // March 20, 2024
-		viewerRef.current.clock.startTime = startJulianDateRef.current.clone();
-		viewerRef.current.clock.currentTime = startJulianDateRef.current.clone();
+		viewer.clock.startTime = startJulianDateRef.current.clone();
+		viewer.clock.currentTime = startJulianDateRef.current.clone();
 
 		// Cleanup Cesium Viewer on component unmount
 		return () => {
-			if (viewerRef.current && !viewerRef.current.isDestroyed()) {
-				viewerRef.current.destroy();
+			if ($viewer && $viewer.isDestroyed()) {
+				$viewer.destroy();
 			}
 		};
 	}, []);
 
 	// Effect to handle animation logic
 	useEffect(() => {
-		const viewer = viewerRef.current;
+		const viewer = $viewer;
 		if (viewer && startJulianDateRef.current) {
 			const t0 = JulianDate.toDate(startJulianDateRef.current).getTime() / 1000; // Initial start time in seconds
 

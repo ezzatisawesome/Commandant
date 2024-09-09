@@ -1,10 +1,12 @@
 ---
-import Base from "../Layouts/App.astro"
-import Globe from "../components/Globe"
-import SatelliteInterface from "../components/SatelliteInterface"
+import Base from "@/Layouts/App.astro"
+import Globe from "@/components/Globe"
+import SatelliteInterface from "@/components/SatelliteInterface"
+import TimeInterface from "@/components/TimeInterface"
 ---
 
 <Base>
 	<Globe client:only="react"/>
-	<SatelliteInterface client:load/>
+	<!-- <SatelliteInterface client:load/> -->
+	<TimeInterface client:only="react"/>
 </Base>
