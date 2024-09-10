@@ -55,7 +55,7 @@ export default function TimeInterface() {
             <button onClick={incrementMultiplier}>
                 <DoubleArrowRightIcon className="stroke-white stroke-0 w-4 h-4" />
             </button>
-            <span className="ml-2 text-white">{multipliers[multiplierIndex]}x</span>
+            <span className="pl-2 text-sm text-white">{multipliers[multiplierIndex]}x</span>
         </div>
     );
 }
