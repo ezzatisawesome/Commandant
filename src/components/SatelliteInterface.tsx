@@ -1,99 +1,78 @@
-import { useState } from 'react';
 import { useStore } from "@nanostores/react"
+import { PlusIcon, TrashIcon } from '@radix-ui/react-icons';
 
-import type { ClassicalOrbitalElements } from '@/types/orbits';
+import type { Satellite, ClassicalOrbitalElements } from '@/types/app';
 import { generateId } from '@/lib/utils';
-import { $orbitalElementsStore } from '@/stores/satellite.store';
+import { $satellitesStore, addSatellite, updateSatellitePropById, removeSatelliteById } from '@/stores/satellite.store';
 import { Button } from '@/ui/button';
-import { Input } from '@/ui/input';
 import { Label } from "@/ui/label"
-import {
-    Popover,
-    PopoverContent,
-    PopoverTrigger,
-} from "@/components/ui/popover"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 
 
 export default function SatelliteInterface() {
-    const $orbitalElements = useStore($orbitalElementsStore);
-    const [orbitalParams, setOrbitalParams] = useState<ClassicalOrbitalElements>($orbitalElements[0]);
+    const $satellites = useStore($satellitesStore);
 
-    const handleChange = (param: keyof ClassicalOrbitalElements, value: number) => {
-        setOrbitalParams(prevParams => ({
-            ...prevParams,
-            [param]: value,
-        } as ClassicalOrbitalElements));
-
-        // Save the changes to the store
-        $orbitalElementsStore.set([{
-            id: generateId(),
-            ...orbitalParams,
-        }]);
+    const handleAddSatellite = () => {
+        const newSatellite = {
+            _id: generateId(),
+            name: "New Satellite",
+            semiMajorAxis: 6771, // km (Earth's radius + 400 km altitude)
+            eccentricity: 0.001, // near-circular orbit
+            inclination: 51.6, // degrees (common inclination for LEO)
+            longitudeAscendingNode: 0, // degrees
+            argumentOfPeriapses: 0, // degrees
+            trueAnomaly: 0, // degrees
+        };
+        addSatellite(newSatellite);
     };
 
+    const handleChange = (id: string, key: keyof ClassicalOrbitalElements, value: number) => {
+        updateSatellitePropById(id, key, value);
+    };
+
+    const handleDeleteSatellite = (id: string) => {
+        removeSatelliteById(id);
+    };
+
+    const orbitalElements = [
+        { label: 'a', key: 'semiMajorAxis' },
+        { label: 'e', key: 'eccentricity' },
+        { label: 'i', key: 'inclination' },
+        { label: 'Ω', key: 'longitudeAscendingNode' },
+        { label: 'ω', key: 'argumentOfPeriapses' },
+        { label: 'ν', key: 'trueAnomaly' },
+    ];
+
     return (
-        <div className="p-1 fixed top-0 left-0">
-            <Popover>
-                <PopoverTrigger asChild>
-                    <Button variant="outline">Captain</Button>
-                </PopoverTrigger>
-                <PopoverContent className="m-1 grid gap-1">
-                    <div className="grid grid-cols-4 items-center">
-                        <Label>a</Label>
-                        <Input
-                            type="number"
-                            value={orbitalParams?.semiMajorAxis}
-                            onChange={e => handleChange("semiMajorAxis", parseFloat(e.target.value))}
-                            className="col-span-3 h-8"
-                        />
-                    </div>
-                    <div className="grid grid-cols-4 items-center">
-                        <Label>e</Label>
-                        <Input
-                            type="number"
-                            value={orbitalParams?.eccentricity}
-                            onChange={e => handleChange("eccentricity", parseFloat(e.target.value))}
-                            className="col-span-3 h-8"
-                        />
-                    </div>
-                    <div className="grid grid-cols-4 items-center">
-                        <Label>i</Label>
-                        <Input
-                            type="number"
-                            value={orbitalParams?.inclination}
-                            onChange={e => handleChange("inclination", parseFloat(e.target.value))}
-                            className="col-span-3 h-8"
-                        />
-                    </div>
-                    <div className="grid grid-cols-4 items-center">
-                        <Label>Ω</Label>
-                        <Input
-                            type="number"
-                            value={orbitalParams?.longitudeAscendingNode}
-                            onChange={e => handleChange("longitudeAscendingNode", parseFloat(e.target.value))}
-                            className="col-span-3 h-8"
-                        />
-                    </div>
-                    <div className="grid grid-cols-4 items-center">
-                        <Label>ω</Label>
-                        <Input
-                            type="number"
-                            value={orbitalParams?.argumentOfPeriapses}
-                            onChange={e => handleChange("argumentOfPeriapses", parseFloat(e.target.value))}
-                            className="col-span-3 h-8"
-                        />
-                    </div>
-                    <div className="grid grid-cols-4 items-center">
-                        <Label>ν</Label>
-                        <Input
-                            type="number"
-                            value={orbitalParams?.trueAnomaly}
-                            onChange={e => handleChange("trueAnomaly", parseFloat(e.target.value))}
-                            className="col-span-3 h-8"
-                        />
-                    </div>
-                </PopoverContent>
-            </Popover>
+        <div className="fixed top-4 left-4">
+            <Button onClick={handleAddSatellite} variant="ghost" className="text-xs py-1 -mx-2 px-2 h-min">
+                Add Satellite <PlusIcon className="ml-2 w-4 h-4" />
+            </Button>
+            <div className="grid gap-1 pt-2">
+                {$satellites.map((sat: Satellite) => (
+                    <Popover key={sat._id}>
+                        <PopoverTrigger asChild>
+                            <div className="hover:underline hover:cursor-pointer text-xs p-0 m-0">{sat.name}</div>
+                        </PopoverTrigger>
+                        <PopoverContent className="ml-2 grid gap-1.5 w-min shadow-lg">
+                            {orbitalElements.map(element => (
+                                <div key={element.key} className="flex items-center gap-2">
+                                    <Label className='w-5 font-light'>{element.label}:</Label>
+                                    <input
+                                        type="number"
+                                        value={sat[element.key as keyof ClassicalOrbitalElements]}
+                                        onChange={e => handleChange(sat._id, element.key as keyof ClassicalOrbitalElements, parseFloat(e.target.value))}
+                                        className="bg-transparent border-b focus:outline-none focus:ring-0 text-center text-sm"
+                                    />
+                                </div>
+                            ))}
+                            <Button onClick={() => handleDeleteSatellite(sat._id)} variant="ghost" className="mt-2 text-xs h-6">
+                                Delete <TrashIcon className="ml-2 w-4 h-4" />
+                            </Button>
+                        </PopoverContent>
+                    </Popover>
+                ))}
+            </div>
         </div>
     );
 }

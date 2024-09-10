@@ -7,6 +7,7 @@ export interface ClassicalOrbitalElements {
     trueAnomaly: number,
 }
 
-export interface Orbit extends ClassicalOrbitalElements {
-    id: string,
+export interface Satellite extends ClassicalOrbitalElements {
+    _id: string,
+    name: string
 }

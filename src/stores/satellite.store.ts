@@ -1,35 +1,45 @@
 import { persistentAtom } from '@nanostores/persistent';
-import type { Orbit } from '@/types/orbits';
+import type { Satellite } from '@/types/app';
 
 
 // Initialize the store with an empty array
-export const $orbitalElementsStore = persistentAtom<Orbit[]>('orbitalElementsStore', [], {
+export const $satellitesStore = persistentAtom<Satellite[]>('satelliteElementsStore', [], {
   encode: JSON.stringify,
   decode: JSON.parse
 });
 
-// Helper function to add orbital elements
-export function addOrbitalElement(element: Orbit) {
-  const currentElements = $orbitalElementsStore.get();
-  $orbitalElementsStore.set([...currentElements, element]);
+export function addSatellite(element: Satellite) {
+  const currentElements = $satellitesStore.get();
+  $satellitesStore.set([...currentElements, element]);
 }
 
-// Helper function to get an orbital element by id
-export function getOrbitalElementById(id: string): Orbit | undefined {
-  const currentElements = $orbitalElementsStore.get();
-  return currentElements.find(element => element.id === id);
+export function getSatelliteById(_id: string): Satellite | undefined {
+  const currentElements = $satellitesStore.get();
+  return currentElements.find(element => element._id === _id);
 }
 
-// Helper function to update an orbital element by id
-export function updateOrbitalElementById(id: string, updatedElement: Orbit) {
-  const currentElements = $orbitalElementsStore.get();
-  const newElements = currentElements.map(element => (element.id === id ? updatedElement : element));
-  $orbitalElementsStore.set(newElements);
+export function updateSatelliteById(_id: string, updatedElement: Satellite) {
+  const currentElements = $satellitesStore.get();
+  const newElements = currentElements.map(element => (element._id === _id ? updatedElement : element));
+  $satellitesStore.set(newElements);
 }
 
-// Helper function to remove an orbital element by id
-export function removeOrbitalElementById(id: string) {
-  const currentElements = $orbitalElementsStore.get();
-  const newElements = currentElements.filter(element => element.id !== id);
-  $orbitalElementsStore.set(newElements);
+export function updateSatellitePropById(_id: string, key: keyof Satellite, value: Satellite[keyof Satellite]) {
+  const currentElements = $satellitesStore.get();
+  const updatedElements = currentElements.map(element => {
+    if (element._id === _id) {
+      return {
+        ...element,
+        [key]: value
+      };
+    }
+    return element;
+  });
+  $satellitesStore.set(updatedElements);
+}
+
+export function removeSatelliteById(_id: string) {
+  const currentElements = $satellitesStore.get();
+  const newElements = currentElements.filter(element => element._id !== _id);
+  $satellitesStore.set(newElements);
 }
