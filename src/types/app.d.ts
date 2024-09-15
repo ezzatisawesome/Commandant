@@ -11,3 +11,12 @@ export interface Satellite extends ClassicalOrbitalElements {
     _id: string,
     name: string
 }
+
+export interface StateElements {
+    x: number,
+    y: number,
+    z: number,
+    dx: number,
+    dy: number,
+    dz: number,
+}

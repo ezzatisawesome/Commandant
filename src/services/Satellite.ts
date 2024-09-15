@@ -1,13 +1,17 @@
 import { propagate } from "@/services/api";
-import { $statesStore } from "@/stores/states.store";
+import { addState } from "@/stores/states.store";
+import { generateId } from "@/lib/utils";
+import type { ClassicalOrbitalElements, StateElements } from "@/types/app";
 
 export class Satellite {
-	coes: number[];
-	states: number[][];
+	id: string;
+	coes: ClassicalOrbitalElements;
+	states: StateElements[];
 	currentStateIndex: number;
 	requestInProgress: boolean;
 
-	constructor(coes: number[]) {
+	constructor(id: string, coes: ClassicalOrbitalElements) {
+		this.id = id;
 		this.coes = coes;
 		this.states = [];
 		this.currentStateIndex = 0;
@@ -31,7 +35,7 @@ export class Satellite {
 			withState
 		);
 		this.states.push(...response.statesSat);
-		$statesStore.set([...this.states]);
+		addState(this.id, response.statesSat);
 
 		this.requestInProgress = false;
 	}

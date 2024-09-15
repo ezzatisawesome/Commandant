@@ -8,10 +8,16 @@ import "cesium/Build/Cesium/Widgets/widgets.css";
 import { Satellite } from "@/services/Satellite";
 import { $statesStore } from "@/stores/states.store";
 import { $viewerStore } from "@/stores/cesium.store";
+import { $satellitesStore } from "@/stores/satellite.store";
+import { $timeStore } from "@/stores/states.store";
+
+import Satellites from "./Satellites";
 
 export default function Test() {
 	const $states = useStore($statesStore);
 	const $viewer = useStore($viewerStore);
+	const $satellites = useStore($satellitesStore);
+	const $time = useStore($timeStore);
 
 	const stateRef = useRef<number>(0);
 	const satelliteRef = useRef<Satellite>(); // Ref to store the Satellite instance
@@ -33,9 +39,15 @@ export default function Test() {
 		$viewerStore.set(viewer);
 
 		// Set up satellite
-		const satellite = new Satellite([7641.8, 0.00000001, 100.73, 0, 0, 90]);
-		satelliteRef.current = satellite;
-		satellite.init();
+		// $satellites.forEach(s => {
+
+			// const satellite = new Satellite([s.semiMajorAxis, s.eccentricity, s.inclination, s.longitudeAscendingNode, s.argumentOfPeriapses, s.trueAnomaly]);
+			// satellite.init()
+		// });
+
+		// const satellite = new Satellite([7641.8, 0.00000001, 100.73, 0, 0, 90]);
+		// satelliteRef.current = satellite;
+		// satellite.init();
 
 		// Set up initial Julian Date
 		startJulianDateRef.current = JulianDate.fromDate(new Date(2024, 2, 20, 0, 0, 0)); // March 20, 2024
@@ -50,43 +62,48 @@ export default function Test() {
 		};
 	}, []);
 
-	// Effect to handle animation logic
-	useEffect(() => {
-		const viewer = $viewer;
-		if (viewer && startJulianDateRef.current) {
-			const t0 = JulianDate.toDate(startJulianDateRef.current).getTime() / 1000; // Initial start time in seconds
+	// // Effect to handle animation logic
+	// useEffect(() => {
+	// 	if ($viewer && startJulianDateRef.current) {
+	// 		const t0 = JulianDate.toDate(startJulianDateRef.current).getTime() / 1000; // Initial start time in seconds
 
-			// Update or create polyline entity with updated positions
-			viewer.entities.removeAll(); // Remove old entities before adding new ones
+	// 		// Update or create polyline entity with updated positions
+	// 		$viewer.entities.removeAll(); // Remove old entities before adding new ones
 
-			viewer.entities.add({
-				polyline: {
-					positions: new Cesium.CallbackProperty((time, result) => {
-						const currentTime = JulianDate.toDate(time).getTime() / 1000; // Current time in seconds
-						const elapsedSeconds = currentTime - t0; // Time elapsed since start in seconds
+	// 		$viewer.entities.add({
+	// 			polyline: {
+	// 				positions: new Cesium.CallbackProperty((time, result) => {
+	// 					const currentTime = JulianDate.toDate(time).getTime() / 1000; // Current time in seconds
+	// 					const elapsedSeconds = currentTime - t0; // Time elapsed since start in seconds
 
-						stateRef.current = Math.floor(elapsedSeconds);
+	// 					stateRef.current = Math.floor(elapsedSeconds);
 
-						if (stateRef.current + 500 > $states.length && $states.length !== 0) {
-							satelliteRef.current?.propagate(true);
-						}
+	// 					if (stateRef.current + 500 > $states.length && $states.length !== 0) {
+	// 						satelliteRef.current?.propagate(true);
+	// 					}
 
-						// Ensure we don't go out of bounds of the states array
-						const slicedStates = $states.slice(stateRef.current, stateRef.current + 500).map((state) => {
-							const [x, y, z] = state;
-							return Cartesian3.fromElements(x * 1000, y * 1000, z * 1000);
-						});
+	// 					// Ensure we don't go out of bounds of the states array
+	// 					const slicedStates = $states.slice(stateRef.current, stateRef.current + 500).map((state) => {
+	// 						const [x, y, z] = state;
+	// 						return Cartesian3.fromElements(x * 1000, y * 1000, z * 1000);
+	// 					});
 
-						return slicedStates;
-					}, false),
-					width: 2,
-					material: Cesium.Color.CYAN, // Orbit track color
-				},
-			});
-		}
-	}, [$states]); // Depend on $states updates
+	// 					return slicedStates;
+	// 				}, false),
+	// 				width: 2,
+	// 				material: Cesium.Color.CYAN, // Orbit track color
+	// 			},
+	// 		});
+	// 	}
+	// }, [$states]); // Depend on $states updates
 
 	return (
-		<div id="cesiumContainer" className="h-screen w-screen" />
+		<div id="cesiumContainer" className="h-screen w-screen">
+			{
+				$satellites.map((sat) => (
+					<Satellites key={sat._id} id={sat._id} />
+				))
+			}
+		</div>
 	);
 }

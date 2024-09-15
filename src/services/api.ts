@@ -1,24 +1,25 @@
 import { API_ENDPOINT } from "../consts";
 
+import type { ClassicalOrbitalElements, StateElements } from "@/types/app";
+
 
 type PropagateResponse = {
 	message: string;
-	statesSat: number[][];
+	statesSat: StateElements[];
 	statesGeocSat: number[][];
 };
 
 const propagate = async (	
 	time: number,
-	elements: number[], // Either coes or state vector
+	elements: StateElements | ClassicalOrbitalElements, // Either coes or state vector
 	propagationSpan: number,
 	propagationStep: number,
 	fromState: boolean = false,
 ) : Promise<PropagateResponse> => {
-
 	const payload = {
 		from_state: fromState,
 		time,
-		elements,
+		elements: Object.values(elements),
 		propagation_span: propagationSpan,
 		propagation_step: propagationStep,
 	};
