@@ -1,17 +1,16 @@
 import { API_ENDPOINT } from "../consts";
 
-import type { ClassicalOrbitalElements, StateElements } from "@/types/app";
+import type { ClassicalOrbitalElements } from "@/types/app";
 
 
 type PropagateResponse = {
 	message: string;
-	statesSat: StateElements[];
-	statesGeocSat: number[][];
+	statesSat: number[][];
 };
 
 const propagate = async (	
 	time: number,
-	elements: StateElements | ClassicalOrbitalElements, // Either coes or state vector
+	elements: ClassicalOrbitalElements | number[], // Either coes or state vector
 	propagationSpan: number,
 	propagationStep: number,
 	fromState: boolean = false,
@@ -35,8 +34,7 @@ const propagate = async (
 			throw new Error(`Error: ${response.statusText}`);
 		}
 
-		const data: PropagateResponse = await response.json();
-		return data;
+		return await response.json();
 	} catch (error) {
 		console.error("Error calling propagate API:", error);
 		throw error;

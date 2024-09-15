@@ -1,12 +1,11 @@
 import { propagate } from "@/services/api";
 import { addState } from "@/stores/states.store";
-import { generateId } from "@/lib/utils";
-import type { ClassicalOrbitalElements, StateElements } from "@/types/app";
+import type { ClassicalOrbitalElements } from "@/types/app";
 
 export class Satellite {
 	id: string;
 	coes: ClassicalOrbitalElements;
-	states: StateElements[];
+	states: number[][];
 	currentStateIndex: number;
 	requestInProgress: boolean;
 

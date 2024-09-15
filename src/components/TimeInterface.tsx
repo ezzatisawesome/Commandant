@@ -12,22 +12,13 @@ export default function TimeInterface() {
     const multipliers = [2, 5, 10, 25, 50, 100, 150, 200, 250, 500];
 
     const handleTogglePlay = () => {
-        if ($viewer) {
-            if (isPlaying) {
-                // Pause the clock
-                $viewer.clock.shouldAnimate = false;
-            } else {
-                // Start the clock
-                $viewer.clock.shouldAnimate = true;
-            }
-        }
+        if ($viewer) $viewer.clock.shouldAnimate = !isPlaying;
         setIsPlaying(!isPlaying);
     };
 
     const incrementMultiplier = () => {
         setMultiplierIndex((prevIndex) => (prevIndex + 1) % multipliers.length);
         if ($viewer) {
-            // Set the clock multiplier to the new value
             $viewer.clock.multiplier = multipliers[(multiplierIndex + 1) % multipliers.length];
         }
     };
@@ -35,7 +26,6 @@ export default function TimeInterface() {
     const decrementMultiplier = () => {
         setMultiplierIndex((prevIndex) => (prevIndex - 1 + multipliers.length) % multipliers.length);
         if ($viewer) {
-            // Set the clock multiplier to the new value
             $viewer.clock.multiplier = multipliers[(multiplierIndex - 1 + multipliers.length) % multipliers.length];
         }
     };

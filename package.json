@@ -36,6 +36,7 @@
     "uuid": "^10.0.0"
   },
   "devDependencies": {
+    "@types/uuid": "^10.0.0",
     "vite-plugin-cesium": "^1.2.23"
   }
 }

@@ -1,16 +1,16 @@
 import { useStore } from "@nanostores/react"
 import { PlusIcon, TrashIcon } from '@radix-ui/react-icons';
 
-import type { Satellite, ClassicalOrbitalElements } from '@/types/app';
+import type { Orbit, ClassicalOrbitalElements } from '@/types/app';
 import { generateId } from '@/lib/utils';
-import { $satellitesStore, addSatellite, updateSatellitePropById, removeSatelliteById } from '@/stores/satellite.store';
+import { $orbitStore, addOrbit, updateOrbitPropById, removeOrbitById } from '@/stores/orbit.store';
 import { Button } from '@/ui/button';
 import { Label } from "@/ui/label"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 
 
 export default function SatelliteInterface() {
-    const $satellites = useStore($satellitesStore);
+    const $orbits = useStore($orbitStore);
 
     const handleAddSatellite = () => {
         const newSatellite = {
@@ -23,15 +23,15 @@ export default function SatelliteInterface() {
             argumentOfPeriapses: 0, // degrees
             trueAnomaly: 0, // degrees
         };
-        addSatellite(newSatellite);
+        addOrbit(newSatellite);
     };
 
     const handleChange = (id: string, key: keyof ClassicalOrbitalElements, value: number) => {
-        updateSatellitePropById(id, key, value);
+        updateOrbitPropById(id, key, value);
     };
 
     const handleDeleteSatellite = (id: string) => {
-        removeSatelliteById(id);
+        removeOrbitById(id);
     };
 
     const orbitalElements = [
@@ -49,10 +49,10 @@ export default function SatelliteInterface() {
                 Add Satellite <PlusIcon className="ml-2 w-4 h-4" />
             </Button>
             <div className="grid gap-1 pt-2">
-                {$satellites.map((sat: Satellite) => (
-                    <Popover key={sat._id}>
+                {$orbits.map((o: Orbit) => (
+                    <Popover key={o._id}>
                         <PopoverTrigger asChild>
-                            <div className="hover:underline hover:cursor-pointer text-xs p-0 m-0">{sat.name}</div>
+                            <div className="hover:underline hover:cursor-pointer text-xs p-0 m-0">{o.name}</div>
                         </PopoverTrigger>
                         <PopoverContent className="ml-2 grid gap-1.5 w-min shadow-lg">
                             {orbitalElements.map(element => (
@@ -60,13 +60,13 @@ export default function SatelliteInterface() {
                                     <Label className='w-5 font-light'>{element.label}:</Label>
                                     <input
                                         type="number"
-                                        value={sat[element.key as keyof ClassicalOrbitalElements]}
-                                        onChange={e => handleChange(sat._id, element.key as keyof ClassicalOrbitalElements, parseFloat(e.target.value))}
+                                        value={o[element.key as keyof ClassicalOrbitalElements]}
+                                        onChange={e => handleChange(o._id, element.key as keyof ClassicalOrbitalElements, parseFloat(e.target.value))}
                                         className="bg-transparent border-b focus:outline-none focus:ring-0 text-center text-sm"
                                     />
                                 </div>
                             ))}
-                            <Button onClick={() => handleDeleteSatellite(sat._id)} variant="ghost" className="mt-2 text-xs h-6">
+                            <Button onClick={() => handleDeleteSatellite(o._id)} variant="ghost" className="mt-2 text-xs h-6">
                                 Delete <TrashIcon className="ml-2 w-4 h-4" />
                             </Button>
                         </PopoverContent>

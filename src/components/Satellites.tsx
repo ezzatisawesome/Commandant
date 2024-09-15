@@ -6,7 +6,7 @@ import { Satellite } from "@/services/Satellite";
 import { $viewerStore } from "@/stores/cesium.store";
 import { $timeStore } from "@/stores/states.store";
 import { $statesStore } from "@/stores/states.store";
-import { getSatelliteById } from "@/stores/satellite.store";
+import { getOrbitById } from "@/stores/orbit.store";
 
 interface ISatelliteProps {
     id: string;
@@ -15,13 +15,13 @@ interface ISatelliteProps {
 export default function Satellites(props: ISatelliteProps) {
     const $viewer = useStore($viewerStore);
     const $states = useStore($statesStore);
-    const state = $states[props.id]
     const $time = useStore($timeStore);
-
+    
     const stateRef = useRef<number>(0);
 	const satelliteRef = useRef<Satellite>(); // Ref to store the Satellite instance
-
-    const sat = getSatelliteById(props.id);
+    
+    const state = $states[props.id]
+    const sat = getOrbitById(props.id);
 
     useEffect(() => {
         if (sat) {
@@ -36,7 +36,6 @@ export default function Satellites(props: ISatelliteProps) {
             satelliteRef.current = new Satellite(props.id, params);
             satelliteRef.current.init();
         }
-
     }, [])
 
 
@@ -53,19 +52,13 @@ export default function Satellites(props: ISatelliteProps) {
                         stateRef.current = stateIndex;
 
                         if (stateIndex + 500 > state.length && state.length !== 0) {
-                            console.log('propagating')
                             satelliteRef.current?.propagate(true);
-                        } else {
-                            console.log('not propagating')
                         }
 
-                        // console.log(state.slice(stateRef.current, stateRef.current + 500))
-
-						const slicedStates = state.slice(stateRef.current, stateRef.current + 500).map((s) => {
-                            // console.log(s)
-							return Cartesian3.fromElements(s[0] * 1000, s[1] * 1000, s[2] * 1000);
+						const slicedStates = state.slice(stateRef.current, stateRef.current + 500).map(s => {
+                            const [x, y, z] = s;
+							return Cartesian3.fromElements(x * 1000, y * 1000, z * 1000);
 						});
-
 
 						return slicedStates;
 					}, false),
@@ -76,7 +69,5 @@ export default function Satellites(props: ISatelliteProps) {
         }
     }, [$states])
 
-    return (
-        <></>
-    )
+    return null;
 }
