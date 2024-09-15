@@ -6,7 +6,7 @@ import "cesium/Build/Cesium/Widgets/widgets.css";
 import { $viewerStore } from "@/stores/cesium.store";
 import { $orbitStore } from "@/stores/orbit.store";
 import { $timeStore } from "@/stores/states.store";
-import Satellites from "./Satellites";
+import Satellite from "./Satellite";
 
 
 export default function Test() {
@@ -45,7 +45,7 @@ export default function Test() {
 		<div id="cesiumContainer" className="h-screen w-screen">
 			{
 				$orbits.map((sat) => (
-					<Satellites key={sat._id} id={sat._id} />
+					<Satellite key={sat._id} id={sat._id} />
 				))
 			}
 		</div>
