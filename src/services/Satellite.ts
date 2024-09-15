@@ -33,6 +33,7 @@ export class Satellite {
 			1,
 			withState
 		);
+		
 		this.states.push(...response.statesSat);
 		addState(this.id, response.statesSat);
 
