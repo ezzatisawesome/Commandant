@@ -45,19 +45,21 @@ export default function OrbitCore(props: IOrbitProps) {
             <PopoverTrigger asChild>
                 <div className="hover:underline hover:cursor-pointer text-xs p-0 m-0">{props.orbit.name}</div>
             </PopoverTrigger>
-            <PopoverContent className="ml-2 grid gap-1.5 w-min shadow-lg">
-                <input
-                    type="text"
-                    value={renameValue}
-                    onChange={e => setRenameValue(e.target.value)}
-                    onBlur={e => handleRenameSatellite(props.orbit._id, e.target.value)}
-                    onKeyDown={e => {
-                        if (e.key === 'Enter') {
-                            handleRenameSatellite(props.orbit._id, e.currentTarget.value);
-                        }
-                    }}
-                    className="bg-transparent border-b focus:outline-none focus:ring-0 text-center text-sm"
-                />
+            <PopoverContent className="ml-2 grid gap-1.5 w-min shadow-lg p-3">
+                <div className='flex justify-center border p-1 mb-2'>
+                    <input
+                        type="text"
+                        value={renameValue}
+                        onChange={e => setRenameValue(e.target.value)}
+                        onBlur={e => handleRenameSatellite(props.orbit._id, e.target.value)}
+                        onKeyDown={e => {
+                            if (e.key === 'Enter') {
+                                handleRenameSatellite(props.orbit._id, e.currentTarget.value);
+                            }
+                        }}
+                        className="bg-transparent focus:outline-none focus:ring-0 text-center text-sm"
+                    />
+                </div>
                 {orbitalElements.map(element => (
                     <div key={element.key} className="flex items-center gap-2">
                         <Label className='w-5 font-light'>{element.label}:</Label>
