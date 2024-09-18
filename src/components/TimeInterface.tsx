@@ -4,12 +4,12 @@ import { PlayIcon, PauseIcon, DoubleArrowLeftIcon, DoubleArrowRightIcon } from '
 
 import { $viewerStore } from '@/stores/cesium.store';
 
-const multipliers = [-500, -250, -200, -150, -100, -50, -25, -10, -5, -2, 1, 2, 5, 10, 25, 50, 100, 150, 200, 250, 500];
+const multipliers = [-500, -250, -200, -150, -100, -50, -25, -10, -5, -2, -1, 1, 2, 5, 10, 25, 50, 100, 150, 200, 250, 500];
 
 export default function TimeInterface() {
     const $viewer = useStore($viewerStore);
     const [isPlaying, setIsPlaying] = useState(false);
-    const [multiplierIndex, setMultiplierIndex] = useState(Math.floor(multipliers.length / 2));
+    const [multiplierIndex, setMultiplierIndex] = useState(multipliers.length / 2);
 
 
     const handleTogglePlay = () => {

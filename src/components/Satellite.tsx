@@ -14,10 +14,8 @@ interface ISatelliteProps {
 export default function Satellites(props: ISatelliteProps) {
     const $viewer = useStore($viewerStore);
     const $time = useStore($timeStore);
-    
-    const stateRef = useRef<number>(0);
-	const satelliteRef = useRef<Satellite>(); // Ref to store the Satellite instance
-    
+    const satelliteRef = useRef<Satellite>(); // Ref to store the Satellite instance
+
     useEffect(() => {
         const orbit = getOrbitById(props.id);
         if (orbit) {
@@ -34,34 +32,52 @@ export default function Satellites(props: ISatelliteProps) {
         }
     }, [])
 
-
     useEffect(() => {
         const sat = satelliteRef.current;
         if ($viewer && sat) {
             const t0 = JulianDate.toDate($time).getTime() / 1000; // Initial start time in seconds
             $viewer.entities.add({
                 polyline: {
-					positions: new CallbackProperty((time, result) => {
-						const currentTime = JulianDate.toDate(time).getTime() / 1000;
-						const stateIndex = Math.floor(currentTime - t0);
-
-                        // Update the state index
-                        stateRef.current = stateIndex;
+                    positions: new CallbackProperty((time, result) => {
+                        const currentTime = JulianDate.toDate(time).getTime() / 1000;
+                        const stateIndex = Math.floor(currentTime - t0);
 
                         if (stateIndex + 500 > sat.states.length && sat.states.length !== 0) {
                             satelliteRef.current?.propagate(true);
+                        } else if (Math.abs(stateIndex) + 500 > sat.nStates.length && sat.nStates.length !== 0) {
+                            satelliteRef.current?.propagate(true, true);
                         }
 
-						const slicedStates = satelliteRef.current?.states.slice(stateRef.current, stateRef.current + 500).map(s => {
-                            const [x, y, z] = s;
-							return Cartesian3.fromElements(x * 1000, y * 1000, z * 1000);
-						});
+                        if (stateIndex >= 0) {
+                            return satelliteRef.current?.states.slice(stateIndex, stateIndex + 500).map(s => {
+                                const [x, y, z] = s;
+                                return Cartesian3.fromElements(x * 1000, y * 1000, z * 1000);
+                            });
+                        } else if (stateIndex < 0 && stateIndex >= -500) {
+                            const arr = [];
+                            if (satelliteRef.current) {
+                                arr.push(...satelliteRef.current?.states.slice(0, stateIndex + 500).map(s => {
+                                    const [x, y, z] = s;
+                                    return Cartesian3.fromElements(x * 1000, y * 1000, z * 1000);
+                                }))
+    
+                                arr.push(...satelliteRef.current?.nStates.slice(0, Math.abs(stateIndex)).map(s => {
+                                    const [x, y, z] = s;
+                                    return Cartesian3.fromElements(x * 1000, y * 1000, z * 1000);
+                                }))
+                            }
+                            return arr
+                        } else {
+                            return satelliteRef.current?.nStates.slice(Math.abs(stateIndex) - 500, Math.abs(stateIndex)).map(s => {
+                                const [x, y, z] = s;
+                                return Cartesian3.fromElements(x * 1000, y * 1000, z * 1000);
+                            })
+                        }
 
-						return slicedStates;
-					}, false),
-					width: 2,
-					material: Color.CYAN, // Orbit track color
-				}
+                    }, false),
+                    width: 2,
+                    material: Color.CYAN, // Orbit track color
+                }
             })
         }
     }, [satelliteRef.current?.states])
