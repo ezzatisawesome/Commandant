@@ -16,6 +16,11 @@ export default function Satellites(props: ISatelliteProps) {
     const $time = useStore($timeStore);
     const satelliteRef = useRef<Satellite>(); // Ref to store the Satellite instance
 
+    const getCartesian = (pos: number[]) => {
+        const [x, y, z] = pos;
+        return Cartesian3.fromElements(x * 1000, y * 1000, z * 1000);
+    }
+
     useEffect(() => {
         const orbit = getOrbitById(props.id);
         if (orbit) {
@@ -43,35 +48,31 @@ export default function Satellites(props: ISatelliteProps) {
                         const stateIndex = Math.floor(currentTime - t0);
 
                         if (stateIndex + 500 > sat.states.length && sat.states.length !== 0) {
-                            satelliteRef.current?.propagate(true);
+                            sat.propagate(true);
                         } else if (Math.abs(stateIndex) + 500 > sat.nStates.length && sat.nStates.length !== 0) {
-                            satelliteRef.current?.propagate(true, true);
+                            sat.propagate(true, true);
                         }
 
                         if (stateIndex >= 0) {
-                            return satelliteRef.current?.states.slice(stateIndex, stateIndex + 500).map(s => {
-                                const [x, y, z] = s;
-                                return Cartesian3.fromElements(x * 1000, y * 1000, z * 1000);
-                            });
+                            return sat.states
+                                .slice(stateIndex, stateIndex + 500)
+                                .map(s => getCartesian(s));
                         } else if (stateIndex < 0 && stateIndex >= -500) {
                             const arr = [];
-                            if (satelliteRef.current) {
-                                arr.push(...satelliteRef.current?.states.slice(0, stateIndex + 500).map(s => {
-                                    const [x, y, z] = s;
-                                    return Cartesian3.fromElements(x * 1000, y * 1000, z * 1000);
-                                }))
-    
-                                arr.push(...satelliteRef.current?.nStates.slice(0, Math.abs(stateIndex)).map(s => {
-                                    const [x, y, z] = s;
-                                    return Cartesian3.fromElements(x * 1000, y * 1000, z * 1000);
-                                }))
-                            }
+
+                            arr.push(...sat.states
+                                .slice(0, stateIndex + 500)
+                                .map(s => getCartesian(s)))
+
+                            arr.push(...sat.nStates
+                                .slice(0, Math.abs(stateIndex))
+                                .map(s => getCartesian(s)))
+
                             return arr
                         } else {
-                            return satelliteRef.current?.nStates.slice(Math.abs(stateIndex) - 500, Math.abs(stateIndex)).map(s => {
-                                const [x, y, z] = s;
-                                return Cartesian3.fromElements(x * 1000, y * 1000, z * 1000);
-                            })
+                            return sat.nStates
+                                .slice(Math.abs(stateIndex) - 500, Math.abs(stateIndex))
+                                .map(s => getCartesian(s));
                         }
 
                     }, false),
