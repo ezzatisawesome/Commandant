@@ -14,6 +14,8 @@ export default defineConfig({
     })
   ],
 	vite: {
-		plugins: [cesium()],
+		plugins: [cesium({
+      rebuildCesium: true,
+    })],
 	},
 });
