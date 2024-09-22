@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useStore } from "@nanostores/react";
-import { CallbackProperty, Cartesian3, Color, JulianDate } from "cesium";
+import * as Cesium from "cesium";
 
 import { Satellite } from "@/services/Satellite";
 import { $viewerStore } from "@/stores/cesium.store";
@@ -18,7 +18,7 @@ export default function Satellites(props: ISatelliteProps) {
 
     const getCartesian = (pos: number[]) => {
         const [x, y, z] = pos;
-        return Cartesian3.fromElements(x * 1000, y * 1000, z * 1000);
+        return Cesium.Cartesian3.fromElements(x * 1000, y * 1000, z * 1000);
     }
 
     useEffect(() => {
@@ -40,11 +40,11 @@ export default function Satellites(props: ISatelliteProps) {
     useEffect(() => {
         const sat = satelliteRef.current;
         if ($viewer && sat) {
-            const t0 = JulianDate.toDate($time).getTime() / 1000; // Initial start time in seconds
+            const t0 = Cesium.JulianDate.toDate($time).getTime() / 1000; // Initial start time in seconds
             $viewer.entities.add({
                 polyline: {
-                    positions: new CallbackProperty((time, result) => {
-                        const currentTime = JulianDate.toDate(time).getTime() / 1000;
+                    positions: new Cesium.CallbackProperty((time, result) => {
+                        const currentTime = Cesium.JulianDate.toDate(time).getTime() / 1000;
                         const stateIndex = Math.floor(currentTime - t0);
 
                         if (stateIndex + 500 > sat.states.length && sat.states.length !== 0) {
@@ -76,7 +76,7 @@ export default function Satellites(props: ISatelliteProps) {
                         }
                     }, false),
                     width: 2,
-                    material: Color.CYAN, // Orbit track color
+                    material: Cesium.Color.CYAN, // Orbit track color
                 }
             });
         }

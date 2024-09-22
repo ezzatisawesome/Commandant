@@ -15,21 +15,5 @@ export default defineConfig({
   ],
 	vite: {
 		plugins: [cesium()],
-    resolve: {
-      alias: {
-        // Add the Cesium module alias
-        cesium: resolve('node_modules/cesium')
-      },
-    },
-    build: {
-      rollupOptions: {
-        external: ['cesium'],
-        output: {
-          manualChunks: {
-            'cesium': ['cesium']
-          }
-        }
-      }
-    }
-	},
+  }
 });
