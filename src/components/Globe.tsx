@@ -8,6 +8,8 @@ import { $orbitStore } from "@/stores/orbit.store";
 import { $timeStore } from "@/stores/states.store";
 import Satellite from "./Satellite";
 
+import { JulianDate } from "cesium";
+
 
 export default function Test() {
 	const $viewer = useStore($viewerStore);
@@ -32,6 +34,7 @@ export default function Test() {
 		// Set up clock.
 		viewer.clock.startTime = $time.clone();
 		viewer.clock.currentTime = $time.clone();
+		viewer.timeline.zoomTo($time.clone(), JulianDate.fromDate(new Date(2024, 2, 21, 0, 0, 0)));
 
 		// Cleanup Cesium Viewer on component unmount
 		return () => {

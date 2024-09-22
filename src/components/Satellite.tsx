@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useStore } from "@nanostores/react";
-import { CallbackProperty, Cartesian3, Color, JulianDate } from "cesium";
+import { CallbackProperty, Cartesian3, Color, JulianDate, PolygonHierarchy } from "cesium";
 
 import { Satellite } from "@/services/Satellite";
 import { $viewerStore } from "@/stores/cesium.store";
@@ -74,12 +74,11 @@ export default function Satellites(props: ISatelliteProps) {
                                 .slice(Math.abs(stateIndex) - 500, Math.abs(stateIndex))
                                 .map(s => getCartesian(s));
                         }
-
                     }, false),
                     width: 2,
                     material: Color.CYAN, // Orbit track color
                 }
-            })
+            });
         }
     }, [satelliteRef.current?.states])
 
