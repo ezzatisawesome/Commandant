@@ -37,6 +37,6 @@
   },
   "devDependencies": {
     "@types/uuid": "^10.0.0",
-    "vite-plugin-cesium": "^1.2.23"
+    "vite-plugin-cesium-build": "^0.4.5"
   }
 }

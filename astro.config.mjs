@@ -1,8 +1,8 @@
-import { resolve } from 'path';
 import { defineConfig } from "astro/config";
 import react from "@astrojs/react";
 import tailwind from "@astrojs/tailwind";
-import cesium from "vite-plugin-cesium"; // Import the plugin for Cesium
+import cesium from 'vite-plugin-cesium-build'
+
 
 // https://astro.build/config
 export default defineConfig({
@@ -14,6 +14,8 @@ export default defineConfig({
     })
   ],
 	vite: {
-		plugins: [cesium()],
-  }
+    plugins: [
+      cesium()
+    ],
+  },
 });
