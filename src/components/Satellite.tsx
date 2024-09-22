@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useStore } from "@nanostores/react";
-import { CallbackProperty, Cartesian3, Color, JulianDate, PolygonHierarchy } from "cesium";
+import { CallbackProperty, Cartesian3, Color, JulianDate } from "cesium";
 
 import { Satellite } from "@/services/Satellite";
 import { $viewerStore } from "@/stores/cesium.store";
