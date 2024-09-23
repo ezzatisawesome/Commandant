@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { useStore } from "@nanostores/react";
-import * as Cesium from "cesium";
+import { Viewer } from "cesium";
 import "cesium/Build/Cesium/Widgets/widgets.css";
 
 import { $viewerStore } from "@/stores/cesium.store";
@@ -16,7 +16,7 @@ export default function Test() {
 
 	useEffect(() => {
 		// Initialize Cesium Viewer.
-		const viewer = new Cesium.Viewer("cesiumContainer", {
+		const viewer = new Viewer("cesiumContainer", {
 			timeline: false,
 			geocoder: false, // Search button
 			homeButton: false,

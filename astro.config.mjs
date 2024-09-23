@@ -1,8 +1,10 @@
 import { defineConfig } from "astro/config";
 import react from "@astrojs/react";
 import tailwind from "@astrojs/tailwind";
-import cesium from 'vite-plugin-cesium-build'
+import { viteStaticCopy } from 'vite-plugin-static-copy'
 
+const cesiumBaseUrl = '_astro/'
+const cesiumSource = 'node_modules/cesium/Build/Cesium'
 
 // https://astro.build/config
 export default defineConfig({
@@ -13,9 +15,16 @@ export default defineConfig({
       applyBaseStyles: false
     })
   ],
-	vite: {
+  vite: {
     plugins: [
-      cesium()
+      viteStaticCopy({
+        targets: [
+          { src: `${cesiumSource}/ThirdParty`, dest: cesiumBaseUrl },
+          { src: `${cesiumSource}/Workers`, dest: cesiumBaseUrl },
+          { src: `${cesiumSource}/Assets`, dest: cesiumBaseUrl },
+          { src: `${cesiumSource}/Widgets`, dest: cesiumBaseUrl },
+        ],
+      }),
     ],
   },
 });
