@@ -3,6 +3,7 @@
 
 interface ImportMetaEnv {
 	readonly PUBLIC_CESIUM_KEY: string;
+	readonly API_ENDPOINT: string;
 }
 
 interface ImportMeta {

@@ -1,4 +1,4 @@
-import { API_ENDPOINT } from "../consts";
+import envs from "@/lib/envs"
 
 import type { ClassicalOrbitalElements } from "@/types/app";
 
@@ -24,7 +24,7 @@ const propagate = async (
 	};
 
 	try {
-		const response = await fetch(`${API_ENDPOINT}/propagate`, {
+		const response = await fetch(`${envs.API_ENDPOINT}/propagate`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(payload),
