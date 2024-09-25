@@ -9,6 +9,7 @@ export class Satellite {
 	nStates: number[][];
 	currentStateIndex: number;
 	requestInProgress: boolean;
+	orbitalPeriod: number;
 
 	constructor(id: string, coes: ClassicalOrbitalElements) {
 		this.id = id;
@@ -17,6 +18,7 @@ export class Satellite {
 		this.nStates = [];
 		this.currentStateIndex = 0;
 		this.requestInProgress = false;
+		this.orbitalPeriod = Satellite.getOrbitalPeriod(coes.semiMajorAxis);
 	}
 
 	// Async initialization method.
@@ -32,7 +34,7 @@ export class Satellite {
 		const response = await propagate(
 			0,
 			withState ? (!reverse ? this.states[this.states.length - 1] : this.nStates[this.nStates.length - 1]) : this.coes,
-			reverse ? -2500 : 2500,
+			reverse ? -this.orbitalPeriod : this.orbitalPeriod,
 			1,
 			withState
 		);
@@ -46,5 +48,10 @@ export class Satellite {
 
 	incrementIndex() {
 		this.currentStateIndex += 1;
+	}
+
+	static getOrbitalPeriod(sma: number): number {
+		const mu = 3.986004418e5;
+		return 2 * Math.PI * Math.sqrt(Math.pow(sma, 3) / mu);
 	}
 }

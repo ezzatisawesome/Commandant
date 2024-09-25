@@ -4,7 +4,7 @@ import { PlayIcon, PauseIcon, DoubleArrowLeftIcon, DoubleArrowRightIcon } from '
 
 import { $viewerStore } from '@/stores/cesium.store';
 
-const multipliers = [-500, -250, -200, -150, -100, -50, -25, -10, -5, -2, -1, 1, 2, 5, 10, 25, 50, 100, 150, 200, 250, 500];
+const multipliers = [-500, -250, -200, -150, -100, -50, -25, -10, -5, -2, -1, 1, 2, 5, 10, 25, 50, 100, 150, 200, 250, 500, 1000, 2000];
 
 export default function TimeInterface() {
     const $viewer = useStore($viewerStore);
