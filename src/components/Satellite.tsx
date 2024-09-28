@@ -5,7 +5,7 @@ import { Cartesian3, JulianDate, CallbackProperty, Color, Math as CesiumMath, He
 import { Satellite } from "@/services/Satellite";
 import { $viewerStore } from "@/stores/cesium.store";
 import { $timeStore } from "@/stores/states.store";
-import { getOrbitById } from "@/stores/orbit.store";
+import { getSatById } from "@/stores/sat.store";
 
 interface ISatelliteProps {
     id: string;
@@ -22,7 +22,7 @@ export default function Satellites(props: ISatelliteProps) {
     }
 
     useEffect(() => {
-        const orbit = getOrbitById(props.id);
+        const orbit = getSatById(props.id);
         if (orbit) {
             const params = {
                 semiMajorAxis: orbit.semiMajorAxis,
@@ -32,7 +32,7 @@ export default function Satellites(props: ISatelliteProps) {
                 argumentOfPeriapses: orbit.argumentOfPeriapses,
                 trueAnomaly: orbit.trueAnomaly
             }
-            satelliteRef.current = new Satellite(props.id, params);
+            satelliteRef.current = new Satellite(props.id, params, orbit.sensorRadius);
             satelliteRef.current.init();
         }
     }, [])
@@ -115,7 +115,7 @@ export default function Satellites(props: ISatelliteProps) {
                     pixelSize: 4,
                     color: Color.GHOSTWHITE
                 },
-                cylinder: {
+                cylinder: sat.sensorRadius ? {
                     length: new CallbackProperty((time) => {
                         if (!time) return 0;
 
@@ -137,10 +137,10 @@ export default function Satellites(props: ISatelliteProps) {
                         return altitude; // Set the length of the cone to the altitude
                     }, false),
                     topRadius: 0.0,   // Top radius of the cone (0 for a sharp tip)
-                    bottomRadius: 200000.0, // Bottom radius (defines the spread of the cone)
+                    bottomRadius: sat.sensorRadius, // Bottom radius (defines the spread of the cone)
                     material: Color.RED.withAlpha(0.3), // Cone color with transparency
                     heightReference: HeightReference.CLAMP_TO_GROUND, // No height clamping
-                },
+                } : undefined,
             });
         }
     }, [satelliteRef.current?.states])

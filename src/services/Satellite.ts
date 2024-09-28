@@ -10,8 +10,9 @@ export class Satellite {
 	currentStateIndex: number;
 	requestInProgress: boolean;
 	orbitalPeriod: number;
+	sensorRadius?: number;
 
-	constructor(id: string, coes: ClassicalOrbitalElements) {
+	constructor(id: string, coes: ClassicalOrbitalElements, sensorRadius?: number) {
 		this.id = id;
 		this.coes = coes;
 		this.states = [];
@@ -19,6 +20,7 @@ export class Satellite {
 		this.currentStateIndex = 0;
 		this.requestInProgress = false;
 		this.orbitalPeriod = Satellite.getOrbitalPeriod(coes.semiMajorAxis);
+		this.sensorRadius = sensorRadius;
 	}
 
 	// Async initialization method.

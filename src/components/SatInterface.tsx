@@ -1,15 +1,15 @@
 import { useStore } from "@nanostores/react"
 import { PlusIcon } from '@radix-ui/react-icons';
 
-import type { Orbit } from '@/types/app';
+import type { Satellite } from '@/types/app';
 import { generateId } from '@/lib/utils';
-import { $orbitStore, addOrbit } from '@/stores/orbit.store';
+import { $satStore, addSat } from '@/stores/sat.store';
 import { Button } from '@/ui/button';
-import OrbitCore from "@/components/OrbitCore";
+import SatCore from "@/components/SatCore";
 
 
 export default function OrbitInterface() {
-    const $orbits = useStore($orbitStore);
+    const $orbits = useStore($satStore);
 
     const handleAddSatellite = () => {
         const newSatellite = {
@@ -22,7 +22,7 @@ export default function OrbitInterface() {
             argumentOfPeriapses: 0, // degrees
             trueAnomaly: 0, // degrees
         };
-        addOrbit(newSatellite);
+        addSat(newSatellite);
     };
 
     return (
@@ -31,8 +31,8 @@ export default function OrbitInterface() {
                 Add Satellite <PlusIcon className="ml-2 w-4 h-4" />
             </Button>
             <div className="grid gap-1 pt-2">
-                {$orbits.map((o: Orbit) => (
-                    <OrbitCore key={o._id} orbit={o}/>
+                {$orbits.map((s: Satellite) => (
+                    <SatCore key={s._id} sat={s}/>
                 ))}
             </div>
         </div>

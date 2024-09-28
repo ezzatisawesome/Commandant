@@ -4,14 +4,14 @@ import { Viewer } from "cesium";
 import "cesium/Build/Cesium/Widgets/widgets.css";
 
 import { $viewerStore } from "@/stores/cesium.store";
-import { $orbitStore } from "@/stores/orbit.store";
+import { $satStore } from "@/stores/sat.store";
 import { $timeStore } from "@/stores/states.store";
 import Satellite from "./Satellite";
 
 
 export default function Test() {
 	const $viewer = useStore($viewerStore);
-	const $orbits = useStore($orbitStore);
+	const $sats = useStore($satStore);
 	const $time = useStore($timeStore);
 
 	useEffect(() => {
@@ -44,8 +44,8 @@ export default function Test() {
 	return (
 		<div id="cesiumContainer" className="h-screen w-screen">
 			{
-				$orbits.map((sat) => (
-					<Satellite key={sat._id} id={sat._id} />
+				$sats.map((s) => (
+					<Satellite key={s._id} id={s._id} />
 				))
 			}
 		</div>
