@@ -46,8 +46,12 @@ export default function Satellites(props: ISatelliteProps) {
                 polyline: {
                     positions: new CallbackProperty((time) => {
                         if (!time) return [];
+                        const statesLen = sat.states.length;
+                        const nStatesLen = sat.nStates.length;
+                        const period = sat.orbitalPeriod;
+
                         const currentTime = JulianDate.toDate(time).getTime() / 1000;
-                        const stateIndex = Math.floor(currentTime - t0);
+                        const stateIndex = Math.floor((currentTime - t0) / period) * period;
 
                         // Add in a Cesium sphere entity to represent the satellite
                         $viewer.entities.add({
@@ -57,9 +61,6 @@ export default function Satellites(props: ISatelliteProps) {
                             }
                         });
 
-                        const statesLen = sat.states.length;
-                        const nStatesLen = sat.nStates.length;
-                        const period = sat.orbitalPeriod;
 
                         if (stateIndex + period > statesLen && statesLen !== 0) {
                             sat.propagate(true);
