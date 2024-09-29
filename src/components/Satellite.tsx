@@ -1,8 +1,7 @@
-import React, { useEffect, useRef } from "react";
+import { useEffect, useRef } from "react";
 import { useStore } from "@nanostores/react";
-import { Cartesian3, JulianDate, CallbackProperty, Color, Math as CesiumMath, HeightReference, Entity } from "cesium";
+import { Cartesian3, JulianDate, CallbackProperty, Color, HeightReference } from "cesium";
 
-import { useDeepCompareEffect } from "@/lib/utils";
 import { Satellite } from "@/services/Satellite";
 import { $viewerStore } from "@/stores/cesium.store";
 import { $timeStore } from "@/stores/states.store";
@@ -16,7 +15,7 @@ export default function Satellites(props: ISatelliteProps) {
     const $viewer = useStore($viewerStore);
     const $time = useStore($timeStore);
     const satelliteRef = useRef<Satellite>(); // Ref to store the Satellite instance
-    const cesiumEntitiesRef = useRef<Entity[]>([]); // Ref to store the Cesium entities
+    const entitiesRef = useRef<string[]>([]);
     const sat = getSatById(props.id);
 
     const getCartesian = (pos: number[]) => {
@@ -24,19 +23,8 @@ export default function Satellites(props: ISatelliteProps) {
         return Cartesian3.fromElements(x * 1000, y * 1000, z * 1000);
     };
 
-    useDeepCompareEffect(() => {
+    useEffect(() => {
         if (!sat) return;
-
-        // console.log("Satellite updated:", sat);
-
-        // Remove old satellite and entities if they exist
-        if (satelliteRef.current) satelliteRef.current = undefined;
-        if ($viewer) cesiumEntitiesRef.current.forEach(e => {
-            $viewer.entities.remove(e);
-        });
-
-        // Clear the stored entities
-        cesiumEntitiesRef.current = [];
 
         const params = {
             semiMajorAxis: sat.semiMajorAxis,
@@ -49,20 +37,16 @@ export default function Satellites(props: ISatelliteProps) {
 
         // Create a new Satellite instance and initialize it
         satelliteRef.current = new Satellite(props.id, params, sat.sensorRadius);
-        console.log("INIT")
         satelliteRef.current.init();
-    }, [
-        sat?.semiMajorAxis,
-        sat?.eccentricity,
-        sat?.inclination,
-        sat?.longitudeAscendingNode,
-        sat?.argumentOfPeriapses,
-        sat?.trueAnomaly
-    ]);
+    }, [sat]);
 
     useEffect(() => {
         const sat = satelliteRef.current;
+
         if ($viewer && sat) {
+            // Remove existing entities
+            entitiesRef.current.forEach(id => $viewer.entities.removeById(id));
+
             const t0 = JulianDate.toDate($time).getTime() / 1000; // Initial start time in seconds
 
             // Add polyline entity for the satellite's orbit
@@ -78,12 +62,9 @@ export default function Satellites(props: ISatelliteProps) {
                         const stateIndex = Math.floor(currentTime - t0);
                         const incrementedIndex = Math.floor((currentTime - t0) / period) * period;
 
-                        // console.log(stateIndex + 0.75*period, statesLen)
                         if (stateIndex + 0.25*period > statesLen && statesLen !== 0) {
-                            console.log("propagating")
                             sat.propagate(true);
                         } else if (Math.abs(stateIndex) + 0.25*period > nStatesLen && nStatesLen !== 0) {
-                            console.log("back propagating")
                             sat.propagate(true, true);
                         }
 
@@ -113,6 +94,8 @@ export default function Satellites(props: ISatelliteProps) {
                     material: Color.CYAN, // Orbit track color
                 }
             });
+
+            polylineEntity.id
 
             // Add point entity for the satellite's current position
             const positionEntity = $viewer.entities.add({
@@ -152,20 +135,18 @@ export default function Satellites(props: ISatelliteProps) {
                             cartesianPos = Cartesian3.ZERO;
                         }
 
-                        const altitude = Cartesian3.magnitude(cartesianPos) - 6371000; // Get magnitude from Cartesian
-                        return altitude; // Set the length of the cone to the altitude
+                        return Cartesian3.magnitude(cartesianPos) - 6371000;
                     }, false),
-                    topRadius: 0.0,   // Top radius of the cone (0 for a sharp tip)
+                    topRadius: 0.0, // Top radius of the cone (0 for a sharp tip)
                     bottomRadius: sat.sensorRadius, // Bottom radius (defines the spread of the cone)
                     material: Color.RED.withAlpha(0.3), // Cone color with transparency
                     heightReference: HeightReference.CLAMP_TO_GROUND, // No height clamping
                 } : undefined,
             });
 
-            // Store the created entities so we can remove them later
-            cesiumEntitiesRef.current.push(polylineEntity, positionEntity);
+            entitiesRef.current = [polylineEntity.id, positionEntity.id];
         }
-    }, [satelliteRef.current?.states]);
+    }, [sat, satelliteRef.current?.states]);
 
     return null;
 }

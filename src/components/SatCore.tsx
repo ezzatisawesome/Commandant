@@ -2,33 +2,33 @@ import { useState } from 'react';
 import { TrashIcon } from '@radix-ui/react-icons';
 
 import type { Satellite, ClassicalOrbitalElements } from '@/types/app';
-import { updateSatPropById, removeSatById } from '@/stores/sat.store';
+import { updateSatById, removeSatById } from '@/stores/sat.store';
 import { Button } from '@/ui/button';
 import { Label } from "@/ui/label"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 
 
-export interface IOrbitProps {
+export interface ISatCoreProps {
     sat: Satellite;
 }
 
-export default function OrbitCore(props: IOrbitProps) {
+export default function OrbitCore(props: ISatCoreProps) {
     const [renameValue, setRenameValue] = useState(props.sat.name);
+    const [localSatellite, setLocalSatellite] = useState<Satellite>({...props.sat});
 
-    const handleChange = (id: string, key: keyof Satellite, value: Satellite[keyof Satellite]) => {
-        updateSatPropById(id, key, value);
+    const handleChange = (key: keyof Satellite, value: Satellite[keyof Satellite]) => {
+        setLocalSatellite(prev => ({
+            ...prev,
+            [key]: value,
+        }));
+    };
+
+    const handleSaveSatellite = () => {
+        updateSatById(localSatellite._id, localSatellite);
     };
 
     const handleDeleteSatellite = (id: string) => {
         removeSatById(id);
-    };
-
-    const handleRenameSatellite = (id: string, newName: string) => {
-        if (newName.trim() !== '') {
-            updateSatPropById(id, 'name', newName);
-        } else {
-            setRenameValue(props.sat.name); // Revert to the current name if input is empty
-        }
     };
 
     const orbitalElements = [
@@ -51,12 +51,7 @@ export default function OrbitCore(props: IOrbitProps) {
                         type="text"
                         value={renameValue}
                         onChange={e => setRenameValue(e.target.value)}
-                        onBlur={e => handleRenameSatellite(props.sat._id, e.target.value)}
-                        onKeyDown={e => {
-                            if (e.key === 'Enter') {
-                                handleRenameSatellite(props.sat._id, e.currentTarget.value);
-                            }
-                        }}
+                        onBlur={e => handleChange('name', e.target.value)}
                         className="bg-transparent focus:outline-none focus:ring-0 text-center text-sm"
                     />
                 </div>
@@ -65,8 +60,8 @@ export default function OrbitCore(props: IOrbitProps) {
                         <Label className='w-5 font-light'>{element.label}:</Label>
                         <input
                             type="number"
-                            value={props.sat[element.key as keyof ClassicalOrbitalElements]}
-                            onChange={e => handleChange(props.sat._id, element.key as keyof ClassicalOrbitalElements, parseFloat(e.target.value))}
+                            value={localSatellite[element.key as keyof ClassicalOrbitalElements] || ''}
+                            onChange={e => handleChange(element.key as keyof ClassicalOrbitalElements, parseFloat(e.target.value))}
                             className="bg-transparent border-b focus:outline-none focus:ring-0 text-center text-sm"
                         />
                     </div>
@@ -75,14 +70,20 @@ export default function OrbitCore(props: IOrbitProps) {
                     <Label className='w-5 font-light'>Sensor radius:</Label>
                     <input
                         type="number"
-                        value={props.sat.sensorRadius || 0}
-                        onChange={e => handleChange(props.sat._id, 'sensorRadius', parseFloat(e.target.value))}
+                        value={localSatellite.sensorRadius || 0}
+                        onChange={e => handleChange('sensorRadius', parseFloat(e.target.value))}
                         className="bg-transparent border-b focus:outline-none focus:ring-0 text-center text-sm"
                     />
                 </div>
-                <Button onClick={() => handleDeleteSatellite(props.sat._id)} variant="ghost" className="mt-2 text-xs h-6">
-                    Delete <TrashIcon className="ml-2 w-4 h-4" />
-                </Button>
+
+                <div className="grid grid-cols-6">
+                    <Button onClick={handleSaveSatellite} variant="ghost" className="col-span-5 text-xs h-6">
+                        Save
+                    </Button>
+                    <Button onClick={() => handleDeleteSatellite(props.sat._id)} variant="ghost" className="col-span-1 text-xs h-6 p-0">
+                        <TrashIcon className="w-4 h-4" />
+                    </Button>
+                </div>
             </PopoverContent>
         </Popover>
     );
