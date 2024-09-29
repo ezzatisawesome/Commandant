@@ -25,6 +25,7 @@ export default function Satellites(props: ISatelliteProps) {
 
     useEffect(() => {
         if (!sat) return;
+        delete satelliteRef.current;
 
         const params = {
             semiMajorAxis: sat.semiMajorAxis,

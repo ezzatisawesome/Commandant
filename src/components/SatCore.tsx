@@ -60,7 +60,7 @@ export default function OrbitCore(props: ISatCoreProps) {
                         <Label className='w-5 font-light'>{element.label}:</Label>
                         <input
                             type="number"
-                            value={localSatellite[element.key as keyof ClassicalOrbitalElements] || ''}
+                            value={localSatellite[element.key as keyof ClassicalOrbitalElements]}
                             onChange={e => handleChange(element.key as keyof ClassicalOrbitalElements, parseFloat(e.target.value))}
                             className="bg-transparent border-b focus:outline-none focus:ring-0 text-center text-sm"
                         />
