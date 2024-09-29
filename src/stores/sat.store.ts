@@ -1,9 +1,23 @@
 import { persistentAtom } from '@nanostores/persistent';
 import type { Satellite } from '@/types/app';
 
+const startingSats: Satellite[] = [
+  {
+    _id: '1',
+    name: 'Satellite 1',
+    semiMajorAxis: 6780,
+    eccentricity: 0.0001,
+    inclination: 51.6,
+    longitudeAscendingNode: 0,
+    argumentOfPeriapses: 0,
+    trueAnomaly: 0,
+    sensorRadius: 300000
+  }
+];
+
 
 // Initialize the store with an empty array
-export const $satStore = persistentAtom<Satellite[]>('orbitStore', [], {
+export const $satStore = persistentAtom<Satellite[]>('orbitStore', startingSats, {
   encode: JSON.stringify,
   decode: JSON.parse
 });
