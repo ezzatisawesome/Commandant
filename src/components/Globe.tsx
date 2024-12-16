@@ -1,13 +1,13 @@
 import { useEffect } from "react";
 import { useStore } from "@nanostores/react";
-import { Viewer } from "cesium";
+import { Viewer, Ion } from "cesium";
 import "cesium/Build/Cesium/Widgets/widgets.css";
 
+import envs from "@/lib/envs";
 import { $viewerStore } from "@/stores/cesium.store";
 import { $satStore } from "@/stores/sat.store";
 import { $timeStore } from "@/stores/states.store";
 import Satellite from "./Satellite";
-
 
 export default function Test() {
 	const $viewer = useStore($viewerStore);
@@ -16,13 +16,14 @@ export default function Test() {
 
 	useEffect(() => {
 		// Initialize Cesium Viewer.
+		Ion.defaultAccessToken = envs.CESIUM_KEY
 		const viewer = new Viewer("cesiumContainer", {
 			timeline: false,
 			geocoder: false, // Search button
 			homeButton: false,
 			navigationHelpButton: false,
 			baseLayerPicker: false, // Imagery layer picker
-			sceneModePicker: false, // Need this functionality
+			sceneModePicker: true, // Need this functionality
 			animation: false,
 			fullscreenButton: false,
 		});
