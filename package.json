@@ -1,42 +1,49 @@
 {
-  "name": "zany-zenith",
+  "name": "commandant",
+  "version": "0.1.0",
+  "private": true,
   "type": "module",
-  "version": "0.0.1",
   "scripts": {
-    "dev": "astro dev",
-    "start": "astro dev",
-    "build": "astro check && astro build",
-    "preview": "astro preview",
-    "astro": "astro"
+    "predev": "node scripts/copy-cesium.mjs",
+    "dev": "next dev",
+    "prebuild": "node scripts/copy-cesium.mjs",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "postinstall": "node scripts/copy-cesium.mjs"
   },
   "dependencies": {
-    "@astrojs/react": "^3.6.2",
     "@nanostores/persistent": "^0.10.2",
     "@nanostores/react": "^0.7.3",
     "@radix-ui/react-icons": "^1.3.0",
     "@radix-ui/react-label": "^2.1.0",
     "@radix-ui/react-popover": "^1.1.1",
     "@radix-ui/react-slot": "^1.1.0",
-    "astro": "^4.14.5",
     "cesium": "^1.120.0",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.1",
     "lucide-react": "^0.437.0",
+    "mavlink-mappings": "^1.0.22-20260311",
     "nanostores": "^0.11.3",
+    "next": "^15.5.0",
+    "node-mavlink": "^2.3.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "tailwind-merge": "^2.5.2",
-    "uuid": "^10.0.0"
+    "uuid": "^10.0.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
-    "@astrojs/check": "^0.9.3",
-    "@astrojs/tailwind": "^5.1.0",
+    "@types/node": "^20.14.0",
     "@types/react": "^18.3.5",
     "@types/react-dom": "^18.3.0",
     "@types/uuid": "^10.0.0",
+    "@types/ws": "^8.5.12",
+    "autoprefixer": "^10.4.20",
+    "playwright": "^1.62.1",
+    "postcss": "^8.4.47",
     "tailwindcss": "^3.4.10",
     "tailwindcss-animate": "^1.0.7",
-    "typescript": "^5.5.4",
-    "vite-plugin-static-copy": "^1.0.6"
+    "typescript": "^5.5.4"
   }
 }

@@ -1,7 +1,9 @@
 # build output
 dist/
-# generated types
-.astro/
+.next/
+next-env.d.ts
+# cesium assets copied at build time (scripts/copy-cesium.mjs)
+public/cesium/
 
 # dependencies
 node_modules/

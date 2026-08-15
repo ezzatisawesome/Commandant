@@ -1,3 +1,5 @@
+"use client";
+
 import { useStore } from "@nanostores/react"
 import { PlusIcon } from '@radix-ui/react-icons';
 
@@ -5,7 +7,7 @@ import type { Satellite } from '@/types/app';
 import { generateId } from '@/lib/utils';
 import { $satStore, addSat } from '@/stores/sat.store';
 import { Button } from '@/ui/button';
-import SatCore from "@/components/SatCore";
+import SatCore from "@/components/satellites/SatCore";
 
 
 export default function OrbitInterface() {

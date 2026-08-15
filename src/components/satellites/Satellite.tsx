@@ -1,6 +1,8 @@
+"use client";
+
 import { useEffect, useRef } from "react";
 import { useStore } from "@nanostores/react";
-import { Cartesian3, JulianDate, CallbackProperty, Color, HeightReference } from "cesium";
+import { Cartesian3, JulianDate, CallbackProperty, CallbackPositionProperty, Color, HeightReference } from "cesium";
 
 import { Satellite } from "@/services/Satellite";
 import { $viewerStore } from "@/stores/cesium.store";
@@ -100,7 +102,7 @@ export default function Satellites(props: ISatelliteProps) {
 
             // Add point entity for the satellite's current position
             const positionEntity = $viewer.entities.add({
-                position: new CallbackProperty((time) => {
+                position: new CallbackPositionProperty((time) => {
                     if (!time) return Cartesian3.ZERO;
 
                     const currentTime = JulianDate.toDate(time).getTime() / 1000;
