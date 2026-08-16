@@ -73,7 +73,7 @@
 /* Move Cesium's toolbar (scene-mode toggle) to the bottom-right so it no
    longer sits under the FlightHUD panel pinned at top-right. */
 .cesium-viewer-toolbar {
-  top: auto;
-  bottom: 16px;
-  right: 16px;
+  top: auto !important;
+  bottom: 16px !important;
+  right: 16px !important;
 }

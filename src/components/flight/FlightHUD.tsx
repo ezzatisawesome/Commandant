@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useStore } from "@nanostores/react";
 import { Cartesian3 } from "cesium";
+import { ChevronUp, ChevronDown } from "lucide-react";
 
 import { $aircraftStore, $aircraftEntityStore, $historyStore } from "@/stores/aircraft.store";
 import { $viewerStore } from "@/stores/cesium.store";
@@ -47,6 +48,7 @@ export default function FlightHUD() {
 	const viewer = useStore($viewerStore);
 	const entity = useStore($aircraftEntityStore);
 	const [following, setFollowing] = useState(false);
+	const [collapsed, setCollapsed] = useState(false);
 
 	// Extract per-field series from the downsampled history for the sparklines.
 	const series = (key: keyof (typeof history)[number]) =>
@@ -82,15 +84,25 @@ export default function FlightHUD() {
 
 	return (
 		<div className="w-64 rounded-md border border-white/10 bg-black/60 p-3 backdrop-blur">
-			<div className="mb-2 flex items-center justify-end">
+			<div className={`flex items-center justify-between ${collapsed ? "" : "mb-2"}`}>
+				<button
+					onClick={() => setCollapsed((c) => !c)}
+					className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-white/50 hover:text-white"
+					title={collapsed ? "Expand telemetry" : "Collapse telemetry"}
+				>
+					{collapsed ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronUp className="h-3.5 w-3.5" />}
+					Telemetry
+				</button>
 				<span
 					className={`h-2 w-2 rounded-full ${connected ? "bg-emerald-400" : "bg-red-500"}`}
 					title={connected ? "MAVLink connected" : "No telemetry"}
 				/>
 			</div>
-			<div className="mb-3 flex items-center justify-center gap-4 px-2 py-2">
-				<AttitudeIndicator roll={f?.roll ?? 0} pitch={f?.pitch ?? 0} />
-				<Compass heading={f?.heading ?? 0} />
+			{collapsed ? null : (
+			<>
+			<div className="mb-3 flex items-center justify-center gap-3 py-2">
+				<AttitudeIndicator roll={f?.roll ?? 0} pitch={f?.pitch ?? 0} size={80} />
+				<Compass heading={f?.heading ?? 0} size={80} />
 			</div>
 			<div className="grid gap-1">
 				<Field label="Mode" value={f?.mode ?? "—"} />
@@ -111,6 +123,8 @@ export default function FlightHUD() {
 			>
 				{following ? "Stop following" : "Track aircraft"}
 			</Button>
+			</>
+			)}
 		</div>
 	);
 }
