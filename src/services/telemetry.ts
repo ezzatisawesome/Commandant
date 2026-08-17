@@ -1,5 +1,8 @@
+import { JulianDate } from "cesium";
+
 import type { TelemetryFrame } from "@/types/app";
 import { pushFrame, clearTrail } from "@/stores/aircraft.store";
+import { $viewerStore } from "@/stores/cesium.store";
 import envs from "@/lib/envs";
 
 // WebSocket client for the MAVLink->WS bridge. Auto-reconnects; pushes each
@@ -27,6 +30,22 @@ export class TelemetryClient {
 			try {
 				const frame = JSON.parse(event.data) as TelemetryFrame;
 				pushFrame(frame);
+				// Drive the Cesium clock from the sim's simulated instant, so the
+				// globe's day/night terminator tracks the simulated time-of-day
+				// (globe lighting is enabled in Globe.tsx).
+				if (frame.sunEpochMs !== undefined) {
+					const viewer = $viewerStore.get();
+					if (viewer && !viewer.isDestroyed()) {
+						viewer.clock.currentTime = JulianDate.fromDate(new Date(frame.sunEpochMs));
+						// Fade the ground atmosphere with the sun so the blue haze
+						// stays in daylight but night is dark even when zoomed in:
+						// full brightness by ~200 W/m^2, -> -1 (dark) at 0.
+						if (frame.irradiance !== undefined) {
+							viewer.scene.globe.atmosphereBrightnessShift =
+								Math.min(0, frame.irradiance / 200 - 1);
+						}
+					}
+				}
 			} catch {
 				// ignore malformed frames
 			}

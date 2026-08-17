@@ -6,17 +6,17 @@
 // subscribes to. It is blind to whether PX4 is driven by the sim (JSBSim) or a
 // real airframe -- that is what makes "sim == real aircraft" hold.
 //
-//   PX4 SITL ──MAVLink/UDP:14550──► [this] ──JSON/WS:8080──► browser (Cesium)
+//   PX4 SITL ──MAVLink/UDP:14550──► [this] ──JSON/WS:8790──► browser (Cesium)
 
 import { createSocket } from "node:dgram";
 import { PassThrough } from "node:stream";
 import { WebSocketServer } from "ws";
-import { MavLinkPacketSplitter, MavLinkPacketParser } from "node-mavlink";
+import { MavLinkPacketSplitter, MavLinkPacketParser, MavLinkProtocolV2 } from "node-mavlink";
 import { minimal, common, standard } from "mavlink-mappings";
 
 const UDP_PORT = Number(process.env.MAVLINK_UDP_PORT ?? 14550);
 const JSON_UDP_PORT = Number(process.env.JSON_UDP_PORT ?? 14555);
-const WS_PORT = Number(process.env.BRIDGE_WS_PORT ?? 8080);
+const WS_PORT = Number(process.env.BRIDGE_WS_PORT ?? 8790);
 const BROADCAST_HZ = 25;
 const STALE_MS = 2000; // no MAVLink traffic for this long => "disconnected"
 
@@ -40,11 +40,30 @@ type Frame = {
 	groundspeed?: number;
 	heading?: number;
 	throttle?: number;
+	elevator?: number;
+	aileron?: number;
+	rudder?: number;
 	voltage?: number;
-	current?: number;
+	current?: number;         // NET pack current after solar (A)
 	batteryRemaining?: number;
+	// Power decomposition (sim JSON path): solar generation, total load, and the
+	// gross propulsion draw — so the near-zero net current in daylight reads as
+	// "solar is covering the load", not "no draw".
+	genW?: number;            // solar array output (W)
+	loadW?: number;           // total electrical load (W)
+	propW?: number;           // propulsion demand (W)
+	motorCurrent?: number;    // gross propulsion pack current (A)
+	irradiance?: number;      // usable flux (W/m^2), incl. bank tilt
+	sunEpochMs?: number;      // simulated instant (UTC epoch ms) for the sun/day-night clock
 	armed?: boolean;
 	mode?: string;
+	// "What the autopilot wants": PX4's current position setpoint
+	// (POSITION_TARGET_GLOBAL_INT) — the point it is actively steering toward. In
+	// AUTO.LOITER this walks the intended orbit, so a trail of it is the commanded
+	// path to overlay against the actual track.
+	targetLat?: number;
+	targetLon?: number;
+	targetAlt?: number;
 	connected: boolean;
 };
 
@@ -63,7 +82,7 @@ function decodeMode(customMode: number): string {
 
 /**
  * Start the telemetry bridge: bind the MAVLink (14550) and JSON (14555) UDP
- * inputs and serve merged frames over WebSocket (8080). Idempotent — Next may
+ * inputs and serve merged frames over WebSocket (8790). Idempotent — Next may
  * invoke instrumentation more than once during dev hot-reload.
  */
 export function startBridge() {
@@ -76,9 +95,39 @@ export function startBridge() {
 // --- MAVLink ingest ----------------------------------------------------------
 const udpStream = new PassThrough();
 const sock = createSocket("udp4");
-sock.on("message", (msg) => udpStream.write(msg));
+let px4Addr: { address: string; port: number } | undefined;
+sock.on("message", (msg, rinfo) => {
+	px4Addr = rinfo; // remember PX4's endpoint so we can request streams
+	udpStream.write(msg);
+});
 sock.on("error", (err) => console.error("[bridge] udp error:", err.message));
 sock.bind(UDP_PORT, () => console.log(`[bridge] listening for MAVLink on udp:${UDP_PORT}`));
+
+// Ask PX4 (via SET_MESSAGE_INTERVAL) to stream messages its default GCS set
+// omits: ACTUATOR_OUTPUT_STATUS (375, control-surface outputs) and
+// POSITION_TARGET_GLOBAL_INT (87, the nav setpoint we overlay as the commanded
+// path). We keep asking until each field starts flowing, throttled to ~1 Hz.
+const proto = new MavLinkProtocolV2();
+let seq = 0;
+const lastReqAt: Record<number, number> = {};
+function requestMessage(targetSys: number, targetComp: number, msgId: number) {
+	if (!px4Addr) return;
+	const now = Date.now();
+	if (now - (lastReqAt[msgId] ?? 0) < 1000) return; // throttle retries per msg
+	lastReqAt[msgId] = now;
+	const cmd = new common.CommandLong();
+	cmd.targetSystem = targetSys;
+	cmd.targetComponent = targetComp;
+	cmd.command = common.MavCmd.SET_MESSAGE_INTERVAL;
+	cmd._param1 = msgId;
+	cmd._param2 = 40000; // interval µs → 25 Hz
+	const buf = proto.serialize(cmd, seq++ & 0xff);
+	sock.send(buf, px4Addr.port, px4Addr.address);
+}
+function requestExtraStreams(targetSys: number, targetComp: number) {
+	if (latest.aileron === undefined) requestMessage(targetSys, targetComp, common.ActuatorOutputStatus.MSG_ID); // 375
+	if (latest.targetLat === undefined) requestMessage(targetSys, targetComp, common.PositionTargetGlobalInt.MSG_ID); // 87
+}
 
 const reader = udpStream.pipe(new MavLinkPacketSplitter()).pipe(new MavLinkPacketParser());
 
@@ -105,6 +154,14 @@ reader.on("data", (packet: any) => {
 			latest.pitch = data.pitch;
 			latest.yaw = data.yaw;
 			break;
+		case common.PositionTargetGlobalInt:
+			// The autopilot's commanded position (what it's steering toward). alt
+			// frame varies (often relative-to-home); we only overlay the horizontal
+			// path, and the store places the marker at the aircraft's own altitude.
+			latest.targetLat = data.latInt / 1e7;
+			latest.targetLon = data.lonInt / 1e7;
+			latest.targetAlt = data.alt;
+			break;
 		case common.VfrHud:
 			latest.airspeed = data.airspeed;
 			latest.groundspeed = data.groundspeed;
@@ -118,9 +175,25 @@ reader.on("data", (packet: any) => {
 			if (data.batteryRemaining !== -1) latest.batteryRemaining = data.batteryRemaining;
 			break;
 		}
+		case common.ActuatorOutputStatus: {
+			// Post-mixer outputs. Indices are the sim's PWM_MAIN output order
+			// (rev6.bridge-config.xml): 2=rudder, 4=throttle, 5=aileron, 7=elevator.
+			// PX4 sim outputs are normalized; present surfaces as -100..100 %.
+			const a = data.actuator as number[];
+			if (a && a.length > 7) {
+				latest.aileron = a[5] * 100;
+				latest.elevator = a[7] * 100;
+				latest.rudder = a[2] * 100;
+			}
+			break;
+		}
 		case minimal.Heartbeat:
 			latest.armed = (data.baseMode & 128) !== 0; // MAV_MODE_FLAG_SAFETY_ARMED
 			latest.mode = decodeMode(data.customMode);
+			// PX4 doesn't stream ACTUATOR_OUTPUT_STATUS or POSITION_TARGET_GLOBAL_INT
+			// on the GCS link by default; request them (QGC-style) once we know
+			// PX4's address.
+			requestExtraStreams(packet.header.sysid, packet.header.compid);
 			break;
 	}
 });
@@ -132,7 +205,10 @@ reader.on("data", (packet: any) => {
 // the WS output and the UI are identical regardless of source.
 const JSON_KEYS = new Set([
 	"lat", "lon", "alt", "roll", "pitch", "yaw", "airspeed", "groundspeed",
-	"heading", "throttle", "voltage", "current", "batteryRemaining", "armed", "mode",
+	"heading", "throttle", "elevator", "aileron", "rudder",
+	"voltage", "current", "batteryRemaining", "armed", "mode",
+	"genW", "loadW", "propW", "motorCurrent", "irradiance", "sunEpochMs",
+	"targetLat", "targetLon", "targetAlt",
 ]);
 const jsonSock = createSocket("udp4");
 jsonSock.on("message", (buf) => {

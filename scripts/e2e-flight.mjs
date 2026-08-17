@@ -1,6 +1,6 @@
 // Real browser test: load /flight in Chromium, feed synthetic telemetry into the
 // bridge (udp:14555), and verify the plane renders and the Track button moves the
-// camera to it. Assumes `npm run dev` is already running on :3000.
+// camera to it. Assumes `npm run dev` is already running on :4300.
 import { chromium } from "playwright";
 import { createSocket } from "node:dgram";
 
@@ -23,7 +23,7 @@ const page = await browser.newPage();
 page.on("console", (m) => { if (m.type() === "error") errors.push("console: " + m.text()); });
 page.on("pageerror", (e) => errors.push("pageerror: " + e.message));
 
-await page.goto("http://localhost:3000/flight", { waitUntil: "networkidle" });
+await page.goto("http://localhost:4300/flight", { waitUntil: "networkidle" });
 await page.waitForTimeout(4000); // let Cesium init + telemetry arrive
 
 // 1) Did the page throw?

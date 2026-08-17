@@ -11,6 +11,7 @@ const saira = Saira_Condensed({ subsets: ["latin"], weight: ["600"] });
 const Globe = dynamic(() => import("@/components/Globe"), { ssr: false });
 const Aircraft = dynamic(() => import("@/components/flight/Aircraft"), { ssr: false });
 const FlightHUD = dynamic(() => import("@/components/flight/FlightHUD"), { ssr: false });
+const ViewControls = dynamic(() => import("@/components/flight/ViewControls"), { ssr: false });
 const AirframeConfig = dynamic(() => import("@/components/flight/AirframeConfig"), { ssr: false });
 
 export default function FlightPage() {
@@ -27,9 +28,10 @@ export default function FlightPage() {
 				</span>
 			</div>
 
-			{/* Right rail: HUD with the airframe config stacked underneath it. */}
+			{/* Right rail: HUD, then view controls, then the airframe config. */}
 			<div className="fixed top-4 right-4 z-50 flex flex-col items-end gap-2">
 				<FlightHUD />
+				<ViewControls />
 				<AirframeConfig />
 			</div>
 		</>

@@ -12,7 +12,7 @@ translates it to a WebSocket. The bridge runs *inside* the Next.js server (via
 `src/instrumentation.ts`), so a single `npm run dev` starts everything:
 
 ```
-sim / PX4 ──UDP──► bridge (in Next server) ──WebSocket:8080──► browser (/flight)
+sim / PX4 ──UDP──► bridge (in Next server) ──WebSocket:8790──► browser (/flight)
 ```
 
 - **MAVLink (udp:14550)** — PX4's GCS stream (autopilot runs; "sim == real aircraft").
@@ -24,7 +24,7 @@ Either source feeds the same WebSocket; the UI is identical regardless.
 
 ```sh
 npm install                 # also copies Cesium assets into public/cesium
-npm run dev                 # Next app on :3000 + telemetry bridge (auto-started)
+npm run dev                 # Next app on :4300 + telemetry bridge (auto-started)
 ```
 
 Then drive it from the sim (separate terminal, in `solar-airplane-sim`):
@@ -36,11 +36,11 @@ uv run python -m sim run --with flight --commandant --clock realtime
 uv run python -m sim run --with autopilot
 ```
 
-Open http://localhost:3000 → redirects to `/flight`.
+Open http://localhost:4300 → redirects to `/flight`.
 
 Set `NEXT_PUBLIC_CESIUM_KEY` (Cesium Ion token) in `.env` for globe imagery. The
 WS endpoint is configurable via `NEXT_PUBLIC_MAVLINK_WS_ENDPOINT` (default
-`ws://localhost:8080`).
+`ws://localhost:8790`).
 
 ## Layout
 

@@ -48,6 +48,18 @@ export default function Globe() {
 		(window as any).__cesiumViewer = viewer; // handy for debugging / tests
 		$viewerStore.set(viewer);
 
+		// Day/night: shade the globe from the sun's position (derived from the
+		// clock), so the terminator and dark side appear. The clock is driven by
+		// the sim's simulated time-of-day (telemetry `sunEpochMs`), so "night" in
+		// the sim -> a dark globe here, in sync with irradiance going to zero.
+		viewer.scene.globe.enableLighting = true;
+		// Keep the ground atmosphere (the blue haze over terrain) for daytime, but
+		// it stays lit at close range on the night side. `atmosphereBrightnessShift`
+		// is driven from the telemetry's irradiance (telemetry.ts): ~0 in daylight
+		// (full haze), -> -1 at night (dark), so night is dark at every zoom while
+		// day keeps the haze.
+		viewer.clock.shouldAnimate = false; // time comes from telemetry, not wall-clock
+
 		// Enable 3D terrain (Cesium World Terrain from Ion). Loads async; the
 		// viewer starts flat (EllipsoidTerrainProvider) and swaps in real
 		// elevation once the provider resolves. Guard against the viewer being
