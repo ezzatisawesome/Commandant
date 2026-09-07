@@ -132,7 +132,15 @@ function requestMessage(targetSys: number, targetComp: number, msgId: number) {
 }
 function requestExtraStreams(targetSys: number, targetComp: number) {
 	if (latest.aileron === undefined) requestMessage(targetSys, targetComp, common.ActuatorOutputStatus.MSG_ID); // 375
-	if (latest.targetLat === undefined) requestMessage(targetSys, targetComp, common.PositionTargetGlobalInt.MSG_ID); // 87
+	// Re-request the setpoint stream whenever it has gone stale, not just once:
+	// PX4 drops POSITION_TARGET_GLOBAL_INT on mode changes / brief resets, and if
+	// we only ask while targetLat is undefined the overlay freezes on the last
+	// value and never recovers (the orange marker "disappears on reload" because
+	// the cleared trail can't rebuild from a frozen point). Asking again while
+	// stale lets the stream — and the overlay — heal on its own. The 1 Hz throttle
+	// in requestMessage keeps this from spamming. A live JSON setpoint keeps
+	// lastTargetAt fresh, so this stays quiet in flightdyn/augment runs.
+	if (Date.now() - lastTargetAt > TARGET_STALE_MS) requestMessage(targetSys, targetComp, common.PositionTargetGlobalInt.MSG_ID); // 87
 }
 
 // GLOBAL_POSITION_INT can arrive out of order or duplicated over UDP; sampling a
@@ -151,6 +159,12 @@ const REBOOT_GAP_MS = 5000;
 // yields to it.
 let jsonTargetAt = 0;
 const TARGET_SOURCE_TTL_MS = 2000;
+
+// When a setpoint (from EITHER source) last arrived. Drives re-requesting PX4's
+// msg 87 once the stream goes stale, so a dropped setpoint recovers instead of
+// freezing the orange overlay forever.
+let lastTargetAt = 0;
+const TARGET_STALE_MS = 3000;
 
 const reader = udpStream.pipe(new MavLinkPacketSplitter()).pipe(new MavLinkPacketParser());
 
@@ -193,6 +207,7 @@ reader.on("data", (packet: any) => {
 			latest.targetLat = data.latInt / 1e7;
 			latest.targetLon = data.lonInt / 1e7;
 			latest.targetAlt = data.alt;
+			lastTargetAt = Date.now(); // stream is alive; hold off re-requesting
 			break;
 		case common.VfrHud:
 			latest.airspeed = data.airspeed;
@@ -208,17 +223,17 @@ reader.on("data", (packet: any) => {
 			break;
 		}
 		case common.ActuatorOutputStatus: {
-			// Post-mixer outputs. Indices are the sim's PWM_MAIN output order
-			// (rev6.bridge-config.xml): 2=rudder, 4=throttle, 5=aileron, 7=elevator.
-			// These arrive as PWM PULSE WIDTHS in microseconds (~1000-2000, centre 1500),
-			// NOT normalized -1..1 — so treating them as normalized made a 1288 µs
-			// command render as 128800 %. Convert to -100..100 % about the 1500 µs
-			// centre (matches the sim's mavlink_io _norm: (µs-1500)/500).
+			// Post-mixer outputs, PWM pulse widths in µs (~1000-2000, centre 1500) —
+			// NOT normalized, so pwmPct maps them to -100..100 % about 1500 µs.
+			// Index/scaling mirror the sim's mavlink_io so MAVLink and flightdyn read
+			// identically: PWM_MAIN order idx5=left aileron, idx6=right aileron,
+			// idx7=elevator. Effective aileron is the differential (right-left)/2; the
+			// twin fixed fins have no rudder output (idx2 is unmapped → always 0 µs).
 			const a = data.actuator as number[];
 			if (a && a.length > 7) {
-				latest.aileron = pwmPct(a[5]);
+				latest.aileron = 0.5 * (pwmPct(a[6]) - pwmPct(a[5]));
 				latest.elevator = pwmPct(a[7]);
-				latest.rudder = pwmPct(a[2]);
+				latest.rudder = 0;
 			}
 			break;
 		}
@@ -257,8 +272,9 @@ jsonSock.on("message", (buf) => {
 	for (const [k, v] of Object.entries(obj)) {
 		if (JSON_KEYS.has(k) && v !== undefined) (latest as any)[k] = v;
 	}
-	// Claim the setpoint for the JSON feed so PX4's POSITION_TARGET yields to it.
-	if (obj.targetLat !== undefined) jsonTargetAt = lastMsgAt;
+	// Claim the setpoint for the JSON feed so PX4's POSITION_TARGET yields to it,
+	// and mark the setpoint stream alive so the msg-87 re-request stays quiet.
+	if (obj.targetLat !== undefined) { jsonTargetAt = lastMsgAt; lastTargetAt = lastMsgAt; }
 });
 jsonSock.on("error", (err) => console.error("[bridge] json udp error:", err.message));
 jsonSock.bind(JSON_UDP_PORT, () =>
