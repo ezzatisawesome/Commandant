@@ -20,6 +20,12 @@ const WS_PORT = Number(process.env.BRIDGE_WS_PORT ?? 8790);
 const BROADCAST_HZ = 25;
 const STALE_MS = 2000; // no MAVLink traffic for this long => "disconnected"
 
+// PX4 servo/actuator PWM pulse width (µs) -> control-surface deflection percent,
+// about the 1500 µs neutral with a ±500 µs full-scale throw, clamped to ±100 %.
+// (Mirrors the sim's mavlink_io._norm so MAVLink and flightdyn read identically.)
+const pwmPct = (us: number): number =>
+	Math.max(-100, Math.min(100, ((us - 1500) / 500) * 100));
+
 // Registry maps msgid -> message class so we can decode payloads.
 const REGISTRY: Record<number, any> = {
 	...minimal.REGISTRY,
@@ -129,6 +135,23 @@ function requestExtraStreams(targetSys: number, targetComp: number) {
 	if (latest.targetLat === undefined) requestMessage(targetSys, targetComp, common.PositionTargetGlobalInt.MSG_ID); // 87
 }
 
+// GLOBAL_POSITION_INT can arrive out of order or duplicated over UDP; sampling a
+// stale one makes the actual-track polyline snap back to a point the aircraft
+// already passed. Gate on the message's own monotonic time_boot_ms and drop any
+// frame that isn't strictly newer — except a large backward jump, which is a PX4
+// reboot (a new run) and legitimately resets the clock.
+let lastPosBootMs = -1;
+const REBOOT_GAP_MS = 5000;
+
+// The autopilot setpoint has two possible sources: PX4's POSITION_TARGET_GLOBAL_INT
+// (below) and flightlink's JSON feed (which, in augment/PX4 runs, carries the sim's
+// own setpoint and is declared authoritative there). Letting both write targetLat/
+// targetLon makes the orange overlay zigzag between the two (loiter centre vs the
+// on-circle steering point). Track when JSON last supplied a target so PX4's copy
+// yields to it.
+let jsonTargetAt = 0;
+const TARGET_SOURCE_TTL_MS = 2000;
+
 const reader = udpStream.pipe(new MavLinkPacketSplitter()).pipe(new MavLinkPacketParser());
 
 reader.on("data", (packet: any) => {
@@ -143,12 +166,18 @@ reader.on("data", (packet: any) => {
 	}
 
 	switch (clazz) {
-		case standard.GlobalPositionInt:
+		case standard.GlobalPositionInt: {
+			// Drop stale/reordered frames; a large backward jump is a reboot, not
+			// reordering, so let it through and re-anchor the clock.
+			const boot = data.timeBootMs;
+			if (boot <= lastPosBootMs && lastPosBootMs - boot < REBOOT_GAP_MS) break;
+			lastPosBootMs = boot;
 			latest.lat = data.lat / 1e7;
 			latest.lon = data.lon / 1e7;
 			latest.alt = data.alt / 1000; // mm -> m (MSL)
 			if (data.hdg !== 65535) latest.heading = data.hdg / 100;
 			break;
+		}
 		case common.Attitude:
 			latest.roll = data.roll;
 			latest.pitch = data.pitch;
@@ -158,6 +187,9 @@ reader.on("data", (packet: any) => {
 			// The autopilot's commanded position (what it's steering toward). alt
 			// frame varies (often relative-to-home); we only overlay the horizontal
 			// path, and the store places the marker at the aircraft's own altitude.
+			// Yield to flightlink's JSON setpoint when it's live (augment runs) so
+			// the two sources don't fight over targetLat/targetLon.
+			if (Date.now() - jsonTargetAt < TARGET_SOURCE_TTL_MS) break;
 			latest.targetLat = data.latInt / 1e7;
 			latest.targetLon = data.lonInt / 1e7;
 			latest.targetAlt = data.alt;
@@ -178,12 +210,15 @@ reader.on("data", (packet: any) => {
 		case common.ActuatorOutputStatus: {
 			// Post-mixer outputs. Indices are the sim's PWM_MAIN output order
 			// (rev6.bridge-config.xml): 2=rudder, 4=throttle, 5=aileron, 7=elevator.
-			// PX4 sim outputs are normalized; present surfaces as -100..100 %.
+			// These arrive as PWM PULSE WIDTHS in microseconds (~1000-2000, centre 1500),
+			// NOT normalized -1..1 — so treating them as normalized made a 1288 µs
+			// command render as 128800 %. Convert to -100..100 % about the 1500 µs
+			// centre (matches the sim's mavlink_io _norm: (µs-1500)/500).
 			const a = data.actuator as number[];
 			if (a && a.length > 7) {
-				latest.aileron = a[5] * 100;
-				latest.elevator = a[7] * 100;
-				latest.rudder = a[2] * 100;
+				latest.aileron = pwmPct(a[5]);
+				latest.elevator = pwmPct(a[7]);
+				latest.rudder = pwmPct(a[2]);
 			}
 			break;
 		}
@@ -222,6 +257,8 @@ jsonSock.on("message", (buf) => {
 	for (const [k, v] of Object.entries(obj)) {
 		if (JSON_KEYS.has(k) && v !== undefined) (latest as any)[k] = v;
 	}
+	// Claim the setpoint for the JSON feed so PX4's POSITION_TARGET yields to it.
+	if (obj.targetLat !== undefined) jsonTargetAt = lastMsgAt;
 });
 jsonSock.on("error", (err) => console.error("[bridge] json udp error:", err.message));
 jsonSock.bind(JSON_UDP_PORT, () =>
