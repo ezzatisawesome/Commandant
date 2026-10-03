@@ -104,10 +104,13 @@ Decisions:
   portal considered and deferred.)
 - **Zero-config UX:** connect → `commandant.local` → root redirects to `/flight`
   → telemetry autoconnects → the plane is on the globe. No auth.
-- **Hub/ops workstream** (new): hostapd + dnsmasq AP config, avahi hostname,
-  systemd units to autostart `gs` and the served console on boot, console built
-  for production and served on the Pi. Mostly Pi config — scaffolded here,
-  validated on real hardware.
+- **Hub = a `commandant` CLI** (`packages/cli`, modeled on Guppi's `packages/cli`):
+  `commandant install` provisions a fresh Pi (hostapd + dnsmasq AP, avahi
+  `commandant.local`, systemd units autostarting `gs` + the served console),
+  `commandant update` re-runs the installer, plus `status` / `up` / `down` /
+  `logs` / `uninstall`. AP/mDNS/systemd configs ship as templates inside the CLI
+  package; it's the single interface to the hub. Untestable without the Pi —
+  correct, idempotent, validated on real hardware.
 
 ---
 
@@ -134,10 +137,12 @@ bridge (`src/lib/bridge/bridge.ts`) is RX-only and lives inside Next.
       @1s then `ack{timeout}`; matched `COMMAND_ACK` routed to the originating
       client. Thread-safe TX funnelled onto the mav thread.
 - [x] **Authority discipline.** Single-commander via `claim`. No cross-plane reach.
-- [~] **Test harness.** Synthetic-MAVLink decode + command/ack + link-state tests
-      green (packages/gs/tests). **Live PX4 end-to-end still unconfirmed** — the
-      container builds PX4 from source (~10–20 min) and overran the 240s boot
-      timeout; re-run the smoke after a one-time warm build (cached-build fast path).
+- [x] **Test harness.** Synthetic-MAVLink decode + command/ack + link-state tests
+      green (packages/gs/tests). **Live PX4 end-to-end CONFIRMED** (2026-10-03):
+      mojave PX4 (`mojave/sim-v1.16.2`) built once (arm64, cached at
+      `solar-airplane-fsw/mojave-px4/build`), then 194 live frames flowed
+      PX4→gs→WS, all `linkState:alive`, real changing attitude/position. Future
+      runs hit the cached fast path.
 
 ## Phase 1 — Command authority
 

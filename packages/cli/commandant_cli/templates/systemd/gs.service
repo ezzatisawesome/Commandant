@@ -1,0 +1,26 @@
+[Unit]
+# Commandant ground-station daemon — owns the plane's radio link and serves
+# decoded telemetry (+ command channel) to the console over WebSocket :8790.
+Description=Commandant gs daemon (MAVLink radio link -> WebSocket)
+# Wait for the serial device and network to be up before starting.
+After=network-online.target dev-serial0.device
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Device/baud (and any override of the WS port) live here so the field radio can
+# change without editing this unit. See deploy/gs.env.example.
+EnvironmentFile=/etc/commandant/gs.env
+# The gs package is installed editable into its own venv on the Pi (provision.sh).
+# GS_MAVLINK is e.g. serial:/dev/serial0:57600 (telemetry radio) — pymavlink parses
+# serial:/tcp:/udpin: endpoints directly, so the plane link is just this string.
+ExecStart=/opt/commandant/packages/gs/.venv/bin/python -m gs --mavlink ${GS_MAVLINK} --ws-host 0.0.0.0 --ws-port ${GS_WS_PORT}
+Restart=always
+RestartSec=2
+User=commandant
+Group=dialout
+# Serial access needs the dialout group (set above); no elevated caps required.
+WorkingDirectory=/opt/commandant/packages/gs
+
+[Install]
+WantedBy=multi-user.target

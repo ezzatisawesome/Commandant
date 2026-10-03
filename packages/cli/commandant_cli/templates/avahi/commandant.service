@@ -1,0 +1,23 @@
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<!--
+  Commandant hub — mDNS/Bonjour advertisement (avahi).
+
+  Two things make `commandant.local` work:
+    1. The Pi's hostname is set to `commandant` (provision.sh runs
+       `hostnamectl set-hostname commandant`), and avahi-daemon then answers
+       `commandant.local` for A-record lookups automatically.
+    2. This file advertises the console web app as an HTTP service on :80 so
+       Bonjour browsers / "nearby devices" also discover it by name.
+
+  Installed to /etc/avahi/services/commandant.service by deploy/provision.sh.
+  Clients just open http://commandant.local/ in any browser.
+-->
+<service-group>
+  <name replace-wildcards="yes">Commandant on %h</name>
+  <service>
+    <type>_http._tcp</type>
+    <port>80</port>
+    <txt-record>path=/flight</txt-record>
+  </service>
+</service-group>

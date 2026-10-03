@@ -1,0 +1,24 @@
+[Unit]
+# Commandant console — the web app served on :80 so http://commandant.local/ opens
+# straight in any browser with no port to type. Talks to gs over WS (host-relative,
+# so it reaches whichever host served the page = the Pi).
+Description=Commandant console (Next.js production server on :80)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# next workspace binary is hoisted to the monorepo root node_modules by npm
+# workspaces. Build once at provision time (`npm run build --workspace console`).
+WorkingDirectory=/opt/commandant/packages/console
+ExecStart=/opt/commandant/node_modules/.bin/next start -H 0.0.0.0 -p 80
+Restart=always
+RestartSec=2
+User=commandant
+Group=commandant
+# Bind privileged port 80 without running as root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

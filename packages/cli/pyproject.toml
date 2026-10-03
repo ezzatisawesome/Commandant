@@ -1,0 +1,24 @@
+[project]
+name = "commandant-cli"
+version = "0.1.0"
+description = "Commandant CLI — own the Raspberry Pi hub lifecycle (install / update / status / up / down / logs / uninstall)"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+commandant = "commandant_cli.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["commandant_cli"]
+
+# Ship the hub config templates (hostapd/dnsmasq/avahi/systemd) inside the wheel —
+# cmd_install renders them onto the Pi. They are data, not code.
+[tool.hatch.build.targets.wheel.force-include]
+"commandant_cli/templates" = "commandant_cli/templates"
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
