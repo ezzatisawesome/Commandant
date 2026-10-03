@@ -6,12 +6,13 @@ Turning Commandant from an ingest-only telemetry viewer into a real
 QGroundControl-replacement GCS for the solar aircraft.
 
 **Progress (2026-10-03):** Monorepo (`packages/console` + `packages/gs` +
-`packages/cli`). **Phase 0 done** incl. live PX4→gs→WS. Phase 1 (commands,
-health, STATUSTEXT, fly-to-here), Phase 2 (param view/edit), and Phase 5
-(configurable display) landed at component level (gs tests green, console tsc
-clean). Hub = `commandant` CLI scaffolded. **Not yet done:** full-stack
-integration smoke (UI↔gs↔live PX4 together), Phase 3 SIL-rehearsal, Phase 4
-missions, real-Pi hub validation. Work is on branch `monorepo-restructure`.
+`packages/cli`), all on `main`. **Phases 0, 1, 2, 4, 5 done** — commands, params,
+health/STATUSTEXT, configurable display, and mission planning, all validated
+end-to-end against **live PX4 SITL** (telemetry, arm round-trip, 956-param sync,
+and a takeoff→waypoints→RTL mission upload+readback; a live-only frame bug on RTL
+was caught and fixed). Hub = `commandant` CLI scaffolded. **Not yet done:**
+Phase 3 SIL-rehearsal (real-aircraft gate), geofence/rally, real-Pi hub
+validation, and small polish (console `claim`-confirm, param metadata bundling).
 
 ## Scope boundary (the two-plane rule)
 
