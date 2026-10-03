@@ -91,21 +91,22 @@ bridge (`src/lib/bridge/bridge.ts`) is RX-only and lives inside Next.
       JSON→WS paths tested.)*
 - [x] ~~mavlink-router in front~~ — **not needed for SITL**; PX4 dual-unicasts
       (:14540 sim, :14550 gs). Deferred to real-radio / second-consumer.
-- [~] **WS/HTTP contract** daemon ↔ Cesium UI: telemetry out *(done)*, commands
-      in *(Phase 1)*. In-Next bridge disabled (`instrumentation.ts` is a no-op).
-- [ ] **Link manager.** Heartbeat tracking, connection state
-      (connecting/alive/stale/lost), auto-reconnect, per-message staleness
-      (generalize the current 2s indicator). Emit link state to the UI.
+- [x] **WS contract** daemon ↔ Cesium UI (`docs/ws-contract.md`): tagged
+      telemetry out + `command`/`claim` in, `ack`/`link` back. In-Next bridge
+      disabled (`instrumentation.ts` is a no-op).
+- [x] **Link manager.** connecting/alive(<2s)/stale(<5s)/lost; `linkState` on
+      every frame + `link` on transitions; console indicator + auto-reconnect.
 - [ ] **Transport abstraction.** UDP today; interface ready for TCP/serial so
       real-radio is a config change, not a rewrite. Multi-endpoint capable.
-- [ ] **Command ACK tracking.** Never fire-and-forget: every command awaits
-      `COMMAND_ACK` (or param/mission confirm), with timeout + retry + surfaced
-      failure. This is the reliability core — and it's our code now.
-- [ ] **Authority discipline.** Single-commander guard on the MAVLink side.
-      Distinct from Guppi's authority model — no cross-plane reach.
-- [ ] **Test harness.** Spin PX4 SITL, assert the daemon's protocol state
-      machines, mirroring AircraftSim's `validate.py` gate philosophy. Mandatory,
-      since we hand-roll the handshakes.
+      *(still pending — the one unticked foundation item.)*
+- [x] **Command ACK tracking.** `COMMAND_LONG` for arm/disarm/set_mode; 3 tries
+      @1s then `ack{timeout}`; matched `COMMAND_ACK` routed to the originating
+      client. Thread-safe TX funnelled onto the mav thread.
+- [x] **Authority discipline.** Single-commander via `claim`. No cross-plane reach.
+- [~] **Test harness.** Synthetic-MAVLink decode + command/ack + link-state tests
+      green (packages/gs/tests). **Live PX4 end-to-end still unconfirmed** — the
+      container builds PX4 from source (~10–20 min) and overran the 240s boot
+      timeout; re-run the smoke after a one-time warm build (cached-build fast path).
 
 ## Phase 1 — Command authority
 
