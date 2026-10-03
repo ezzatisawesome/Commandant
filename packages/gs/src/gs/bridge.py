@@ -124,6 +124,8 @@ def result_text(result: int) -> str:
 
 # --- Mission protocol (Phase 4) ----------------------------------------------
 MAV_MISSION_TYPE_MISSION = mavutil.mavlink.MAV_MISSION_TYPE_MISSION
+MAV_MISSION_TYPE_FENCE = mavutil.mavlink.MAV_MISSION_TYPE_FENCE
+MAV_MISSION_TYPE_RALLY = mavutil.mavlink.MAV_MISSION_TYPE_RALLY
 MISSION_OP_TIMEOUT_MS = 1500   # no handshake progress -> retry the kickoff
 MISSION_MAX_TRIES = 3
 
@@ -135,8 +137,29 @@ _KIND_TO_CMD = {
     "loiter_turns": mavutil.mavlink.MAV_CMD_NAV_LOITER_TURNS,
     "rtl": mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH,
     "land": mavutil.mavlink.MAV_CMD_NAV_LAND,
+    # Geofence + rally (uploaded on the FENCE / RALLY mission_type planes).
+    "fence_inclusion": mavutil.mavlink.MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION,
+    "fence_exclusion": mavutil.mavlink.MAV_CMD_NAV_FENCE_POLYGON_VERTEX_EXCLUSION,
+    "fence_circle_inclusion": mavutil.mavlink.MAV_CMD_NAV_FENCE_CIRCLE_INCLUSION,
+    "fence_circle_exclusion": mavutil.mavlink.MAV_CMD_NAV_FENCE_CIRCLE_EXCLUSION,
+    "rally": mavutil.mavlink.MAV_CMD_NAV_RALLY_POINT,
 }
 _CMD_TO_KIND = {v: k for k, v in _KIND_TO_CMD.items()}
+
+_FENCE_POLY_KINDS = ("fence_inclusion", "fence_exclusion")
+_FENCE_CIRCLE_KINDS = ("fence_circle_inclusion", "fence_circle_exclusion")
+
+# Maps a push/pull WS message type to its MAVLink mission plane: the mission_type
+# on the wire, the download response message type, and the ack message type. One
+# handshake serves all three planes (mission / fence / rally).
+_PLAN_PLANES = {
+    "mission_push": {"mtype": MAV_MISSION_TYPE_MISSION, "rtype": "mission", "ack_type": "mission_ack"},
+    "mission_pull": {"mtype": MAV_MISSION_TYPE_MISSION, "rtype": "mission", "ack_type": "mission_ack"},
+    "fence_push": {"mtype": MAV_MISSION_TYPE_FENCE, "rtype": "fence", "ack_type": "fence_ack"},
+    "fence_pull": {"mtype": MAV_MISSION_TYPE_FENCE, "rtype": "fence", "ack_type": "fence_ack"},
+    "rally_push": {"mtype": MAV_MISSION_TYPE_RALLY, "rtype": "rally", "ack_type": "rally_ack"},
+    "rally_pull": {"mtype": MAV_MISSION_TYPE_RALLY, "rtype": "rally", "ack_type": "rally_ack"},
+}
 
 _MISSION_RESULT_TEXT = {
     0: "accepted", 1: "error", 2: "unsupported frame", 3: "unsupported",
@@ -174,11 +197,20 @@ def mission_item_fields(seq: int, item: dict[str, Any]) -> dict[str, Any]:
         p3 = float(p.get("radius", 0) or 0)
     elif kind == "takeoff":
         p1 = float(p.get("pitch", 0) or 0)
-    # Coordinate-bearing items use the global relative-alt frame; command-only
-    # items (e.g. RTL) carry no position and MUST use MAV_FRAME_MISSION, or PX4
-    # rejects the whole mission as UNSUPPORTED (confirmed against live SITL).
-    coordless = kind in ("rtl",)
-    frame = m.MAV_FRAME_MISSION if coordless else m.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+    elif kind in _FENCE_POLY_KINDS:
+        p1 = float(p.get("vertexCount", 0) or 0)  # vertices in this inclusion/exclusion set
+    elif kind in _FENCE_CIRCLE_KINDS:
+        p1 = float(p.get("radius", 0) or 0)
+    # Frame by item class: command-only items (RTL) carry no position and MUST use
+    # MAV_FRAME_MISSION or PX4 NAKs the whole mission as UNSUPPORTED (live-SITL
+    # finding); fence vertices/circles are lat/lon-only (no alt) -> MAV_FRAME_GLOBAL;
+    # everything else positional -> global relative-alt.
+    if kind == "rtl":
+        frame = m.MAV_FRAME_MISSION
+    elif kind in _FENCE_POLY_KINDS or kind in _FENCE_CIRCLE_KINDS:
+        frame = m.MAV_FRAME_GLOBAL
+    else:
+        frame = m.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
     return {
         "frame": frame, "command": cmd,
         "current": 1 if seq == 0 else 0, "autocontinue": 1,
@@ -201,6 +233,10 @@ def mission_item_to_console(msg: Any) -> dict[str, Any]:
         params["seconds"] = msg.param1
     if kind == "loiter_turns" and msg.param1:
         params["turns"] = msg.param1
+    if kind in _FENCE_POLY_KINDS and msg.param1:
+        params["vertexCount"] = int(msg.param1)
+    if kind in _FENCE_CIRCLE_KINDS and msg.param1:
+        params["radius"] = msg.param1
     if params:
         item["params"] = params
     return item
@@ -487,10 +523,11 @@ class Bridge:
                 continue
             if self._mission is not None:
                 # One op at a time; reject the newcomer rather than interleave handshakes.
+                ack_type = job.get("ack_type", "mission_ack")
                 if kind == "push":
-                    self._report_mission_ack(job.get("id"), ok=False, result=-1, text="busy")
+                    self._report_mission_ack(job.get("id"), ok=False, result=-1, text="busy", ack_type=ack_type)
                 else:
-                    self._broadcast({"type": "mission_ack", "ok": False, "result": -1, "text": "busy"})
+                    self._broadcast({"type": ack_type, "ok": False, "result": -1, "text": "busy"})
                 continue
             if kind == "push":
                 self._start_mission_upload(conn, job)
@@ -502,9 +539,10 @@ class Bridge:
         if op is not None and now - op["last"] > MISSION_OP_TIMEOUT_MS:
             if op["tries"] >= MISSION_MAX_TRIES:
                 if op["op"] == "upload":
-                    self._report_mission_ack(op.get("id"), ok=False, result=-1, text="timeout")
+                    self._report_mission_ack(op.get("id"), ok=False, result=-1, text="timeout",
+                                             ack_type=op["ack_type"])
                 else:
-                    self._broadcast({"type": "mission_ack", "ok": False, "result": -1, "text": "timeout"})
+                    self._broadcast({"type": op["ack_type"], "ok": False, "result": -1, "text": "timeout"})
                 self._mission = None
             else:
                 op["tries"] += 1
@@ -512,60 +550,65 @@ class Bridge:
                 try:
                     if op["op"] == "upload":
                         conn.mav.mission_count_send(
-                            TARGET_SYSTEM, TARGET_COMPONENT, op["count"], MAV_MISSION_TYPE_MISSION)
+                            TARGET_SYSTEM, TARGET_COMPONENT, op["count"], op["mtype"])
                     elif op["count"] is None:
                         conn.mav.mission_request_list_send(
-                            TARGET_SYSTEM, TARGET_COMPONENT, MAV_MISSION_TYPE_MISSION)
+                            TARGET_SYSTEM, TARGET_COMPONENT, op["mtype"])
                     else:
                         conn.mav.mission_request_int_send(
-                            TARGET_SYSTEM, TARGET_COMPONENT, op["next"], MAV_MISSION_TYPE_MISSION)
+                            TARGET_SYSTEM, TARGET_COMPONENT, op["next"], op["mtype"])
                 except Exception as exc:
                     print(f"[gs] mission retry failed: {exc}")
 
     def _start_mission_upload(self, conn: Any, job: dict[str, Any]) -> None:
+        ack_type = job["ack_type"]
         try:
             fields = [mission_item_fields(i, it) for i, it in enumerate(job.get("items") or [])]
         except ValueError as exc:
-            self._report_mission_ack(job.get("id"), ok=False, result=-1, text=str(exc))
+            self._report_mission_ack(job.get("id"), ok=False, result=-1, text=str(exc), ack_type=ack_type)
             return
         self._mission = {"op": "upload", "id": job.get("id"), "items": fields,
-                         "count": len(fields), "last": _now_ms(), "tries": 0}
+                         "count": len(fields), "last": _now_ms(), "tries": 0,
+                         "mtype": job["mtype"], "rtype": job["rtype"], "ack_type": ack_type}
         try:
             conn.mav.mission_count_send(
-                TARGET_SYSTEM, TARGET_COMPONENT, len(fields), MAV_MISSION_TYPE_MISSION)
+                TARGET_SYSTEM, TARGET_COMPONENT, len(fields), job["mtype"])
         except Exception as exc:
             self._mission = None
-            self._report_mission_ack(job.get("id"), ok=False, result=-1, text=f"send error: {exc}")
+            self._report_mission_ack(job.get("id"), ok=False, result=-1, text=f"send error: {exc}", ack_type=ack_type)
 
     def _start_mission_download(self, conn: Any, job: dict[str, Any]) -> None:
         self._mission = {"op": "download", "id": job.get("id"), "count": None,
-                         "items": {}, "next": 0, "last": _now_ms(), "tries": 0}
+                         "items": {}, "next": 0, "last": _now_ms(), "tries": 0,
+                         "mtype": job["mtype"], "rtype": job["rtype"], "ack_type": job["ack_type"]}
         try:
             conn.mav.mission_request_list_send(
-                TARGET_SYSTEM, TARGET_COMPONENT, MAV_MISSION_TYPE_MISSION)
+                TARGET_SYSTEM, TARGET_COMPONENT, job["mtype"])
         except Exception as exc:
             self._mission = None
-            self._broadcast({"type": "mission_ack", "ok": False, "result": -1, "text": f"send error: {exc}"})
+            self._broadcast({"type": job["ack_type"], "ok": False, "result": -1, "text": f"send error: {exc}"})
 
     def _mission_send_item(self, conn: Any, seq: int) -> None:
         f = self._mission["items"][seq]
         conn.mav.mission_item_int_send(
             TARGET_SYSTEM, TARGET_COMPONENT, seq, f["frame"], f["command"],
             f["current"], f["autocontinue"], f["param1"], f["param2"], f["param3"],
-            f["param4"], f["x"], f["y"], f["z"], MAV_MISSION_TYPE_MISSION)
+            f["param4"], f["x"], f["y"], f["z"], self._mission["mtype"])
 
-    def _report_mission_ack(self, mid: Any, ok: bool, result: int, text: str) -> None:
+    def _report_mission_ack(self, mid: Any, ok: bool, result: int, text: str,
+                            ack_type: str = "mission_ack") -> None:
         loop = self._loop
         if loop is not None:
             loop.call_soon_threadsafe(
-                self._emit_mission_ack, {"id": mid, "ok": ok, "result": result, "text": text})
+                self._emit_mission_ack,
+                {"id": mid, "ok": ok, "result": result, "text": text, "ack_type": ack_type})
 
     def _emit_mission_ack(self, event: dict[str, Any]) -> None:
         asyncio.create_task(self._deliver_mission_ack(event))
 
     async def _deliver_mission_ack(self, event: dict[str, Any]) -> None:
         mid = event.get("id")
-        payload = {"type": "mission_ack", "id": mid, "ok": event["ok"],
+        payload = {"type": event.get("ack_type", "mission_ack"), "id": mid, "ok": event["ok"],
                    "result": event["result"], "text": event["text"]}
         ws = self._pending_clients.pop(mid, None) if mid is not None else None
         if ws is not None:
@@ -714,7 +757,7 @@ class Bridge:
                 # Autopilot pulling items during our upload. Answer whatever seq it
                 # asks for (handles out-of-order and re-requests transparently).
                 op = self._mission
-                if op is not None and op["op"] == "upload" and getattr(msg, "mission_type", 0) == 0:
+                if op is not None and op["op"] == "upload" and getattr(msg, "mission_type", 0) == op["mtype"]:
                     seq = msg.seq
                     if 0 <= seq < len(op["items"]):
                         try:
@@ -728,45 +771,45 @@ class Bridge:
 
             elif t == "MISSION_COUNT":
                 op = self._mission
-                if op is not None and op["op"] == "download" and getattr(msg, "mission_type", 0) == 0:
+                if op is not None and op["op"] == "download" and getattr(msg, "mission_type", 0) == op["mtype"]:
                     op["count"] = msg.count
                     op["last"] = now
                     op["tries"] = 0
                     if msg.count == 0:
-                        conn.mav.mission_ack_send(TARGET_SYSTEM, TARGET_COMPONENT, 0, MAV_MISSION_TYPE_MISSION)
-                        self._broadcast({"type": "mission", "count": 0, "items": []})
+                        conn.mav.mission_ack_send(TARGET_SYSTEM, TARGET_COMPONENT, 0, op["mtype"])
+                        self._broadcast({"type": op["rtype"], "count": 0, "items": []})
                         self._mission = None
                     else:
                         op["next"] = 0
                         conn.mav.mission_request_int_send(
-                            TARGET_SYSTEM, TARGET_COMPONENT, 0, MAV_MISSION_TYPE_MISSION)
+                            TARGET_SYSTEM, TARGET_COMPONENT, 0, op["mtype"])
 
             elif t == "MISSION_ITEM_INT":
                 op = self._mission
-                if op is not None and op["op"] == "download" and getattr(msg, "mission_type", 0) == 0:
+                if op is not None and op["op"] == "download" and getattr(msg, "mission_type", 0) == op["mtype"]:
                     op["items"][msg.seq] = mission_item_to_console(msg)
                     op["last"] = now
                     op["tries"] = 0
                     self._broadcast({"type": "mission_progress", "phase": "download",
                                      "seq": msg.seq, "count": op["count"]})
                     if len(op["items"]) >= op["count"]:
-                        conn.mav.mission_ack_send(TARGET_SYSTEM, TARGET_COMPONENT, 0, MAV_MISSION_TYPE_MISSION)
+                        conn.mav.mission_ack_send(TARGET_SYSTEM, TARGET_COMPONENT, 0, op["mtype"])
                         items = [op["items"][s] for s in sorted(op["items"])]
-                        self._broadcast({"type": "mission", "count": op["count"], "items": items})
+                        self._broadcast({"type": op["rtype"], "count": op["count"], "items": items})
                         self._mission = None
                     else:
                         missing = [s for s in range(op["count"]) if s not in op["items"]]
                         if missing:
                             op["next"] = missing[0]
                             conn.mav.mission_request_int_send(
-                                TARGET_SYSTEM, TARGET_COMPONENT, missing[0], MAV_MISSION_TYPE_MISSION)
+                                TARGET_SYSTEM, TARGET_COMPONENT, missing[0], op["mtype"])
 
             elif t == "MISSION_ACK":
                 op = self._mission
-                if op is not None and op["op"] == "upload" and getattr(msg, "mission_type", 0) == 0:
+                if op is not None and op["op"] == "upload" and getattr(msg, "mission_type", 0) == op["mtype"]:
                     res = msg.type
                     self._report_mission_ack(op.get("id"), ok=(res == 0), result=res,
-                                             text=mission_result_text(res))
+                                             text=mission_result_text(res), ack_type=op["ack_type"])
                     self._mission = None
 
             elif t == "MISSION_CURRENT":
@@ -885,20 +928,25 @@ class Bridge:
             # Display preference (SET_MESSAGE_INTERVAL); open to any client.
             self._misc_queue.put({"kind": "stream", "msgId": msg.get("msgId"), "hz": msg.get("hz", 0)})
 
-        elif mtype == "mission_push":
-            # Upload a mission -> commander only (it changes what the plane flies).
+        elif mtype in ("mission_push", "fence_push", "rally_push"):
+            # Upload a mission/fence/rally plan -> commander only (changes the plane).
+            plane = _PLAN_PLANES[mtype]
             mid = msg.get("id")
             if ws is not self._commander:
-                await self._send(ws, {"type": "mission_ack", "id": mid, "ok": False,
+                await self._send(ws, {"type": plane["ack_type"], "id": mid, "ok": False,
                                       "result": -1, "text": "not commander"})
                 return
             if mid is not None:
                 self._pending_clients[mid] = ws
-            self._mission_queue.put({"kind": "push", "id": mid, "items": msg.get("items") or []})
+            self._mission_queue.put({"kind": "push", "id": mid, "items": msg.get("items") or [],
+                                     "mtype": plane["mtype"], "rtype": plane["rtype"],
+                                     "ack_type": plane["ack_type"]})
 
-        elif mtype == "mission_pull":
-            # Read the current mission; open to any client (result broadcast to all).
-            self._mission_queue.put({"kind": "pull"})
+        elif mtype in ("mission_pull", "fence_pull", "rally_pull"):
+            # Read the current plan; open to any client (result broadcast to all).
+            plane = _PLAN_PLANES[mtype]
+            self._mission_queue.put({"kind": "pull", "mtype": plane["mtype"],
+                                     "rtype": plane["rtype"], "ack_type": plane["ack_type"]})
 
         elif mtype == "mission_set_current":
             if ws is self._commander:
