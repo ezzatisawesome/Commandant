@@ -13,6 +13,8 @@ const Aircraft = dynamic(() => import("@/components/flight/Aircraft"), { ssr: fa
 const FlightHUD = dynamic(() => import("@/components/flight/FlightHUD"), { ssr: false });
 const ViewControls = dynamic(() => import("@/components/flight/ViewControls"), { ssr: false });
 const AirframeConfig = dynamic(() => import("@/components/flight/AirframeConfig"), { ssr: false });
+const ParamEditor = dynamic(() => import("@/components/flight/ParamEditor"), { ssr: false });
+const StatusLog = dynamic(() => import("@/components/flight/StatusLog").then((m) => m.StatusLog), { ssr: false });
 
 export default function FlightPage() {
 	return (
@@ -28,10 +30,12 @@ export default function FlightPage() {
 				</span>
 			</div>
 
-			{/* Right rail: HUD, then view controls, then the airframe config. */}
-			<div className="fixed top-4 right-4 z-50 flex flex-col items-end gap-2">
+			{/* Right rail: HUD, status log, view controls, params, airframe config. */}
+			<div className="fixed top-4 right-4 z-50 flex max-h-[calc(100vh-2rem)] flex-col items-end gap-2 overflow-y-auto">
 				<FlightHUD />
+				<StatusLog />
 				<ViewControls />
+				<ParamEditor />
 				<AirframeConfig />
 			</div>
 		</>

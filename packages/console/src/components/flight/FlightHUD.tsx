@@ -2,16 +2,23 @@
 
 import { useState } from "react";
 import { useStore } from "@nanostores/react";
-import { ChevronUp, ChevronDown } from "lucide-react";
+import { ChevronUp, ChevronDown, Settings, ArrowUp, ArrowDown } from "lucide-react";
 
 import { $aircraftStore, $historyStore } from "@/stores/aircraft.store";
 import { $linkState } from "@/stores/link.store";
-import type { LinkState } from "@/types/app";
+import {
+	$visibleFields, $chartedFields, FIELD_CATALOG, FIELD_BY_KEY,
+	toggleVisible, toggleCharted, moveField,
+} from "@/stores/displayConfig.store";
+import type { FieldDef } from "@/stores/displayConfig.store";
+import type { LinkState, TelemetryFrame } from "@/types/app";
+import { telemetryClient } from "@/services/telemetry";
 import { Sparkline } from "./Sparkline";
 import { ControlBar } from "./ControlBar";
 import { AttitudeIndicator } from "./AttitudeIndicator";
 import { Compass } from "./Compass";
 import { CommandBar } from "./CommandBar";
+import { HealthStrip } from "./HealthStrip";
 
 // Connection-indicator styling per link state: amber pulse while connecting,
 // green alive, amber stale, red lost.
@@ -22,49 +29,69 @@ const LINK_DOT: Record<LinkState, { className: string; title: string }> = {
 	lost: { className: "bg-red-500", title: "Link lost" },
 };
 
-function Field({
-	label,
-	value,
-	unit,
-	spark,
-	sparkClassName,
-	graphic,
-}: {
-	label: string;
-	value: string;
-	unit?: string;
-	spark?: Array<number | undefined>;
-	sparkClassName?: string;
-	graphic?: React.ReactNode;
-}) {
+// Stream-control presets (Phase 5): common PX4 messages the operator can turn on
+// /off and re-rate from the UI.
+const STREAMS: Array<{ id: number; label: string }> = [
+	{ id: 30, label: "ATTITUDE" },
+	{ id: 33, label: "GLOBAL_POSITION_INT" },
+	{ id: 74, label: "VFR_HUD" },
+	{ id: 87, label: "POSITION_TARGET" },
+	{ id: 147, label: "BATTERY_STATUS" },
+	{ id: 375, label: "ACTUATOR_OUTPUT" },
+];
+
+const fmt = (v: number | undefined, digits = 1) =>
+	v === undefined ? "—" : v.toFixed(digits);
+
+function Row({
+	def, frame, spark,
+}: { def: FieldDef; frame: TelemetryFrame | null; spark?: Array<number | undefined> }) {
+	const raw = frame ? (frame[def.key] as number | boolean | string | undefined) : undefined;
+
+	let value: string;
+	let graphic: React.ReactNode = null;
+	if (def.kind === "text") {
+		value = def.key === "armed"
+			? (raw === undefined ? "—" : raw ? "ARMED" : "DISARMED")
+			: (raw as string | undefined) ?? "—";
+	} else if (def.kind === "control") {
+		value = fmt(raw as number | undefined, def.digits ?? 0);
+		graphic = <ControlBar value={raw as number | undefined} />;
+	} else {
+		value = fmt(raw as number | undefined, def.digits ?? 1);
+		if (spark) graphic = <Sparkline values={spark} className={def.sparkClassName} />;
+	}
+
 	return (
 		<div className="flex items-center justify-between gap-2">
-			<span className="text-[10px] uppercase tracking-wide text-white/50">{label}</span>
+			<span className="text-[10px] uppercase tracking-wide text-white/50">{def.label}</span>
 			<div className="flex items-center gap-2">
-				{graphic ?? (spark ? <Sparkline values={spark} className={sparkClassName} /> : null)}
+				{graphic}
 				<span className="min-w-[3.5rem] text-right font-mono text-sm text-white">
 					{value}
-					{unit ? <span className="ml-0.5 text-[10px] text-white/50">{unit}</span> : null}
+					{def.unit ? <span className="ml-0.5 text-[10px] text-white/50">{def.unit}</span> : null}
 				</span>
 			</div>
 		</div>
 	);
 }
 
-const fmt = (v: number | undefined, digits = 1) =>
-	v === undefined ? "—" : v.toFixed(digits);
-
 export default function FlightHUD() {
 	const f = useStore($aircraftStore);
 	const history = useStore($historyStore);
 	const linkState = useStore($linkState);
+	const visible = useStore($visibleFields);
+	const charted = useStore($chartedFields);
 	const [collapsed, setCollapsed] = useState(false);
+	const [configOpen, setConfigOpen] = useState(false);
+	const [streamId, setStreamId] = useState(STREAMS[0].id);
+	const [streamHz, setStreamHz] = useState(10);
 
-	// Extract per-field series from the downsampled history for the sparklines.
-	const series = (key: keyof (typeof history)[number]) =>
+	const series = (key: keyof TelemetryFrame) =>
 		history.map((frame) => frame[key] as number | undefined);
 
 	const dot = LINK_DOT[linkState];
+	const chartedSet = new Set(charted);
 
 	return (
 		<div className="w-64 rounded-md border border-white/10 bg-black/60 p-3 backdrop-blur">
@@ -77,11 +104,74 @@ export default function FlightHUD() {
 					{collapsed ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronUp className="h-3.5 w-3.5" />}
 					Telemetry
 				</button>
-				<span
-					className={`h-2 w-2 rounded-full ${dot.className}`}
-					title={dot.title}
-				/>
+				<div className="flex items-center gap-2">
+					<button
+						onClick={() => setConfigOpen((c) => !c)}
+						className={`${configOpen ? "text-white" : "text-white/40"} hover:text-white`}
+						title="Configure display"
+					>
+						<Settings className="h-3.5 w-3.5" />
+					</button>
+					<span className={`h-2 w-2 rounded-full ${dot.className}`} title={dot.title} />
+				</div>
 			</div>
+
+			{/* Phase 5 — display config: show/hide, reorder, chart-any-field, streams. */}
+			{configOpen ? (
+				<div className="mb-2 max-h-72 overflow-auto rounded border border-white/10 bg-black/50 p-2 text-[10px]">
+					<div className="mb-1 uppercase tracking-wide text-white/40">Fields</div>
+					{FIELD_CATALOG.map((def) => {
+						const key = def.key as string;
+						const isVisible = visible.includes(key);
+						const canChart = def.kind === "num";
+						return (
+							<div key={key} className="flex items-center gap-1 py-0.5">
+								<input type="checkbox" checked={isVisible} onChange={() => toggleVisible(key)} />
+								<span className="flex-1 truncate text-white/70">{def.label}</span>
+								{canChart ? (
+									<button
+										onClick={() => toggleCharted(key)}
+										className={chartedSet.has(key) ? "text-sky-400" : "text-white/25"}
+										title="Toggle chart"
+									>
+										chart
+									</button>
+								) : null}
+								<button disabled={!isVisible} onClick={() => moveField(key, -1)} className="text-white/40 disabled:opacity-20" title="Up">
+									<ArrowUp className="h-3 w-3" />
+								</button>
+								<button disabled={!isVisible} onClick={() => moveField(key, 1)} className="text-white/40 disabled:opacity-20" title="Down">
+									<ArrowDown className="h-3 w-3" />
+								</button>
+							</div>
+						);
+					})}
+					<div className="mt-2 mb-1 uppercase tracking-wide text-white/40">Stream control</div>
+					<div className="flex items-center gap-1">
+						<select
+							value={streamId}
+							onChange={(e) => setStreamId(Number(e.target.value))}
+							className="h-6 flex-1 rounded border border-white/15 bg-black/60 px-1 text-[10px] text-white"
+						>
+							{STREAMS.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+						</select>
+						<input
+							type="number" value={streamHz} min={0} max={100}
+							onChange={(e) => setStreamHz(Number(e.target.value) || 0)}
+							className="h-6 w-12 rounded border border-white/15 bg-transparent px-1 text-right text-[10px] text-white"
+							title="Rate (Hz); 0 disables"
+						/>
+						<button
+							onClick={() => telemetryClient.setStream(streamId, streamHz)}
+							disabled={linkState !== "alive"}
+							className="h-6 rounded border border-white/15 px-2 text-[10px] text-white/80 hover:bg-white/10 disabled:opacity-30"
+						>
+							Apply
+						</button>
+					</div>
+				</div>
+			) : null}
+
 			{collapsed ? null : (
 			<>
 			<div className="mb-3 flex items-center justify-center gap-3 py-2">
@@ -89,30 +179,14 @@ export default function FlightHUD() {
 				<Compass heading={f?.heading ?? 0} size={80} />
 			</div>
 			<div className="grid gap-1">
-				<Field label="Mode" value={f?.mode ?? "—"} />
-				<Field label="Armed" value={f?.armed === undefined ? "—" : f.armed ? "ARMED" : "DISARMED"} />
-				<Field label="Airspeed" value={fmt(f?.airspeed)} unit="m/s" spark={series("airspeed")} />
-				<Field label="Altitude" value={fmt(f?.alt, 0)} unit="m" spark={series("alt")} sparkClassName="text-sky-400/80" />
-				<Field label="Heading" value={fmt(f?.heading, 0)} unit="°" />
-				<Field label="Throttle" value={fmt(f?.throttle, 0)} unit="%" spark={series("throttle")} sparkClassName="text-amber-400/80" />
-				<Field label="Elevator" value={fmt(f?.elevator, 0)} unit="%" graphic={<ControlBar value={f?.elevator} />} />
-				<Field label="Aileron" value={fmt(f?.aileron, 0)} unit="%" graphic={<ControlBar value={f?.aileron} />} />
-				<Field label="Rudder" value={fmt(f?.rudder, 0)} unit="%" graphic={<ControlBar value={f?.rudder} />} />
-				<Field label="Battery" value={fmt(f?.batteryRemaining, 0)} unit="%" spark={series("batteryRemaining")} sparkClassName="text-emerald-400/80" />
-				<Field label="Voltage" value={fmt(f?.voltage, 2)} unit="V" spark={series("voltage")} sparkClassName="text-violet-400/80" />
-				<Field label="Net Current" value={fmt(f?.current, 1)} unit="A" spark={series("current")} sparkClassName="text-rose-400/80" />
+				{visible.map((key) => {
+					const def = FIELD_BY_KEY[key];
+					if (!def) return null;
+					const spark = def.kind === "num" && chartedSet.has(key) ? series(def.key) : undefined;
+					return <Row key={key} def={def} frame={f} spark={spark} />;
+				})}
 			</div>
-			{/* Power balance: solar generation vs. total load, why the net pack
-			    current is what it is. Only present on the sim's JSON telemetry path. */}
-			<div className="mt-2 border-t border-white/10 pt-2 text-[10px] uppercase tracking-wide text-white/40">
-				Power · Solar
-			</div>
-			<div className="mt-1 grid gap-1">
-				<Field label="Solar Gen" value={fmt(f?.genW, 0)} unit="W" spark={series("genW")} sparkClassName="text-yellow-400/80" />
-				<Field label="Load" value={fmt(f?.loadW, 0)} unit="W" spark={series("loadW")} sparkClassName="text-orange-400/80" />
-				<Field label="Motor" value={fmt(f?.motorCurrent, 1)} unit="A" spark={series("motorCurrent")} sparkClassName="text-rose-400/80" />
-				<Field label="Irradiance" value={fmt(f?.irradiance, 0)} unit="W/m²" spark={series("irradiance")} sparkClassName="text-yellow-300/80" />
-			</div>
+			<HealthStrip />
 			<CommandBar />
 			</>
 			)}

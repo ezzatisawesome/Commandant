@@ -14,19 +14,20 @@ import { Button } from "@/components/ui/button";
 const MODES: Array<{ label: string; main: number; sub: number }> = [
 	{ label: "HOLD", main: 4, sub: 3 }, // AUTO.LOITER
 	{ label: "MISSION", main: 4, sub: 4 }, // AUTO.MISSION
-	{ label: "RTL", main: 4, sub: 5 }, // AUTO.RTL
+	{ label: "POSCTL", main: 3, sub: 0 },
 	{ label: "MANUAL", main: 1, sub: 0 },
 ];
 
-// The Phase-1 command seed: arm/disarm + mode set, exercised over the WS command
-// channel. Disabled unless the link is alive; every command's ack result (or
-// failure) is surfaced inline. Deliberately small — the full command surface
-// (takeoff/land, fly-to-here, confirmations) comes with Phase 1 proper.
+// Phase-1 command surface over the WS command channel: arm/disarm, the nav verbs
+// (takeoff/land/RTL), and mode set. Everything is disabled unless the link is
+// alive; each command's ack result (or failure) is surfaced inline. "Fly to here"
+// is a globe double-click, handled in Aircraft.tsx.
 export function CommandBar() {
 	const f = useStore($aircraftStore);
 	const linkState = useStore($linkState);
 	const [busy, setBusy] = useState(false);
 	const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
+	const [takeoffAlt, setTakeoffAlt] = useState(30);
 
 	const live = linkState === "alive";
 	const armed = f?.armed ?? false;
@@ -47,6 +48,7 @@ export function CommandBar() {
 	return (
 		<div className="mt-2 border-t border-white/10 pt-2">
 			<div className="mb-1 text-[10px] uppercase tracking-wide text-white/40">Command</div>
+
 			<Button
 				variant={armed ? "destructive" : "default"}
 				size="sm"
@@ -56,6 +58,42 @@ export function CommandBar() {
 			>
 				{armed ? "Disarm" : "Arm"}
 			</Button>
+
+			{/* Nav verbs. Takeoff carries the altitude from the inline field. */}
+			<div className="mt-1 flex items-center gap-1">
+				<Button
+					variant="outline"
+					size="sm"
+					disabled={!live || busy}
+					onClick={() => run("takeoff", { alt: takeoffAlt })}
+					className="flex-1 px-0 text-[10px]"
+					title={`Auto takeoff to ${takeoffAlt} m`}
+				>
+					Takeoff
+				</Button>
+				<input
+					type="number"
+					value={takeoffAlt}
+					min={5}
+					max={500}
+					onChange={(e) => setTakeoffAlt(Number(e.target.value) || 0)}
+					className="h-8 w-12 rounded-md border border-white/15 bg-transparent px-1 text-right font-mono text-[10px] text-white"
+					title="Takeoff altitude (m)"
+				/>
+				<span className="text-[10px] text-white/40">m</span>
+			</div>
+			<div className="mt-1 grid grid-cols-2 gap-1">
+				<Button variant="outline" size="sm" disabled={!live || busy}
+					onClick={() => run("land")} className="px-0 text-[10px]" title="Auto land">
+					Land
+				</Button>
+				<Button variant="outline" size="sm" disabled={!live || busy}
+					onClick={() => run("rtl")} className="px-0 text-[10px]" title="Return to launch">
+					RTL
+				</Button>
+			</div>
+
+			{/* Mode set. */}
 			<div className="mt-1 grid grid-cols-4 gap-1">
 				{MODES.map((m) => (
 					<Button
@@ -71,6 +109,9 @@ export function CommandBar() {
 					</Button>
 				))}
 			</div>
+
+			<div className="mt-1 text-[9px] text-white/30">Double-click the globe to fly there</div>
+
 			{status ? (
 				<div
 					className={`mt-1 truncate text-[10px] ${status.ok ? "text-emerald-400" : "text-red-400"}`}

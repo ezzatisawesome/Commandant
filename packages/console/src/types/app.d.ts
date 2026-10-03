@@ -51,6 +51,13 @@ export interface TelemetryFrame {
     targetAlt?: number,     // m (frame-dependent; horizontal path is the useful part)
     connected: boolean,     // bridge <-> MAVLink link alive
     linkState?: LinkState,  // richer link state (connected == linkState === "alive")
+    // Health / status (see docs/ws-contract.md), merged into the frame by gs.
+    ekfOk?: boolean,        // EKF_STATUS_REPORT flags nominal
+    gpsFix?: number,        // GPS_RAW_INT.fix_type (0 none … 3 3D … 6 RTK-fixed)
+    gpsSats?: number,       // satellites visible
+    failsafe?: boolean,     // vehicle in a failsafe
+    sysHealthy?: boolean,   // SYS_STATUS: all enabled sensors healthy
+    batteryWarning?: string | null, // e.g. "LOW" / "CRITICAL", else null
 }
 
 // --- WS envelope (console <-> gs), see docs/ws-contract.md --------------------
@@ -58,7 +65,9 @@ export interface TelemetryFrame {
 export type LinkState = "connecting" | "alive" | "stale" | "lost";
 
 // Commands the UI can issue. args shapes mirror AircraftSim/src/px4/mavlink_io.py.
-export type CommandName = "arm" | "disarm" | "set_mode";
+export type CommandName =
+    | "arm" | "disarm" | "set_mode"
+    | "takeoff" | "land" | "rtl" | "hold" | "reposition";
 
 // console -> gs
 export interface CommandMessage {
@@ -68,6 +77,21 @@ export interface CommandMessage {
     args: Record<string, unknown>,
 }
 export interface ClaimMessage { type: "claim" } // bid to be the single commander
+export interface ParamRefreshMessage { type: "param_refresh" } // request the full param list
+export interface ParamSetMessage {
+    type: "param_set",
+    id: string,             // uuid; echoed back in the matching ParamAckMessage
+    name: string,
+    value: number,
+    ptype?: number,         // MAV_PARAM_TYPE; gs infers if omitted
+}
+export interface StreamMessage {
+    type: "stream",
+    msgId: number,          // MAVLink message id to (de)activate
+    hz: number,             // rate; 0 disables the stream
+}
+export type ClientMessage =
+    | CommandMessage | ClaimMessage | ParamRefreshMessage | ParamSetMessage | StreamMessage;
 
 // gs -> console
 export interface TelemetryMessage extends TelemetryFrame { type: "telemetry" }
@@ -79,5 +103,34 @@ export interface AckMessage {
     text: string,           // human-readable ("accepted" | "timeout" | "not commander" | …)
 }
 export interface LinkMessage { type: "link", state: LinkState, lastMsgMs: number }
+export interface StatusTextMessage {
+    type: "statustext",
+    severity: number,       // MAV_SEVERITY (0 emergency … 7 debug)
+    text: string,
+    t: number,              // ms epoch
+}
+export interface ParamValueMessage {
+    type: "param",
+    name: string,
+    value: number,
+    ptype: number,          // MAV_PARAM_TYPE
+    index: number,          // position in the full list
+    count: number,          // total params (for progress)
+}
+export interface ParamProgressMessage {
+    type: "param_progress",
+    received: number,
+    count: number,
+}
+export interface ParamAckMessage {
+    type: "param_ack",
+    id: string,             // matches the ParamSetMessage.id
+    name: string,
+    value: number,          // the value gs read back after the set
+    ok: boolean,
+    text: string,
+}
 
-export type ServerMessage = TelemetryMessage | AckMessage | LinkMessage;
+export type ServerMessage =
+    | TelemetryMessage | AckMessage | LinkMessage | StatusTextMessage
+    | ParamValueMessage | ParamProgressMessage | ParamAckMessage;

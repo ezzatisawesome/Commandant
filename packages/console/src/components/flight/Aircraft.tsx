@@ -3,22 +3,29 @@
 import { useEffect, useRef } from "react";
 import { useStore } from "@nanostores/react";
 import {
+	Cartesian2,
 	Cartesian3,
+	Cartographic,
 	CallbackProperty,
 	CallbackPositionProperty,
 	Color,
 	Entity,
 	HeadingPitchRoll,
+	Math as CesiumMath,
 	Matrix3,
 	Matrix4,
 	PolygonHierarchy,
 	Quaternion,
+	ScreenSpaceEventHandler,
+	ScreenSpaceEventType,
 	Transforms,
 } from "cesium";
 
 import { $viewerStore } from "@/stores/cesium.store";
 import { $aircraftStore, $trailStore, $targetTrailStore, $aircraftEntityStore } from "@/stores/aircraft.store";
 import { $showTriad, $showHorizPlane } from "@/stores/viewControls.store";
+import { $linkState } from "@/stores/link.store";
+import { pushStatus } from "@/stores/statustext.store";
 import { telemetryClient } from "@/services/telemetry";
 
 // A usable horizontal fix: both defined, finite, and not the null-island (0,0)
@@ -226,6 +233,31 @@ export default function Aircraft() {
 		];
 		$aircraftEntityStore.set(model);
 
+		// "Fly to here": double-click the globe to command a reposition to that
+		// point (PX4 fixed-wing loiters there). Double-click so it doesn't fight
+		// normal drag/zoom. Only acts while the link is alive; gs enforces
+		// commander/authority and replies with an ack we surface in the status log.
+		const clickHandler = new ScreenSpaceEventHandler($viewer.scene.canvas);
+		clickHandler.setInputAction((movement: { position: Cartesian2 }) => {
+			if ($linkState.get() !== "alive") return;
+			const cart = $viewer.camera.pickEllipsoid(
+				movement.position,
+				$viewer.scene.globe.ellipsoid,
+			);
+			if (!cart) return;
+			const geo = Cartographic.fromCartesian(cart);
+			const lat = CesiumMath.toDegrees(geo.latitude);
+			const lon = CesiumMath.toDegrees(geo.longitude);
+			// Hold the aircraft's current altitude (the horizontal "go there" is the
+			// intent; alt frame for FW reposition is the current amsl).
+			const alt = $aircraftStore.get()?.alt ?? 0;
+			pushStatus(6, `fly-to ${lat.toFixed(5)}, ${lon.toFixed(5)}`);
+			telemetryClient
+				.sendCommand("reposition", { lat, lon, alt })
+				.then((ack) => pushStatus(ack.ok ? 6 : 4, `reposition: ${ack.text}`))
+				.catch((err) => pushStatus(4, `reposition failed: ${err instanceof Error ? err.message : "error"}`));
+		}, ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+
 		// Fly to the aircraft once, on the first position fix. camera.flyTo to the
 		// actual coordinates is reliable (no dependency on the model loading).
 		let flown = false;
@@ -242,6 +274,7 @@ export default function Aircraft() {
 
 		return () => {
 			unsubscribe();
+			clickHandler.destroy();
 			$aircraftEntityStore.set(null);
 			axesRef.current = [];
 			horizPlaneRef.current = null;
