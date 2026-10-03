@@ -80,11 +80,17 @@ def test_mavlink_to_ws_decode():
                     got = json.loads(await asyncio.wait_for(ws.recv(), timeout=0.5))
                 except asyncio.TimeoutError:
                     continue
+                if got.get("type") != "telemetry":  # skip interleaved link/ack messages
+                    continue
                 if got.get("mode") == "AUTO.LOITER" and got.get("lat") is not None:
                     # give the burst a moment so later messages (battery/actuator) land
                     await asyncio.sleep(0.1)
                     blast(boot); boot += 100
-                    got = json.loads(await asyncio.wait_for(ws.recv(), timeout=0.5))
+                    # read until the next telemetry frame (not a link/ack message)
+                    for _ in range(10):
+                        got = json.loads(await asyncio.wait_for(ws.recv(), timeout=0.5))
+                        if got.get("type") == "telemetry":
+                            break
                     break
 
         serve_task.cancel()

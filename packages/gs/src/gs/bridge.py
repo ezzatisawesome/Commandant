@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import queue
 import socket
 import threading
 import time
@@ -32,15 +33,47 @@ os.environ.setdefault("MAVLINK20", "1")
 from pymavlink import mavutil  # noqa: E402
 
 BROADCAST_HZ = 25
-STALE_MS = 2000          # no traffic for this long => "disconnected"
+STALE_MS = 2000          # no traffic for this long => link no longer "alive" (-> stale)
+LOST_MS = 5000           # no traffic for this long => link "lost"
 REBOOT_GAP_MS = 5000     # a backward time_boot_ms jump bigger than this = PX4 reboot
 TARGET_SOURCE_TTL_MS = 2000   # JSON setpoint wins over PX4's for this long after it arrives
 BATTERY_SOURCE_TTL_MS = 3000  # JSON battery wins over PX4's dummy for this long
 TARGET_STALE_MS = 3000        # re-request msg 87 once the setpoint stream goes quiet
 
+# Command TX: who we address, and the retry policy for COMMAND_ACK tracking.
+TARGET_SYSTEM = 1        # PX4 autopilot
+TARGET_COMPONENT = 1
+CMD_MAX_TRIES = 3        # total COMMAND_LONG sends before giving up
+CMD_RETRY_MS = 1000      # re-send cadence while awaiting COMMAND_ACK
+
 # PX4 message ids not in the default GCS stream; we request them QGC-style.
 MSG_ACTUATOR_OUTPUT_STATUS = mavutil.mavlink.MAVLINK_MSG_ID_ACTUATOR_OUTPUT_STATUS  # 375
 MSG_POSITION_TARGET_GLOBAL_INT = mavutil.mavlink.MAVLINK_MSG_ID_POSITION_TARGET_GLOBAL_INT  # 87
+
+
+def build_command(name: str, args: dict[str, Any]) -> tuple[int, list[float]]:
+    """Map a WS command (see docs/ws-contract.md) to a (MAV_CMD, 7 params) pair.
+    Shapes mirror AircraftSim/src/px4/mavlink_io.py exactly."""
+    m = mavutil.mavlink
+    if name in ("arm", "disarm"):
+        force = bool(args.get("force", False))
+        p1 = 1.0 if name == "arm" else 0.0
+        return m.MAV_CMD_COMPONENT_ARM_DISARM, [p1, 21196.0 if force else 0.0, 0, 0, 0, 0, 0]
+    if name == "set_mode":
+        main = int(args.get("main", 0))
+        sub = int(args.get("sub", 0))
+        return m.MAV_CMD_DO_SET_MODE, [float(m.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED), main, sub, 0, 0, 0, 0]
+    raise ValueError(f"unknown command '{name}'")
+
+
+_RESULT_TEXT = {
+    0: "accepted", 1: "temporarily rejected", 2: "denied",
+    3: "unsupported", 4: "failed", 5: "in progress", 6: "cancelled",
+}
+
+
+def result_text(result: int) -> str:
+    return _RESULT_TEXT.get(result, f"result {result}")
 
 # --- PX4 flight-mode decode (custom_mode main/sub) ---------------------------
 _MAIN = ["", "MANUAL", "ALTCTL", "POSCTL", "AUTO", "ACRO", "OFFBOARD", "STABILIZED", "RATTITUDE"]
@@ -102,19 +135,72 @@ class Bridge:
 
         self._clients: set[Any] = set()
 
+        # --- command path --------------------------------------------------
+        # All pymavlink I/O happens on the mav thread. The WS (asyncio) thread
+        # hands commands off through this thread-safe queue; the mav thread owns
+        # `_pending` (the in-flight COMMAND_ACK registry) exclusively.
+        self._cmd_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._pending: dict[str, dict[str, Any]] = {}      # mav-thread only
+        self._pending_clients: dict[str, Any] = {}         # asyncio-only: id -> ws
+        self._commander: Any = None                        # asyncio-only: single commander ws
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._last_link_state: str | None = None
+
     # --- MAVLink ingest ------------------------------------------------------
     def _mav_loop(self) -> None:
         conn = mavutil.mavlink_connection(self.mavlink_endpoint)
         print(f"[gs] listening for MAVLink on {self.mavlink_endpoint}")
         while True:
             try:
-                msg = conn.recv_match(blocking=True, timeout=1.0)
+                msg = conn.recv_match(blocking=True, timeout=0.5)
             except Exception as exc:  # malformed packet / transient socket error
                 print(f"[gs] mavlink recv error: {exc}")
+                msg = None
+            if msg is not None:
+                self._on_mav(conn, msg)
+            # Drain queued commands and drive retries/timeouts on THIS thread, so
+            # all pymavlink sends share the one connection. recv's 0.5 s timeout
+            # bounds the retry/timeout resolution even when there's no traffic.
+            self._service_commands(conn)
+
+    def _send_command_long(self, conn: Any, mav_cmd: int, params: list[float], confirmation: int) -> None:
+        conn.mav.command_long_send(
+            TARGET_SYSTEM, TARGET_COMPONENT, mav_cmd, confirmation, *params)
+
+    def _service_commands(self, conn: Any) -> None:
+        """Mav-thread: accept newly queued commands, (re)send due ones, and time
+        out those that never got a COMMAND_ACK. Never fire-and-forget."""
+        now = _now_ms()
+        # 1. Admit new commands from the WS thread.
+        while True:
+            try:
+                item = self._cmd_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._pending[item["id"]] = {**item, "tries": 0, "last_send_ms": 0}
+        # 2. Send / retry / expire.
+        for cid, e in list(self._pending.items()):
+            if now - e["last_send_ms"] < CMD_RETRY_MS:
                 continue
-            if msg is None:
+            if e["tries"] >= CMD_MAX_TRIES:
+                del self._pending[cid]
+                self._report(cid, ok=False, result=-1, text="timeout")
                 continue
-            self._on_mav(conn, msg)
+            try:
+                self._send_command_long(conn, e["mav_cmd"], e["params"], e["tries"])
+            except Exception as exc:
+                del self._pending[cid]
+                self._report(cid, ok=False, result=-1, text=f"send error: {exc}")
+                continue
+            e["tries"] += 1
+            e["last_send_ms"] = now
+
+    def _report(self, cid: str, ok: bool, result: int, text: str) -> None:
+        """Hand a resolved command result to the asyncio loop for WS delivery."""
+        loop = self._loop
+        if loop is not None:
+            loop.call_soon_threadsafe(
+                self._emit_ack, {"id": cid, "ok": ok, "result": result, "text": text})
 
     def _request_message(self, conn: Any, tsys: int, tcomp: int, msg_id: int) -> None:
         now = _now_ms()
@@ -190,6 +276,18 @@ class Bridge:
                     L["elevator"] = pwm_pct(a[7])
                     L["rudder"] = 0
 
+            elif t == "COMMAND_ACK":
+                # Resolve the oldest pending command with this MAV command number.
+                # (Commands are infrequent; typically one is in flight.)
+                match_id = next(
+                    (cid for cid, e in self._pending.items() if e["mav_cmd"] == msg.command),
+                    None,
+                )
+                if match_id is not None:
+                    del self._pending[match_id]
+                    ok = (msg.result == mavutil.mavlink.MAV_RESULT_ACCEPTED)
+                    self._report(match_id, ok=ok, result=msg.result, text=result_text(msg.result))
+
             elif t == "HEARTBEAT":
                 L["armed"] = bool(msg.base_mode & 128)  # MAV_MODE_FLAG_SAFETY_ARMED
                 L["mode"] = decode_mode(msg.custom_mode)
@@ -227,14 +325,84 @@ class Bridge:
                 if any(obj.get(k) is not None for k in ("voltage", "current", "batteryRemaining")):
                     self._json_battery_at = now
 
-    # --- WebSocket egress ----------------------------------------------------
+    # --- link state ----------------------------------------------------------
+    def _link_state(self, now: int, last: int) -> str:
+        if last == 0:
+            return "connecting"
+        age = now - last
+        if age < STALE_MS:
+            return "alive"
+        if age < LOST_MS:
+            return "stale"
+        return "lost"
+
+    # --- WebSocket (telemetry out, commands in) ------------------------------
+    async def _send(self, ws: Any, obj: dict[str, Any]) -> None:
+        try:
+            await ws.send(json.dumps(obj))
+        except Exception:
+            pass  # client went away mid-send; broadcast loop / finally will clean up
+
+    async def _on_ws_message(self, ws: Any, raw: Any) -> None:
+        try:
+            msg = json.loads(raw)
+        except Exception:
+            return
+        if not isinstance(msg, dict):
+            return
+        mtype = msg.get("type")
+
+        if mtype == "claim":
+            # First claimer wins until it disconnects; same ws re-claiming is fine.
+            cid = msg.get("id")
+            if self._commander is None or self._commander is ws:
+                self._commander = ws
+                if cid is not None:
+                    await self._send(ws, {"type": "ack", "id": cid, "ok": True, "result": 0, "text": "commander"})
+            elif cid is not None:
+                await self._send(ws, {"type": "ack", "id": cid, "ok": False, "result": -1, "text": "not commander"})
+
+        elif mtype == "command":
+            cid = msg.get("id")
+            if ws is not self._commander:
+                await self._send(ws, {"type": "ack", "id": cid, "ok": False, "result": -1, "text": "not commander"})
+                return
+            try:
+                mav_cmd, params = build_command(msg.get("name"), msg.get("args") or {})
+            except ValueError as exc:
+                await self._send(ws, {"type": "ack", "id": cid, "ok": False, "result": -1, "text": str(exc)})
+                return
+            # Route the eventual ack back to this client, then hand off to the mav thread.
+            self._pending_clients[cid] = ws
+            self._cmd_queue.put({"id": cid, "mav_cmd": mav_cmd, "params": params})
+
+    def _emit_ack(self, event: dict[str, Any]) -> None:
+        # Runs in the asyncio loop (scheduled via call_soon_threadsafe).
+        asyncio.create_task(self._deliver_ack(event))
+
+    async def _deliver_ack(self, event: dict[str, Any]) -> None:
+        ws = self._pending_clients.pop(event["id"], None)
+        if ws is None:
+            return
+        await self._send(ws, {
+            "type": "ack", "id": event["id"],
+            "ok": event["ok"], "result": event["result"], "text": event["text"],
+        })
+
     async def _serve(self) -> None:
+        self._loop = asyncio.get_running_loop()
+
         async def handler(ws: Any) -> None:
             self._clients.add(ws)
             try:
-                await ws.wait_closed()
+                async for raw in ws:
+                    await self._on_ws_message(ws, raw)
+            except Exception:
+                pass  # connection dropped; cleaned up below
             finally:
                 self._clients.discard(ws)
+                if self._commander is ws:
+                    self._commander = None
 
         async with websockets.serve(handler, self.ws_host, self.ws_port):
             print(f"[gs] websocket serving on ws://{self.ws_host}:{self.ws_port}")
@@ -243,11 +411,20 @@ class Bridge:
                 await asyncio.sleep(interval)
                 now = _now_ms()
                 with self._lock:
-                    self.latest["t"] = now
-                    self.latest["connected"] = (now - self.last_msg_at) < STALE_MS
-                    payload = json.dumps(self.latest)
+                    last = self.last_msg_at
+                    frame = dict(self.latest)
+                state = self._link_state(now, last)
+                frame["type"] = "telemetry"
+                frame["t"] = now
+                frame["linkState"] = state
+                frame["connected"] = (state == "alive")
                 if self._clients:
-                    websockets.broadcast(self._clients, payload)
+                    websockets.broadcast(self._clients, json.dumps(frame))
+                    if state != self._last_link_state:
+                        websockets.broadcast(self._clients, json.dumps(
+                            {"type": "link", "state": state, "lastMsgMs": last}))
+                # Track transitions even with no clients so the next connect is correct.
+                self._last_link_state = state
 
     def run(self) -> None:
         threading.Thread(target=self._mav_loop, daemon=True).start()

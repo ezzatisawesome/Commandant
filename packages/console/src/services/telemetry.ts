@@ -1,23 +1,47 @@
 import { JulianDate } from "cesium";
+import { v4 as uuidv4 } from "uuid";
 
-import type { TelemetryFrame } from "@/types/app";
+import type {
+	AckMessage,
+	CommandName,
+	LinkState,
+	ServerMessage,
+	TelemetryFrame,
+} from "@/types/app";
 import { pushFrame, clearTrail } from "@/stores/aircraft.store";
 import { $viewerStore } from "@/stores/cesium.store";
+import { $linkState } from "@/stores/link.store";
 import envs from "@/lib/envs";
 
-// WebSocket client for the MAVLink->WS bridge. Auto-reconnects; pushes each
-// decoded frame into the aircraft store. Mirrors the source->store flow used by
-// services/Satellite.ts.
+// How long a command waits for its ack before we give up (gs retries internally
+// a few times at ~1 s, so this is generous enough to cover that).
+const COMMAND_TIMEOUT_MS = 5000;
+
+// One in-flight command awaiting its ack (matched by id).
+interface Pending {
+	resolve: (ack: AckMessage) => void;
+	reject: (err: Error) => void;
+	timer: ReturnType<typeof setTimeout>;
+}
+
+// WebSocket client for the gs daemon. Carries two directions over one socket:
+//   gs -> console: `telemetry` frames, `ack` responses, `link` state changes
+//   console -> gs: `command` requests, and a `claim` to be the commander
+// Auto-reconnects; pushes each telemetry frame into the aircraft store and drives
+// the Cesium clock. Mirrors the source->store flow used by services/Satellite.ts.
 export class TelemetryClient {
 	private ws: WebSocket | null = null;
 	private closed = false;
 	private reconnectTimer: number | null = null;
+	// Commands sent but not yet acked, keyed by command id.
+	private pending = new Map<string, Pending>();
 
 	constructor(private url: string = envs.MAVLINK_WS_ENDPOINT) {}
 
 	connect() {
 		this.closed = false;
 		clearTrail(); // start each session with a clean flight path
+		$linkState.set("connecting");
 		this.open();
 	}
 
@@ -26,33 +50,36 @@ export class TelemetryClient {
 		const ws = new WebSocket(this.url);
 		this.ws = ws;
 
+		ws.onopen = () => {
+			// Bid to be the single active commander as soon as the socket is up, so
+			// our commands are accepted (gs rejects non-commanders). Still
+			// "connecting" until the first telemetry frame proves data is flowing.
+			this.send({ type: "claim" });
+		};
+
 		ws.onmessage = (event) => {
+			let msg: ServerMessage;
 			try {
-				const frame = JSON.parse(event.data) as TelemetryFrame;
-				pushFrame(frame);
-				// Drive the Cesium clock from the sim's simulated instant, so the
-				// globe's day/night terminator tracks the simulated time-of-day
-				// (globe lighting is enabled in Globe.tsx).
-				if (frame.sunEpochMs !== undefined) {
-					const viewer = $viewerStore.get();
-					if (viewer && !viewer.isDestroyed()) {
-						viewer.clock.currentTime = JulianDate.fromDate(new Date(frame.sunEpochMs));
-						// Fade the ground atmosphere with the sun so the blue haze
-						// stays in daylight but night is dark even when zoomed in:
-						// full brightness by ~200 W/m^2, -> -1 (dark) at 0.
-						if (frame.irradiance !== undefined) {
-							viewer.scene.globe.atmosphereBrightnessShift =
-								Math.min(0, frame.irradiance / 200 - 1);
-						}
-					}
-				}
+				msg = JSON.parse(event.data) as ServerMessage;
 			} catch {
-				// ignore malformed frames
+				return; // ignore malformed frames
+			}
+			// Discriminate on `type`. A message with no `type` is treated as a
+			// telemetry frame for back-compat with the pre-envelope bridge.
+			const type = (msg as { type?: string }).type;
+			if (type === "ack") {
+				this.resolveAck(msg as AckMessage);
+			} else if (type === "link") {
+				$linkState.set((msg as { state: LinkState }).state);
+			} else {
+				this.onTelemetry(msg as TelemetryFrame & { type?: string });
 			}
 		};
 
 		ws.onclose = () => {
+			$linkState.set("lost");
 			pushFrame({ t: Date.now(), connected: false });
+			this.failAllPending("link closed");
 			this.scheduleReconnect();
 		};
 
@@ -60,6 +87,77 @@ export class TelemetryClient {
 			ws.close();
 		};
 	}
+
+	// A telemetry frame: strip the envelope `type`, update link state, push to the
+	// store, and drive the Cesium clock from the sim's simulated instant.
+	private onTelemetry(msg: TelemetryFrame & { type?: string }) {
+		const { type: _type, ...frame } = msg;
+		void _type;
+		// Prefer the daemon's explicit linkState; fall back to `connected` for the
+		// pre-link-manager bridge.
+		$linkState.set(frame.linkState ?? (frame.connected ? "alive" : "stale"));
+		pushFrame(frame as TelemetryFrame);
+
+		if (frame.sunEpochMs !== undefined) {
+			const viewer = $viewerStore.get();
+			if (viewer && !viewer.isDestroyed()) {
+				viewer.clock.currentTime = JulianDate.fromDate(new Date(frame.sunEpochMs));
+				// Fade the ground atmosphere with the sun so the blue haze stays in
+				// daylight but night is dark even when zoomed in: full brightness by
+				// ~200 W/m^2, -> -1 (dark) at 0.
+				if (frame.irradiance !== undefined) {
+					viewer.scene.globe.atmosphereBrightnessShift =
+						Math.min(0, frame.irradiance / 200 - 1);
+				}
+			}
+		}
+	}
+
+	// --- commanding ----------------------------------------------------------
+
+	/**
+	 * Send a command and resolve with its ack (matched by id). Rejects on timeout
+	 * or if the socket isn't open. The returned ack carries `ok`/`text`, so a
+	 * rejected command (e.g. "not commander") resolves with ok:false rather than
+	 * throwing — only transport failures reject.
+	 */
+	sendCommand(name: CommandName, args: Record<string, unknown> = {}): Promise<AckMessage> {
+		return new Promise((resolve, reject) => {
+			if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+				reject(new Error("not connected"));
+				return;
+			}
+			const id = uuidv4();
+			const timer = setTimeout(() => {
+				this.pending.delete(id);
+				reject(new Error("timeout"));
+			}, COMMAND_TIMEOUT_MS);
+			this.pending.set(id, { resolve, reject, timer });
+			this.send({ type: "command", id, name, args });
+		});
+	}
+
+	private resolveAck(ack: AckMessage) {
+		const p = this.pending.get(ack.id);
+		if (!p) return; // unknown/duplicate ack
+		clearTimeout(p.timer);
+		this.pending.delete(ack.id);
+		p.resolve(ack);
+	}
+
+	private failAllPending(reason: string) {
+		for (const [, p] of this.pending) {
+			clearTimeout(p.timer);
+			p.reject(new Error(reason));
+		}
+		this.pending.clear();
+	}
+
+	private send(obj: unknown) {
+		this.ws?.send(JSON.stringify(obj));
+	}
+
+	// --- lifecycle -----------------------------------------------------------
 
 	private scheduleReconnect() {
 		if (this.closed || this.reconnectTimer !== null) return;
@@ -75,7 +173,13 @@ export class TelemetryClient {
 			window.clearTimeout(this.reconnectTimer);
 			this.reconnectTimer = null;
 		}
+		this.failAllPending("disconnected");
+		$linkState.set("lost");
 		this.ws?.close();
 		this.ws = null;
 	}
 }
+
+// Shared singleton: Aircraft.tsx owns its connect/disconnect lifecycle, and the
+// command controls (CommandBar) send over the same socket.
+export const telemetryClient = new TelemetryClient();

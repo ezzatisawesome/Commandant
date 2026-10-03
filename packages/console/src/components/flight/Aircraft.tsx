@@ -19,7 +19,7 @@ import {
 import { $viewerStore } from "@/stores/cesium.store";
 import { $aircraftStore, $trailStore, $targetTrailStore, $aircraftEntityStore } from "@/stores/aircraft.store";
 import { $showTriad, $showHorizPlane } from "@/stores/viewControls.store";
-import { TelemetryClient } from "@/services/telemetry";
+import { telemetryClient } from "@/services/telemetry";
 
 // A usable horizontal fix: both defined, finite, and not the null-island (0,0)
 // sentinel some glitch/uninitialized frames carry. Guarding on it keeps the model
@@ -47,11 +47,11 @@ export default function Aircraft() {
 	const axesRef = useRef<Entity[]>([]);
 	const horizPlaneRef = useRef<Entity | null>(null);
 
-	// Open the telemetry stream once.
+	// Open the telemetry stream once (shared singleton, so the command controls
+	// send over the same socket).
 	useEffect(() => {
-		const client = new TelemetryClient();
-		client.connect();
-		return () => client.disconnect();
+		telemetryClient.connect();
+		return () => telemetryClient.disconnect();
 	}, []);
 
 	useEffect(() => {

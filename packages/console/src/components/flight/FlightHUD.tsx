@@ -5,10 +5,22 @@ import { useStore } from "@nanostores/react";
 import { ChevronUp, ChevronDown } from "lucide-react";
 
 import { $aircraftStore, $historyStore } from "@/stores/aircraft.store";
+import { $linkState } from "@/stores/link.store";
+import type { LinkState } from "@/types/app";
 import { Sparkline } from "./Sparkline";
 import { ControlBar } from "./ControlBar";
 import { AttitudeIndicator } from "./AttitudeIndicator";
 import { Compass } from "./Compass";
+import { CommandBar } from "./CommandBar";
+
+// Connection-indicator styling per link state: amber pulse while connecting,
+// green alive, amber stale, red lost.
+const LINK_DOT: Record<LinkState, { className: string; title: string }> = {
+	connecting: { className: "bg-amber-400 animate-pulse", title: "Connecting…" },
+	alive: { className: "bg-emerald-400", title: "MAVLink alive" },
+	stale: { className: "bg-amber-400", title: "Link stale — no recent telemetry" },
+	lost: { className: "bg-red-500", title: "Link lost" },
+};
 
 function Field({
 	label,
@@ -45,13 +57,14 @@ const fmt = (v: number | undefined, digits = 1) =>
 export default function FlightHUD() {
 	const f = useStore($aircraftStore);
 	const history = useStore($historyStore);
+	const linkState = useStore($linkState);
 	const [collapsed, setCollapsed] = useState(false);
 
 	// Extract per-field series from the downsampled history for the sparklines.
 	const series = (key: keyof (typeof history)[number]) =>
 		history.map((frame) => frame[key] as number | undefined);
 
-	const connected = f?.connected ?? false;
+	const dot = LINK_DOT[linkState];
 
 	return (
 		<div className="w-64 rounded-md border border-white/10 bg-black/60 p-3 backdrop-blur">
@@ -65,8 +78,8 @@ export default function FlightHUD() {
 					Telemetry
 				</button>
 				<span
-					className={`h-2 w-2 rounded-full ${connected ? "bg-emerald-400" : "bg-red-500"}`}
-					title={connected ? "MAVLink connected" : "No telemetry"}
+					className={`h-2 w-2 rounded-full ${dot.className}`}
+					title={dot.title}
 				/>
 			</div>
 			{collapsed ? null : (
@@ -100,6 +113,7 @@ export default function FlightHUD() {
 				<Field label="Motor" value={fmt(f?.motorCurrent, 1)} unit="A" spark={series("motorCurrent")} sparkClassName="text-rose-400/80" />
 				<Field label="Irradiance" value={fmt(f?.irradiance, 0)} unit="W/m²" spark={series("irradiance")} sparkClassName="text-yellow-300/80" />
 			</div>
+			<CommandBar />
 			</>
 			)}
 		</div>

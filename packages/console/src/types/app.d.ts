@@ -50,4 +50,34 @@ export interface TelemetryFrame {
     targetLon?: number,     // deg
     targetAlt?: number,     // m (frame-dependent; horizontal path is the useful part)
     connected: boolean,     // bridge <-> MAVLink link alive
+    linkState?: LinkState,  // richer link state (connected == linkState === "alive")
 }
+
+// --- WS envelope (console <-> gs), see docs/ws-contract.md --------------------
+// Link health as reported by the gs daemon's link manager.
+export type LinkState = "connecting" | "alive" | "stale" | "lost";
+
+// Commands the UI can issue. args shapes mirror AircraftSim/src/px4/mavlink_io.py.
+export type CommandName = "arm" | "disarm" | "set_mode";
+
+// console -> gs
+export interface CommandMessage {
+    type: "command",
+    id: string,             // uuid; echoed back in the matching AckMessage
+    name: CommandName,
+    args: Record<string, unknown>,
+}
+export interface ClaimMessage { type: "claim" } // bid to be the single commander
+
+// gs -> console
+export interface TelemetryMessage extends TelemetryFrame { type: "telemetry" }
+export interface AckMessage {
+    type: "ack",
+    id: string,             // matches the CommandMessage.id
+    ok: boolean,            // convenience: result === 0 (ACCEPTED) or a local accept
+    result: number,         // MAV_RESULT when from a COMMAND_ACK, else -1
+    text: string,           // human-readable ("accepted" | "timeout" | "not commander" | …)
+}
+export interface LinkMessage { type: "link", state: LinkState, lastMsgMs: number }
+
+export type ServerMessage = TelemetryMessage | AckMessage | LinkMessage;
