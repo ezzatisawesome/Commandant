@@ -121,6 +121,85 @@ _RESULT_TEXT = {
 def result_text(result: int) -> str:
     return _RESULT_TEXT.get(result, f"result {result}")
 
+
+# --- Mission protocol (Phase 4) ----------------------------------------------
+MAV_MISSION_TYPE_MISSION = mavutil.mavlink.MAV_MISSION_TYPE_MISSION
+MISSION_OP_TIMEOUT_MS = 1500   # no handshake progress -> retry the kickoff
+MISSION_MAX_TRIES = 3
+
+_KIND_TO_CMD = {
+    "takeoff": mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+    "waypoint": mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
+    "loiter_unlim": mavutil.mavlink.MAV_CMD_NAV_LOITER_UNLIM,
+    "loiter_time": mavutil.mavlink.MAV_CMD_NAV_LOITER_TIME,
+    "loiter_turns": mavutil.mavlink.MAV_CMD_NAV_LOITER_TURNS,
+    "rtl": mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH,
+    "land": mavutil.mavlink.MAV_CMD_NAV_LAND,
+}
+_CMD_TO_KIND = {v: k for k, v in _KIND_TO_CMD.items()}
+
+_MISSION_RESULT_TEXT = {
+    0: "accepted", 1: "error", 2: "unsupported frame", 3: "unsupported",
+    4: "no space", 5: "invalid", 13: "invalid param", 14: "invalid sequence",
+    15: "denied", 16: "cancelled",
+}
+
+
+def mission_result_text(result: int) -> str:
+    return _MISSION_RESULT_TEXT.get(result, f"result {result}")
+
+
+def mission_item_fields(seq: int, item: dict[str, Any]) -> dict[str, Any]:
+    """Map a console mission item (see docs/ws-contract.md) to MISSION_ITEM_INT
+    fields: lat/lon -> int*1e7, relative-alt frame (PX4 mission convention)."""
+    m = mavutil.mavlink
+    kind = item.get("kind", "waypoint")
+    cmd = _KIND_TO_CMD.get(kind)
+    if cmd is None:
+        raise ValueError(f"unknown mission kind '{kind}'")
+    p = item.get("params") or {}
+    lat = item.get("lat") or 0.0
+    lon = item.get("lon") or 0.0
+    alt = float(item.get("alt") or 0.0)
+    p1 = p2 = p3 = p4 = 0.0
+    if kind == "waypoint":
+        p2 = float(p.get("acceptRadius", p.get("radius", 0)) or 0)
+    elif kind == "loiter_unlim":
+        p3 = float(p.get("radius", 0) or 0)
+    elif kind == "loiter_time":
+        p1 = float(p.get("seconds", 0) or 0)
+        p3 = float(p.get("radius", 0) or 0)
+    elif kind == "loiter_turns":
+        p1 = float(p.get("turns", 0) or 0)
+        p3 = float(p.get("radius", 0) or 0)
+    elif kind == "takeoff":
+        p1 = float(p.get("pitch", 0) or 0)
+    return {
+        "frame": m.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, "command": cmd,
+        "current": 1 if seq == 0 else 0, "autocontinue": 1,
+        "param1": p1, "param2": p2, "param3": p3, "param4": p4,
+        "x": int(round(lat * 1e7)), "y": int(round(lon * 1e7)), "z": alt,
+    }
+
+
+def mission_item_to_console(msg: Any) -> dict[str, Any]:
+    """Reverse-map a downloaded MISSION_ITEM_INT to the console item shape."""
+    kind = _CMD_TO_KIND.get(msg.command, f"cmd_{msg.command}")
+    item: dict[str, Any] = {"seq": msg.seq, "kind": kind,
+                            "lat": msg.x / 1e7, "lon": msg.y / 1e7, "alt": msg.z}
+    params: dict[str, Any] = {}
+    if kind == "waypoint" and msg.param2:
+        params["acceptRadius"] = msg.param2
+    if kind in ("loiter_unlim", "loiter_time", "loiter_turns") and msg.param3:
+        params["radius"] = msg.param3
+    if kind == "loiter_time" and msg.param1:
+        params["seconds"] = msg.param1
+    if kind == "loiter_turns" and msg.param1:
+        params["turns"] = msg.param1
+    if params:
+        item["params"] = params
+    return item
+
 # --- PX4 flight-mode decode (custom_mode main/sub) ---------------------------
 _MAIN = ["", "MANUAL", "ALTCTL", "POSCTL", "AUTO", "ACRO", "OFFBOARD", "STABILIZED", "RATTITUDE"]
 _AUTO_SUB = ["", "READY", "TAKEOFF", "LOITER", "MISSION", "RTL", "LAND", "RTGS", "FOLLOW", "PRECLAND"]
@@ -208,6 +287,12 @@ class Bridge:
         self._param_last_progress = 0
         self._param_set_pending: dict[str, dict[str, Any]] = {}  # name -> set job
 
+        # --- mission path (Phase 4) ----------------------------------------
+        # Upload/download handshakes run on the mav thread; `_mission` holds the
+        # single active op (one at a time) and is mav-thread-owned.
+        self._mission_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._mission: dict[str, Any] | None = None
+
     # --- MAVLink ingest ------------------------------------------------------
     def _mav_loop(self) -> None:
         conn = open_connection(self.mavlink_endpoint, self.baud)
@@ -226,6 +311,7 @@ class Bridge:
             self._service_commands(conn)
             self._service_params(conn)
             self._service_misc(conn)
+            self._service_missions(conn)
 
     def _send_command_long(self, conn: Any, mav_cmd: int, params: list[float], confirmation: int) -> None:
         conn.mav.command_long_send(
@@ -378,6 +464,110 @@ class Bridge:
         job["tries"] += 1
         job["last_send_ms"] = _now_ms()
 
+    # --- mission protocol (hand-rolled, mav thread) --------------------------
+    def _service_missions(self, conn: Any) -> None:
+        now = _now_ms()
+        # 1. Admit queued mission jobs (one active op at a time).
+        while True:
+            try:
+                job = self._mission_queue.get_nowait()
+            except queue.Empty:
+                break
+            kind = job["kind"]
+            if kind == "set_current":
+                try:
+                    conn.mav.mission_set_current_send(TARGET_SYSTEM, TARGET_COMPONENT, int(job["seq"]))
+                except Exception as exc:
+                    print(f"[gs] mission_set_current failed: {exc}")
+                continue
+            if self._mission is not None:
+                # One op at a time; reject the newcomer rather than interleave handshakes.
+                if kind == "push":
+                    self._report_mission_ack(job.get("id"), ok=False, result=-1, text="busy")
+                else:
+                    self._broadcast({"type": "mission_ack", "ok": False, "result": -1, "text": "busy"})
+                continue
+            if kind == "push":
+                self._start_mission_upload(conn, job)
+            elif kind == "pull":
+                self._start_mission_download(conn, job)
+
+        # 2. Drive the active op's timeout / bounded retry (re-send the kickoff).
+        op = self._mission
+        if op is not None and now - op["last"] > MISSION_OP_TIMEOUT_MS:
+            if op["tries"] >= MISSION_MAX_TRIES:
+                if op["op"] == "upload":
+                    self._report_mission_ack(op.get("id"), ok=False, result=-1, text="timeout")
+                else:
+                    self._broadcast({"type": "mission_ack", "ok": False, "result": -1, "text": "timeout"})
+                self._mission = None
+            else:
+                op["tries"] += 1
+                op["last"] = now
+                try:
+                    if op["op"] == "upload":
+                        conn.mav.mission_count_send(
+                            TARGET_SYSTEM, TARGET_COMPONENT, op["count"], MAV_MISSION_TYPE_MISSION)
+                    elif op["count"] is None:
+                        conn.mav.mission_request_list_send(
+                            TARGET_SYSTEM, TARGET_COMPONENT, MAV_MISSION_TYPE_MISSION)
+                    else:
+                        conn.mav.mission_request_int_send(
+                            TARGET_SYSTEM, TARGET_COMPONENT, op["next"], MAV_MISSION_TYPE_MISSION)
+                except Exception as exc:
+                    print(f"[gs] mission retry failed: {exc}")
+
+    def _start_mission_upload(self, conn: Any, job: dict[str, Any]) -> None:
+        try:
+            fields = [mission_item_fields(i, it) for i, it in enumerate(job.get("items") or [])]
+        except ValueError as exc:
+            self._report_mission_ack(job.get("id"), ok=False, result=-1, text=str(exc))
+            return
+        self._mission = {"op": "upload", "id": job.get("id"), "items": fields,
+                         "count": len(fields), "last": _now_ms(), "tries": 0}
+        try:
+            conn.mav.mission_count_send(
+                TARGET_SYSTEM, TARGET_COMPONENT, len(fields), MAV_MISSION_TYPE_MISSION)
+        except Exception as exc:
+            self._mission = None
+            self._report_mission_ack(job.get("id"), ok=False, result=-1, text=f"send error: {exc}")
+
+    def _start_mission_download(self, conn: Any, job: dict[str, Any]) -> None:
+        self._mission = {"op": "download", "id": job.get("id"), "count": None,
+                         "items": {}, "next": 0, "last": _now_ms(), "tries": 0}
+        try:
+            conn.mav.mission_request_list_send(
+                TARGET_SYSTEM, TARGET_COMPONENT, MAV_MISSION_TYPE_MISSION)
+        except Exception as exc:
+            self._mission = None
+            self._broadcast({"type": "mission_ack", "ok": False, "result": -1, "text": f"send error: {exc}"})
+
+    def _mission_send_item(self, conn: Any, seq: int) -> None:
+        f = self._mission["items"][seq]
+        conn.mav.mission_item_int_send(
+            TARGET_SYSTEM, TARGET_COMPONENT, seq, f["frame"], f["command"],
+            f["current"], f["autocontinue"], f["param1"], f["param2"], f["param3"],
+            f["param4"], f["x"], f["y"], f["z"], MAV_MISSION_TYPE_MISSION)
+
+    def _report_mission_ack(self, mid: Any, ok: bool, result: int, text: str) -> None:
+        loop = self._loop
+        if loop is not None:
+            loop.call_soon_threadsafe(
+                self._emit_mission_ack, {"id": mid, "ok": ok, "result": result, "text": text})
+
+    def _emit_mission_ack(self, event: dict[str, Any]) -> None:
+        asyncio.create_task(self._deliver_mission_ack(event))
+
+    async def _deliver_mission_ack(self, event: dict[str, Any]) -> None:
+        mid = event.get("id")
+        payload = {"type": "mission_ack", "id": mid, "ok": event["ok"],
+                   "result": event["result"], "text": event["text"]}
+        ws = self._pending_clients.pop(mid, None) if mid is not None else None
+        if ws is not None:
+            await self._send(ws, payload)
+        else:
+            self._do_broadcast(json.dumps(payload))
+
     def _request_message(self, conn: Any, tsys: int, tcomp: int, msg_id: int) -> None:
         now = _now_ms()
         if now - self._last_req_at.get(msg_id, 0) < 1000:  # throttle retries per msg
@@ -515,6 +705,71 @@ class Bridge:
                     ok = (msg.result == mavutil.mavlink.MAV_RESULT_ACCEPTED)
                     self._report(match_id, ok=ok, result=msg.result, text=result_text(msg.result))
 
+            elif t in ("MISSION_REQUEST_INT", "MISSION_REQUEST"):
+                # Autopilot pulling items during our upload. Answer whatever seq it
+                # asks for (handles out-of-order and re-requests transparently).
+                op = self._mission
+                if op is not None and op["op"] == "upload" and getattr(msg, "mission_type", 0) == 0:
+                    seq = msg.seq
+                    if 0 <= seq < len(op["items"]):
+                        try:
+                            self._mission_send_item(conn, seq)
+                        except Exception as exc:
+                            print(f"[gs] mission item send failed: {exc}")
+                        op["last"] = now
+                        op["tries"] = 0
+                        self._broadcast({"type": "mission_progress", "phase": "upload",
+                                         "seq": seq, "count": op["count"]})
+
+            elif t == "MISSION_COUNT":
+                op = self._mission
+                if op is not None and op["op"] == "download" and getattr(msg, "mission_type", 0) == 0:
+                    op["count"] = msg.count
+                    op["last"] = now
+                    op["tries"] = 0
+                    if msg.count == 0:
+                        conn.mav.mission_ack_send(TARGET_SYSTEM, TARGET_COMPONENT, 0, MAV_MISSION_TYPE_MISSION)
+                        self._broadcast({"type": "mission", "count": 0, "items": []})
+                        self._mission = None
+                    else:
+                        op["next"] = 0
+                        conn.mav.mission_request_int_send(
+                            TARGET_SYSTEM, TARGET_COMPONENT, 0, MAV_MISSION_TYPE_MISSION)
+
+            elif t == "MISSION_ITEM_INT":
+                op = self._mission
+                if op is not None and op["op"] == "download" and getattr(msg, "mission_type", 0) == 0:
+                    op["items"][msg.seq] = mission_item_to_console(msg)
+                    op["last"] = now
+                    op["tries"] = 0
+                    self._broadcast({"type": "mission_progress", "phase": "download",
+                                     "seq": msg.seq, "count": op["count"]})
+                    if len(op["items"]) >= op["count"]:
+                        conn.mav.mission_ack_send(TARGET_SYSTEM, TARGET_COMPONENT, 0, MAV_MISSION_TYPE_MISSION)
+                        items = [op["items"][s] for s in sorted(op["items"])]
+                        self._broadcast({"type": "mission", "count": op["count"], "items": items})
+                        self._mission = None
+                    else:
+                        missing = [s for s in range(op["count"]) if s not in op["items"]]
+                        if missing:
+                            op["next"] = missing[0]
+                            conn.mav.mission_request_int_send(
+                                TARGET_SYSTEM, TARGET_COMPONENT, missing[0], MAV_MISSION_TYPE_MISSION)
+
+            elif t == "MISSION_ACK":
+                op = self._mission
+                if op is not None and op["op"] == "upload" and getattr(msg, "mission_type", 0) == 0:
+                    res = msg.type
+                    self._report_mission_ack(op.get("id"), ok=(res == 0), result=res,
+                                             text=mission_result_text(res))
+                    self._mission = None
+
+            elif t == "MISSION_CURRENT":
+                self._broadcast({"type": "mission_current", "seq": msg.seq})
+
+            elif t == "MISSION_ITEM_REACHED":
+                self._broadcast({"type": "mission_reached", "seq": msg.seq})
+
             elif t == "HEARTBEAT":
                 L["armed"] = bool(msg.base_mode & 128)  # MAV_MODE_FLAG_SAFETY_ARMED
                 L["mode"] = decode_mode(msg.custom_mode)
@@ -624,6 +879,25 @@ class Bridge:
         elif mtype == "stream":
             # Display preference (SET_MESSAGE_INTERVAL); open to any client.
             self._misc_queue.put({"kind": "stream", "msgId": msg.get("msgId"), "hz": msg.get("hz", 0)})
+
+        elif mtype == "mission_push":
+            # Upload a mission -> commander only (it changes what the plane flies).
+            mid = msg.get("id")
+            if ws is not self._commander:
+                await self._send(ws, {"type": "mission_ack", "id": mid, "ok": False,
+                                      "result": -1, "text": "not commander"})
+                return
+            if mid is not None:
+                self._pending_clients[mid] = ws
+            self._mission_queue.put({"kind": "push", "id": mid, "items": msg.get("items") or []})
+
+        elif mtype == "mission_pull":
+            # Read the current mission; open to any client (result broadcast to all).
+            self._mission_queue.put({"kind": "pull"})
+
+        elif mtype == "mission_set_current":
+            if ws is self._commander:
+                self._mission_queue.put({"kind": "set_current", "seq": msg.get("seq", 0)})
 
     def _emit_ack(self, event: dict[str, Any]) -> None:
         # Runs in the asyncio loop (scheduled via call_soon_threadsafe).
