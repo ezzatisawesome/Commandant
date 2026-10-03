@@ -76,7 +76,9 @@ export interface CommandMessage {
     name: CommandName,
     args: Record<string, unknown>,
 }
-export interface ClaimMessage { type: "claim" } // bid to be the single commander
+// Bid to be the single commander. When `id` is set, gs replies with an AckMessage
+// (text "commander" | "not commander") so the UI can confirm it holds authority.
+export interface ClaimMessage { type: "claim", id?: string }
 export interface ParamRefreshMessage { type: "param_refresh" } // request the full param list
 export interface ParamSetMessage {
     type: "param_set",
@@ -111,9 +113,38 @@ export interface MissionPushMessage {
 export interface MissionPullMessage { type: "mission_pull" }
 export interface MissionSetCurrentMessage { type: "mission_set_current", seq: number }
 
+// --- geofence + rally (Phase 4 extension), see docs/ws-contract.md ------------
+// Same handshake as missions, generalized by mission_type. Fence polygons are a
+// run of consecutive same-kind vertex items sharing a vertexCount; circles and
+// rally points are single items.
+export type FenceKind =
+    | "fence_inclusion" | "fence_exclusion"            // polygon vertices
+    | "fence_circle_inclusion" | "fence_circle_exclusion"; // single-point circles
+export interface FenceItem {
+    seq: number,
+    kind: FenceKind,
+    lat: number,            // deg
+    lon: number,            // deg
+    // vertexCount for polygon vertices (gs packs it into param1); radius (m) for
+    // circles. The console fills these at push time.
+    params?: Record<string, number>,
+}
+export interface RallyItem {
+    seq: number,
+    kind: "rally",
+    lat: number,            // deg
+    lon: number,            // deg
+    alt?: number,           // m (relative-to-home)
+}
+export interface FencePushMessage { type: "fence_push", id: string, items: FenceItem[] }
+export interface FencePullMessage { type: "fence_pull" }
+export interface RallyPushMessage { type: "rally_push", id: string, items: RallyItem[] }
+export interface RallyPullMessage { type: "rally_pull" }
+
 export type ClientMessage =
     | CommandMessage | ClaimMessage | ParamRefreshMessage | ParamSetMessage | StreamMessage
-    | MissionPushMessage | MissionPullMessage | MissionSetCurrentMessage;
+    | MissionPushMessage | MissionPullMessage | MissionSetCurrentMessage
+    | FencePushMessage | FencePullMessage | RallyPushMessage | RallyPullMessage;
 
 // gs -> console
 export interface TelemetryMessage extends TelemetryFrame { type: "telemetry" }
@@ -170,8 +201,14 @@ export interface MissionAckMessage {
 export interface MissionCurrentMessage { type: "mission_current", seq: number }
 export interface MissionReachedMessage { type: "mission_reached", seq: number }
 
+export interface FenceMessage { type: "fence", count: number, items: FenceItem[] }
+export interface RallyMessage { type: "rally", count: number, items: RallyItem[] }
+export interface FenceAckMessage { type: "fence_ack", id: string, ok: boolean, result: number, text: string }
+export interface RallyAckMessage { type: "rally_ack", id: string, ok: boolean, result: number, text: string }
+
 export type ServerMessage =
     | TelemetryMessage | AckMessage | LinkMessage | StatusTextMessage
     | ParamValueMessage | ParamProgressMessage | ParamAckMessage
     | MissionMessage | MissionProgressMessage | MissionAckMessage
-    | MissionCurrentMessage | MissionReachedMessage;
+    | MissionCurrentMessage | MissionReachedMessage
+    | FenceMessage | RallyMessage | FenceAckMessage | RallyAckMessage;

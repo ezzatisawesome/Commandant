@@ -4,18 +4,24 @@ import { v4 as uuidv4 } from "uuid";
 import type {
 	AckMessage,
 	CommandName,
+	FenceAckMessage,
+	FenceItem,
+	FenceMessage,
 	LinkState,
 	MissionAckMessage,
 	MissionItem,
 	MissionMessage,
 	ParamAckMessage,
 	ParamValueMessage,
+	RallyAckMessage,
+	RallyItem,
+	RallyMessage,
 	ServerMessage,
 	TelemetryFrame,
 } from "@/types/app";
 import { pushFrame, clearTrail } from "@/stores/aircraft.store";
 import { $viewerStore } from "@/stores/cesium.store";
-import { $linkState } from "@/stores/link.store";
+import { $linkState, $commander } from "@/stores/link.store";
 import { pushStatus } from "@/stores/statustext.store";
 import { upsertParam, setParamProgress, clearParams } from "@/stores/params.store";
 import {
@@ -24,6 +30,7 @@ import {
 	$missionReached,
 	setMissionItems,
 } from "@/stores/mission.store";
+import { setFenceItems, setRallyItems } from "@/stores/geo.store";
 import envs from "@/lib/envs";
 
 // How long a command waits for its ack before we give up (gs retries internally
@@ -59,6 +66,13 @@ interface PendingMission {
 	timer: ReturnType<typeof setTimeout>;
 }
 
+// One fence_push / rally_push awaiting its ack (matched by id).
+interface PendingGeo {
+	resolve: (ack: FenceAckMessage | RallyAckMessage) => void;
+	reject: (err: Error) => void;
+	timer: ReturnType<typeof setTimeout>;
+}
+
 // WebSocket client for the gs daemon. Carries two directions over one socket:
 //   gs -> console: `telemetry` frames, `ack` responses, `link` state changes
 //   console -> gs: `command` requests, and a `claim` to be the commander
@@ -75,6 +89,9 @@ export class TelemetryClient {
 	private pendingParams = new Map<string, PendingParam>();
 	// mission_push requests awaiting their mission_ack, keyed by id.
 	private pendingMissions = new Map<string, PendingMission>();
+	// fence_push / rally_push requests awaiting their ack, keyed by id.
+	private pendingFence = new Map<string, PendingGeo>();
+	private pendingRally = new Map<string, PendingGeo>();
 
 	constructor(private url: string = envs.MAVLINK_WS_ENDPOINT) {}
 
@@ -94,7 +111,7 @@ export class TelemetryClient {
 			// Bid to be the single active commander as soon as the socket is up, so
 			// our commands are accepted (gs rejects non-commanders). Still
 			// "connecting" until the first telemetry frame proves data is flowing.
-			this.send({ type: "claim" });
+			this.claim();
 		};
 
 		ws.onmessage = (event) => {
@@ -137,6 +154,14 @@ export class TelemetryClient {
 				$missionCurrent.set((msg as { seq: number }).seq);
 			} else if (type === "mission_reached") {
 				$missionReached.set((msg as { seq: number }).seq);
+			} else if (type === "fence") {
+				setFenceItems((msg as FenceMessage).items);
+			} else if (type === "rally") {
+				setRallyItems((msg as RallyMessage).items);
+			} else if (type === "fence_ack") {
+				this.resolveGeoAck(this.pendingFence, msg as FenceAckMessage);
+			} else if (type === "rally_ack") {
+				this.resolveGeoAck(this.pendingRally, msg as RallyAckMessage);
 			} else {
 				this.onTelemetry(msg as TelemetryFrame & { type?: string });
 			}
@@ -144,6 +169,7 @@ export class TelemetryClient {
 
 		ws.onclose = () => {
 			$linkState.set("lost");
+			$commander.set(null); // authority is unknown again until we re-claim
 			pushFrame({ t: Date.now(), connected: false });
 			this.failAllPending("link closed");
 			this.scheduleReconnect();
@@ -209,6 +235,24 @@ export class TelemetryClient {
 		clearTimeout(p.timer);
 		this.pending.delete(ack.id);
 		p.resolve(ack);
+	}
+
+	/**
+	 * Bid to be the single commander and confirm the outcome. gs replies with an
+	 * AckMessage (text "commander" | "not commander") whose `ok` we mirror into
+	 * $commander. If no reply arrives (older gs), $commander stays null and the UI
+	 * treats authority optimistically. Fire-and-forget from the caller's view.
+	 */
+	private claim() {
+		if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+		const id = uuidv4();
+		const timer = setTimeout(() => this.pending.delete(id), COMMAND_TIMEOUT_MS);
+		this.pending.set(id, {
+			resolve: (ack) => $commander.set(ack.ok),
+			reject: () => { /* no confirm — leave authority unknown */ },
+			timer,
+		});
+		this.send({ type: "claim", id });
 	}
 
 	// --- parameters (Phase 2) ------------------------------------------------
@@ -294,6 +338,54 @@ export class TelemetryClient {
 		p.resolve(ack);
 	}
 
+	// --- geofence + rally (Phase 4 extension) --------------------------------
+
+	/** Upload a geofence and resolve with its fence_ack (matched by id). */
+	pushFence(items: FenceItem[]): Promise<FenceAckMessage> {
+		return this.pushGeo("fence_push", this.pendingFence, items) as Promise<FenceAckMessage>;
+	}
+	/** Download the vehicle's geofence; arrives as a `fence` message. */
+	pullFence() {
+		this.send({ type: "fence_pull" });
+	}
+	/** Upload rally points and resolve with its rally_ack (matched by id). */
+	pushRally(items: RallyItem[]): Promise<RallyAckMessage> {
+		return this.pushGeo("rally_push", this.pendingRally, items) as Promise<RallyAckMessage>;
+	}
+	/** Download the vehicle's rally points; arrives as a `rally` message. */
+	pullRally() {
+		this.send({ type: "rally_pull" });
+	}
+
+	// Shared fence/rally upload: same id-matched-ack handshake as pushMission.
+	private pushGeo(
+		type: "fence_push" | "rally_push",
+		pending: Map<string, PendingGeo>,
+		items: FenceItem[] | RallyItem[],
+	): Promise<FenceAckMessage | RallyAckMessage> {
+		return new Promise((resolve, reject) => {
+			if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+				reject(new Error("not connected"));
+				return;
+			}
+			const id = uuidv4();
+			const timer = setTimeout(() => {
+				pending.delete(id);
+				reject(new Error("timeout"));
+			}, MISSION_TIMEOUT_MS);
+			pending.set(id, { resolve, reject, timer });
+			this.send({ type, id, items });
+		});
+	}
+
+	private resolveGeoAck(pending: Map<string, PendingGeo>, ack: FenceAckMessage | RallyAckMessage) {
+		const p = pending.get(ack.id);
+		if (!p) return; // pull-side / unknown
+		clearTimeout(p.timer);
+		pending.delete(ack.id);
+		p.resolve(ack);
+	}
+
 	private failAllPending(reason: string) {
 		for (const [, p] of this.pending) {
 			clearTimeout(p.timer);
@@ -310,6 +402,13 @@ export class TelemetryClient {
 			p.reject(new Error(reason));
 		}
 		this.pendingMissions.clear();
+		for (const m of [this.pendingFence, this.pendingRally]) {
+			for (const [, p] of m) {
+				clearTimeout(p.timer);
+				p.reject(new Error(reason));
+			}
+			m.clear();
+		}
 	}
 
 	private send(obj: unknown) {
@@ -334,6 +433,7 @@ export class TelemetryClient {
 		}
 		this.failAllPending("disconnected");
 		$linkState.set("lost");
+		$commander.set(null);
 		this.ws?.close();
 		this.ws = null;
 	}

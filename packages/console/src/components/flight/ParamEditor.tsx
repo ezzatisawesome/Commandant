@@ -6,6 +6,7 @@ import { useStore } from "@nanostores/react";
 import { $params, $paramProgress } from "@/stores/params.store";
 import { $linkState } from "@/stores/link.store";
 import { telemetryClient } from "@/services/telemetry";
+import { loadParamMeta, lookupMeta, validateParam, type ParamMeta } from "@/lib/paramMeta";
 import { Button } from "@/components/ui/button";
 
 // Parse `param set-default NAME VALUE` out of the airframe init script so we can
@@ -41,11 +42,14 @@ export default function ParamEditor() {
 	const [edits, setEdits] = useState<Record<string, string>>({});
 	const [rowStatus, setRowStatus] = useState<Record<string, { ok: boolean; text: string }>>({});
 	const [defaults, setDefaults] = useState<Record<string, number>>({});
+	const [meta, setMeta] = useState<Record<string, ParamMeta>>({});
 
-	// On first open, pull the full list and load the airframe defaults for diffing.
+	// On first open, pull the full list, load the airframe defaults for diffing, and
+	// load the bundled PX4 param metadata (units / range / help).
 	useEffect(() => {
 		if (!open) return;
 		telemetryClient.refreshParams();
+		loadParamMeta().then(setMeta).catch(() => { /* metadata is optional */ });
 		fetch("/api/airframe")
 			.then((r) => (r.ok ? r.json() : null))
 			.then((j) => { if (j?.content) setDefaults(parseDefaults(j.content as string)); })
@@ -67,6 +71,13 @@ export default function ParamEditor() {
 		const value = Number(raw);
 		if (!Number.isFinite(value)) {
 			setRowStatus((s) => ({ ...s, [name]: { ok: false, text: "NaN" } }));
+			return;
+		}
+		// Range/type-check against the bundled metadata before writing; a bad value
+		// never leaves the console.
+		const invalid = validateParam(lookupMeta(meta, name), value);
+		if (invalid) {
+			setRowStatus((s) => ({ ...s, [name]: { ok: false, text: invalid } }));
 			return;
 		}
 		try {
@@ -130,9 +141,20 @@ export default function ParamEditor() {
 								const changed = def !== undefined && Math.abs(def - p.value) > EPS;
 								const editing = edits[p.name] !== undefined;
 								const st = rowStatus[p.name];
+								const md = lookupMeta(meta, p.name);
+								// Rich tooltip: short/long description + range, when known.
+								const range = md && (md.min !== undefined || md.max !== undefined)
+									? `  [${md.min ?? "–"}..${md.max ?? "–"}]` : "";
+								const title = md
+									? `${md.shortDesc ?? p.name}${range}${md.longDesc ? `\n\n${md.longDesc}` : ""}`
+									: p.name;
+								// Live range check on the in-progress edit, so an out-of-range
+								// value is flagged before Set is pressed.
+								const liveErr = editing
+									? validateParam(md, Number(edits[p.name])) : null;
 								return (
 									<div key={p.name} className="flex items-center gap-2 border-b border-white/5 py-1">
-										<span className="flex-1 truncate text-sky-300" title={changed ? `default ${def}` : p.name}>
+										<span className="flex-1 truncate text-sky-300" title={title}>
 											{changed ? <span className="mr-1 text-amber-400" title={`default ${def}`}>●</span> : null}
 											{p.name}
 										</span>
@@ -140,9 +162,13 @@ export default function ParamEditor() {
 											value={editing ? edits[p.name] : String(p.value)}
 											onChange={(e) => setEdits((s) => ({ ...s, [p.name]: e.target.value }))}
 											onKeyDown={(e) => { if (e.key === "Enter") commit(p.name, p.ptype); }}
-											className={`h-6 w-20 rounded border bg-transparent px-1 text-right text-white ${editing ? "border-amber-400/50" : "border-white/15"}`}
+											className={`h-6 w-20 rounded border bg-transparent px-1 text-right text-white ${liveErr ? "border-red-500/70" : editing ? "border-amber-400/50" : "border-white/15"}`}
+											title={liveErr ?? undefined}
 										/>
-										<Button size="sm" variant="outline" disabled={!live || !editing}
+										<span className="w-8 shrink-0 text-[9px] text-white/40" title={md?.units ? `units: ${md.units}` : undefined}>
+											{md?.units ?? ""}
+										</span>
+										<Button size="sm" variant="outline" disabled={!live || !editing || !!liveErr}
 											onClick={() => commit(p.name, p.ptype)} className="h-6 px-2 text-[10px]">
 											Set
 										</Button>

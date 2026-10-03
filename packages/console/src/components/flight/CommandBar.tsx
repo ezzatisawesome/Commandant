@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useStore } from "@nanostores/react";
 
 import { $aircraftStore } from "@/stores/aircraft.store";
-import { $linkState } from "@/stores/link.store";
+import { $linkState, $commander } from "@/stores/link.store";
 import { telemetryClient } from "@/services/telemetry";
 import type { CommandName } from "@/types/app";
 import { Button } from "@/components/ui/button";
@@ -25,11 +25,15 @@ const MODES: Array<{ label: string; main: number; sub: number }> = [
 export function CommandBar() {
 	const f = useStore($aircraftStore);
 	const linkState = useStore($linkState);
+	const commander = useStore($commander);
 	const [busy, setBusy] = useState(false);
 	const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
 	const [takeoffAlt, setTakeoffAlt] = useState(30);
 
-	const live = linkState === "alive";
+	// Another GCS explicitly holds command authority: block sends (gs would reject
+	// them anyway). null/true = we have (or optimistically assume) control.
+	const notCommander = commander === false;
+	const live = linkState === "alive" && !notCommander;
 	const armed = f?.armed ?? false;
 
 	async function run(name: CommandName, args: Record<string, unknown> = {}) {
@@ -47,7 +51,19 @@ export function CommandBar() {
 
 	return (
 		<div className="mt-2 border-t border-white/10 pt-2">
-			<div className="mb-1 text-[10px] uppercase tracking-wide text-white/40">Command</div>
+			<div className="mb-1 flex items-center justify-between">
+				<span className="text-[10px] uppercase tracking-wide text-white/40">Command</span>
+				{/* Authority badge: only shown once gs confirms the claim outcome. */}
+				{commander === true ? (
+					<span className="text-[9px] font-semibold text-emerald-400" title="This console holds command authority">
+						● IN CONTROL
+					</span>
+				) : commander === false ? (
+					<span className="text-[9px] font-semibold text-amber-400" title="Another GCS holds command authority; commands are disabled">
+						● ANOTHER GCS IN CONTROL
+					</span>
+				) : null}
+			</div>
 
 			<Button
 				variant={armed ? "destructive" : "default"}
