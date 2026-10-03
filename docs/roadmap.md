@@ -10,9 +10,10 @@ QGroundControl-replacement GCS for the solar aircraft.
 health/STATUSTEXT, configurable display, and mission planning, all validated
 end-to-end against **live PX4 SITL** (telemetry, arm round-trip, 956-param sync,
 and a takeoff→waypoints→RTL mission upload+readback; a live-only frame bug on RTL
-was caught and fixed). Hub = `commandant` CLI scaffolded. **Not yet done:**
-Phase 3 SIL-rehearsal (real-aircraft gate), geofence/rally, real-Pi hub
-validation, and small polish (console `claim`-confirm, param metadata bundling).
+was caught and fixed). Hub = `commandant` CLI scaffolded. Geofence + rally, PX4 param metadata
+(units/range/validation), and `claim`-confirm authority are done and
+live-validated (fence+rally upload/readback against SITL). **Not yet done:**
+Phase 3 SIL-rehearsal (real-aircraft gate) and real-Pi hub validation.
 
 ## Scope boundary (the two-plane rule)
 
