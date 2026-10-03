@@ -78,6 +78,37 @@ The daemon's responsibilities: link/transport management, telemetry fan-out to
 the UI, command ingress + authority gate, the protocol state machines (arm/mode,
 param sync, mission), and the SIL-rehearsal gateway.
 
+## Deployment — the hub
+
+The field deployment is a **Raspberry Pi "hub"** that is both the ground station
+and the base station. Turn the plane on; turn the hub on; join the hub's WiFi on
+any phone/laptop; open the page; **you just see the plane, live.** No login, no
+setup, multiple viewers at once.
+
+```
+   plane  ──radio/serial──►  HUB (Raspberry Pi)  ──WiFi──►  phones / laptops
+                             • gs daemon (owns the radio link)        browser →
+                             • serves the console web app             commandant.local
+                             • standalone WiFi AP (hostapd)           → /flight, live
+                             • mDNS: commandant.local (avahi)
+```
+
+Decisions:
+- **Plane ↔ hub = radio/serial** → this is the `gs` transport abstraction
+  (UDP/TCP/**serial**); on the Pi, `gs` attaches to the radio, not localhost UDP.
+- **Hub ↔ clients = WiFi + browser.** `gs` binds `0.0.0.0`; the console's WS
+  endpoint must be **host-relative** (`window.location.hostname`), so any client on
+  the hub WiFi reaches the hub's `gs`. (Dev still falls back to localhost.)
+- **Standalone AP** (hostapd/dnsmasq) — works in a remote field, no infrastructure.
+- **mDNS hostname** `commandant.local` (avahi) — how clients get in. (Captive
+  portal considered and deferred.)
+- **Zero-config UX:** connect → `commandant.local` → root redirects to `/flight`
+  → telemetry autoconnects → the plane is on the globe. No auth.
+- **Hub/ops workstream** (new): hostapd + dnsmasq AP config, avahi hostname,
+  systemd units to autostart `gs` and the served console on boot, console built
+  for production and served on the Pi. Mostly Pi config — scaffolded here,
+  validated on real hardware.
+
 ---
 
 ## Phase 0 — Standalone Python link daemon + link manager (foundation)

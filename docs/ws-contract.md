@@ -70,3 +70,56 @@ messages only from the current commander; others get `ack` with
   transitions.
 - **Authority:** single commander (see `claim`). No cross-plane reach (never
   touches Guppi / power-system firmware).
+
+---
+
+# Extensions (Phase 1 / 2 / 5)
+
+## More commands (console → gs `command`)
+Same `{type:"command", id, name, args}` envelope + `ack` response. Shapes mirror
+`AircraftSim/src/px4/mavlink_io.py` where present.
+
+| name         | args                       | MAVLink                                    |
+|--------------|----------------------------|--------------------------------------------|
+| `takeoff`    | `{ "alt": 30 }`            | `COMMAND_LONG` `MAV_CMD_NAV_TAKEOFF` (p7=alt, lat/lon NaN) |
+| `land`       | `{}`                       | `MAV_CMD_NAV_LAND`                         |
+| `rtl`        | `{}`                       | `MAV_CMD_NAV_RETURN_TO_LAUNCH`             |
+| `hold`       | `{}`                       | `MAV_CMD_NAV_LOITER_UNLIM` (or set_mode AUTO.LOITER) |
+| `reposition` | `{ "lat", "lon", "alt" }`  | `MAV_CMD_DO_REPOSITION` ("fly to here"; FW = loiter-at-point) |
+
+## Health / status (gs → console)
+Merged into the `telemetry` frame (not separate messages):
+- `ekfOk` (bool, from `EKF_STATUS_REPORT` flags), `gpsFix` (int, `GPS_RAW_INT.fix_type`),
+  `gpsSats` (int), `failsafe` (bool), `sysHealthy` (bool, from `SYS_STATUS`),
+  `batteryWarning` (string | null).
+
+## STATUSTEXT (gs → console)
+```json
+{ "type": "statustext", "severity": 4, "text": "...", "t": 1730000000000 }
+```
+`severity` is the MAV_SEVERITY level (0 emergency … 7 debug).
+
+## Parameters (Phase 2)
+console → gs:
+```json
+{ "type": "param_refresh" }
+{ "type": "param_set", "id": "<uuid>", "name": "FW_AIRSPD_TRIM", "value": 15.0, "ptype": 9 }
+```
+gs → console:
+```json
+{ "type": "param", "name": "FW_AIRSPD_TRIM", "value": 15.0, "ptype": 9, "index": 42, "count": 900 }
+{ "type": "param_progress", "received": 850, "count": 900 }
+{ "type": "param_ack", "id": "<uuid>", "name": "FW_AIRSPD_TRIM", "value": 15.0, "ok": true, "text": "set" }
+```
+- `param_refresh` → `PARAM_REQUEST_LIST`; stream each `PARAM_VALUE` as `param`,
+  track index/count, re-request any gaps (hand-rolled, with timeout).
+- `param_set` → `PARAM_SET`; confirm against the echoed `PARAM_VALUE`
+  (value match) → `param_ack`; mismatch/timeout → `ok:false`.
+
+## Stream control (Phase 5)
+console → gs:
+```json
+{ "type": "stream", "msgId": 30, "hz": 10 }
+```
+→ `SET_MESSAGE_INTERVAL` (hz=0 disables). Generalizes the daemon's existing
+hardcoded extra-stream requests.
