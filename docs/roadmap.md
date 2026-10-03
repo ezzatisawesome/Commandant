@@ -55,9 +55,13 @@ Decisions locked:
   machines deliberately, so they can be made deterministic and tested against the
   sim. Reuse the arm / set_mode / takeoff / battery-injection patterns already in
   AircraftSim `src/px4/mavlink_io.py`.
-- **Routing: mavlink-router in front** of one SITL, fanning out to the sim's own
-  link, the Commandant daemon, and (optionally) QGC side-by-side. This designs
-  away the `:14540` port race (see memory `px4-flight-aircraft-selection`).
+- **Routing: no mavlink-router needed for SITL** (revised after inspection).
+  AircraftSim's PX4 container already *dual-unicasts*: offboard → host `:14540`
+  (the sim's `mavlink_io`) and a dedicated GCS stream → host `:14550` (the gs
+  daemon), via `PX4_OFFBOARD_TARGET` / `PX4_GCS_TARGET` in `docker/entrypoint.sh`.
+  The fan-out already happens at the PX4 level, so gs just binds `:14550`.
+  mavlink-router is **deferred** to when a real radio delivers a single stream, or
+  a second consumer (e.g. QGC alongside gs) must share one stream.
 - **SIL-rehearsal is its own phase** (Phase 3): a command is not real-aircraft-
   eligible until it has been replayed against AircraftSim. Python colocation makes
   the daemon able to drive the sim directly for rehearsal.
@@ -81,13 +85,14 @@ param sync, mission), and the SIL-rehearsal gateway.
 Everything downstream needs the daemon, a TX path, and a robust link. The current
 bridge (`src/lib/bridge/bridge.ts`) is RX-only and lives inside Next.
 
-- [ ] **Stand up the Python daemon** as a separate process; port the current
+- [x] **Stand up the Python daemon** as a separate process; port the current
       RX + `SET_MESSAGE_INTERVAL` behavior off `bridge.ts`. Reuse
-      `AircraftSim/src/px4/mavlink_io.py` patterns.
-- [ ] **mavlink-router in front** of SITL; daemon attaches as one consumer
-      alongside the sim link. Kills the port race.
-- [ ] **WS/HTTP contract** daemon ↔ Cesium UI: telemetry out, commands in.
-      Replaces the in-Next bridge; UI becomes a thin client.
+      `AircraftSim/src/px4/mavlink_io.py` patterns. *(gs/bridge.py; MAVLink→WS and
+      JSON→WS paths tested.)*
+- [x] ~~mavlink-router in front~~ — **not needed for SITL**; PX4 dual-unicasts
+      (:14540 sim, :14550 gs). Deferred to real-radio / second-consumer.
+- [~] **WS/HTTP contract** daemon ↔ Cesium UI: telemetry out *(done)*, commands
+      in *(Phase 1)*. In-Next bridge disabled (`instrumentation.ts` is a no-op).
 - [ ] **Link manager.** Heartbeat tracking, connection state
       (connecting/alive/stale/lost), auto-reconnect, per-message staleness
       (generalize the current 2s indicator). Emit link state to the UI.
