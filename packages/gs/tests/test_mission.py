@@ -173,3 +173,16 @@ def test_mission_push_non_commander():
         serve_task.cancel()
 
     asyncio.run(scenario())
+
+
+def test_mission_item_frames():
+    """Regression (live-SITL finding): coordinate items use the global
+    relative-alt frame; command-only items (rtl) MUST use MAV_FRAME_MISSION or
+    PX4 rejects the whole mission as UNSUPPORTED."""
+    from gs.bridge import mission_item_fields
+    from pymavlink import mavutil
+    m = mavutil.mavlink
+    wp = mission_item_fields(1, {"kind": "waypoint", "lat": 37.4, "lon": -122.1, "alt": 80})
+    assert wp["frame"] == m.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+    rtl = mission_item_fields(2, {"kind": "rtl"})
+    assert rtl["frame"] == m.MAV_FRAME_MISSION

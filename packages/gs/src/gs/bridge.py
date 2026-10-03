@@ -174,8 +174,13 @@ def mission_item_fields(seq: int, item: dict[str, Any]) -> dict[str, Any]:
         p3 = float(p.get("radius", 0) or 0)
     elif kind == "takeoff":
         p1 = float(p.get("pitch", 0) or 0)
+    # Coordinate-bearing items use the global relative-alt frame; command-only
+    # items (e.g. RTL) carry no position and MUST use MAV_FRAME_MISSION, or PX4
+    # rejects the whole mission as UNSUPPORTED (confirmed against live SITL).
+    coordless = kind in ("rtl",)
+    frame = m.MAV_FRAME_MISSION if coordless else m.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
     return {
-        "frame": m.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, "command": cmd,
+        "frame": frame, "command": cmd,
         "current": 1 if seq == 0 else 0, "autocontinue": 1,
         "param1": p1, "param2": p2, "param3": p3, "param4": p4,
         "x": int(round(lat * 1e7)), "y": int(round(lon * 1e7)), "z": alt,
