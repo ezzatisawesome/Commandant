@@ -17,7 +17,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(prog="gs", description="Commandant ground-station daemon")
     parser.add_argument("--version", action="version", version=f"gs {__version__}")
     parser.add_argument("--mavlink", default="udpin:0.0.0.0:14550",
-                        help="MAVLink endpoint to attach to (via mavlink-router)")
+                        help="MAVLink endpoint: udpin/udpout/tcp:host:port, "
+                             "serial:<device>[:baud], or a bare /dev/… device (the hub radio)")
+    parser.add_argument("--baud", type=int, default=57600,
+                        help="serial baud when --mavlink is a serial device")
     parser.add_argument("--json-port", type=int, default=14555,
                         help="UDP port for the sim's flightlink JSON telemetry")
     parser.add_argument("--ws-host", default="0.0.0.0", help="WebSocket bind host")
@@ -31,6 +34,7 @@ def main() -> int:
         json_port=args.json_port,
         ws_host=args.ws_host,
         ws_port=args.ws_port,
+        baud=args.baud,
     ).run()
     return 0
 

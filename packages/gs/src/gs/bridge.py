@@ -46,6 +46,33 @@ TARGET_COMPONENT = 1
 CMD_MAX_TRIES = 3        # total COMMAND_LONG sends before giving up
 CMD_RETRY_MS = 1000      # re-send cadence while awaiting COMMAND_ACK
 
+# Param sync (Phase 2). The PARAM protocol is hand-rolled on the mav thread.
+PARAM_PROGRESS_EVERY = 25    # emit a param_progress at most this often (by count)
+PARAM_GAP_QUIET_MS = 1500    # after the list stream goes quiet, re-request missing idx
+PARAM_SET_TIMEOUT_MS = 2000  # await the echoed PARAM_VALUE after a PARAM_SET
+PARAM_SET_MAX_TRIES = 3
+
+DEFAULT_SERIAL_BAUD = 57600  # typical SiK/telemetry-radio rate on the real hub
+
+_NAN = float("nan")
+
+
+def open_connection(endpoint: str, baud: int = DEFAULT_SERIAL_BAUD) -> Any:
+    """Open a MAVLink link across any transport. udpin/udpout/udp/tcp pass
+    straight to pymavlink; a `serial:<device>[:<baud>]` endpoint (or a bare device
+    path) opens a serial port — this is the plane↔hub radio leg on the Raspberry
+    Pi. One seam so the rest of the daemon is transport-agnostic."""
+    if endpoint.startswith("serial:"):
+        parts = endpoint.split(":")
+        device = parts[1]
+        rate = int(parts[2]) if len(parts) > 2 and parts[2] else baud
+        return mavutil.mavlink_connection(device, baud=rate)
+    # Bare device path (no udp/tcp scheme) -> serial too, at the fallback baud.
+    if "://" not in endpoint and ":" not in endpoint.split("/")[-1] and (
+            endpoint.startswith("/dev/") or endpoint.upper().startswith("COM")):
+        return mavutil.mavlink_connection(endpoint, baud=baud)
+    return mavutil.mavlink_connection(endpoint)
+
 # PX4 message ids not in the default GCS stream; we request them QGC-style.
 MSG_ACTUATOR_OUTPUT_STATUS = mavutil.mavlink.MAVLINK_MSG_ID_ACTUATOR_OUTPUT_STATUS  # 375
 MSG_POSITION_TARGET_GLOBAL_INT = mavutil.mavlink.MAVLINK_MSG_ID_POSITION_TARGET_GLOBAL_INT  # 87
@@ -63,6 +90,25 @@ def build_command(name: str, args: dict[str, Any]) -> tuple[int, list[float]]:
         main = int(args.get("main", 0))
         sub = int(args.get("sub", 0))
         return m.MAV_CMD_DO_SET_MODE, [float(m.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED), main, sub, 0, 0, 0, 0]
+    if name == "takeoff":
+        alt = float(args.get("alt", 30.0))
+        # Mirrors mavlink_io.takeoff: p1..p6 = 0/NaN, p7 = target alt.
+        return m.MAV_CMD_NAV_TAKEOFF, [0, 0, 0, _NAN, _NAN, _NAN, alt]
+    if name == "land":
+        return m.MAV_CMD_NAV_LAND, [0, 0, 0, _NAN, _NAN, _NAN, 0]
+    if name == "rtl":
+        return m.MAV_CMD_NAV_RETURN_TO_LAUNCH, [0, 0, 0, 0, 0, 0, 0]
+    if name == "hold":
+        # PX4 enters loiter via a mode switch, not NAV_LOITER_UNLIM as a verb.
+        return m.MAV_CMD_DO_SET_MODE, [float(m.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED), 4, 3, 0, 0, 0, 0]
+    if name == "reposition":
+        # "Fly to here". On fixed-wing PX4 this is loiter-at-point, not a goto.
+        # p1 ground speed (-1 = default), p2 flags (1 = switch to guided),
+        # p5/6/7 = lat/lon (deg)/alt. COMMAND_LONG carries lat/lon as float deg.
+        lat = float(args.get("lat", _NAN))
+        lon = float(args.get("lon", _NAN))
+        alt = float(args.get("alt", _NAN))
+        return m.MAV_CMD_DO_REPOSITION, [-1, 1, 0, _NAN, lat, lon, alt]
     raise ValueError(f"unknown command '{name}'")
 
 
@@ -116,11 +162,13 @@ class Bridge:
         json_port: int = 14555,
         ws_host: str = "0.0.0.0",
         ws_port: int = 8790,
+        baud: int = DEFAULT_SERIAL_BAUD,
     ) -> None:
         self.mavlink_endpoint = mavlink_endpoint
         self.json_port = json_port
         self.ws_host = ws_host
         self.ws_port = ws_port
+        self.baud = baud
 
         self._lock = threading.Lock()
         self.latest: dict[str, Any] = {"t": 0, "connected": False}
@@ -146,9 +194,23 @@ class Bridge:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._last_link_state: str | None = None
 
+        # --- param path (Phase 2) ------------------------------------------
+        # Param requests (refresh/set) and fire-and-forget misc sends (stream
+        # control) flow WS-thread -> mav-thread through these queues; all param
+        # state below is mav-thread-owned.
+        self._param_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._misc_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._param_count = 0               # expected total (from PARAM_VALUE.count)
+        self._param_received: set[int] = set()
+        self._param_refresh_active = False
+        self._param_last_rx_ms = 0
+        self._param_gap_requested = False
+        self._param_last_progress = 0
+        self._param_set_pending: dict[str, dict[str, Any]] = {}  # name -> set job
+
     # --- MAVLink ingest ------------------------------------------------------
     def _mav_loop(self) -> None:
-        conn = mavutil.mavlink_connection(self.mavlink_endpoint)
+        conn = open_connection(self.mavlink_endpoint, self.baud)
         print(f"[gs] listening for MAVLink on {self.mavlink_endpoint}")
         while True:
             try:
@@ -162,6 +224,8 @@ class Bridge:
             # all pymavlink sends share the one connection. recv's 0.5 s timeout
             # bounds the retry/timeout resolution even when there's no traffic.
             self._service_commands(conn)
+            self._service_params(conn)
+            self._service_misc(conn)
 
     def _send_command_long(self, conn: Any, mav_cmd: int, params: list[float], confirmation: int) -> None:
         conn.mav.command_long_send(
@@ -201,6 +265,118 @@ class Bridge:
         if loop is not None:
             loop.call_soon_threadsafe(
                 self._emit_ack, {"id": cid, "ok": ok, "result": result, "text": text})
+
+    # --- broadcast helper (mav thread -> all clients) ------------------------
+    def _broadcast(self, obj: dict[str, Any]) -> None:
+        """Fan a message to every client from the mav thread (schedules the actual
+        send on the asyncio loop, which owns the websockets)."""
+        loop = self._loop
+        if loop is not None:
+            loop.call_soon_threadsafe(self._do_broadcast, json.dumps(obj))
+
+    def _do_broadcast(self, payload: str) -> None:
+        if self._clients:
+            websockets.broadcast(self._clients, payload)
+
+    def _report_param_ack(self, job: dict[str, Any], ok: bool, text: str) -> None:
+        """Route a param_set result back to the originating client."""
+        loop = self._loop
+        if loop is not None:
+            loop.call_soon_threadsafe(self._emit_param_ack, {
+                "id": job["id"], "name": job["name"], "value": job["value"],
+                "ok": ok, "text": text,
+            })
+
+    # --- misc fire-and-forget sends (stream control) -------------------------
+    def _service_misc(self, conn: Any) -> None:
+        while True:
+            try:
+                item = self._misc_queue.get_nowait()
+            except queue.Empty:
+                break
+            if item.get("kind") == "stream":
+                hz = item.get("hz", 0)
+                interval_us = -1 if hz is None or hz <= 0 else int(1e6 / hz)
+                try:
+                    conn.mav.command_long_send(
+                        TARGET_SYSTEM, TARGET_COMPONENT,
+                        mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
+                        item["msgId"], interval_us, 0, 0, 0, 0, 0)
+                except Exception as exc:
+                    print(f"[gs] stream request failed: {exc}")
+
+    # --- param protocol (hand-rolled, mav thread) ----------------------------
+    def _service_params(self, conn: Any) -> None:
+        now = _now_ms()
+        # 1. Admit new param jobs from the WS thread.
+        while True:
+            try:
+                item = self._param_queue.get_nowait()
+            except queue.Empty:
+                break
+            if item["kind"] == "refresh":
+                self._start_param_refresh(conn)
+            elif item["kind"] == "set":
+                self._start_param_set(conn, item)
+
+        # 2. During an active refresh, re-request any gaps once the stream goes quiet.
+        if self._param_refresh_active and self._param_count:
+            if len(self._param_received) >= self._param_count:
+                self._param_refresh_active = False
+            elif now - self._param_last_rx_ms > PARAM_GAP_QUIET_MS:
+                missing = [i for i in range(self._param_count) if i not in self._param_received]
+                for idx in missing[:20]:  # bounded per tick
+                    try:
+                        conn.mav.param_request_read_send(
+                            TARGET_SYSTEM, TARGET_COMPONENT, b"", idx)
+                    except Exception:
+                        pass
+                self._param_last_rx_ms = now  # back off before the next sweep
+
+        # 3. Retry / time out pending param_sets awaiting their echoed PARAM_VALUE.
+        for name, job in list(self._param_set_pending.items()):
+            if now - job["last_send_ms"] < PARAM_SET_TIMEOUT_MS:
+                continue
+            if job["tries"] >= PARAM_SET_MAX_TRIES:
+                del self._param_set_pending[name]
+                self._report_param_ack(job, ok=False, text="timeout")
+                continue
+            self._send_param_set(conn, job)
+
+    def _start_param_refresh(self, conn: Any) -> None:
+        self._param_received.clear()
+        self._param_count = 0
+        self._param_refresh_active = True
+        self._param_gap_requested = False
+        self._param_last_progress = 0
+        self._param_last_rx_ms = _now_ms()
+        try:
+            conn.mav.param_request_list_send(TARGET_SYSTEM, TARGET_COMPONENT)
+        except Exception as exc:
+            print(f"[gs] param_request_list failed: {exc}")
+            self._param_refresh_active = False
+
+    def _start_param_set(self, conn: Any, item: dict[str, Any]) -> None:
+        job = {
+            "id": item["id"], "name": item["name"], "value": float(item["value"]),
+            "ptype": int(item.get("ptype", mavutil.mavlink.MAV_PARAM_TYPE_REAL32)),
+            "tries": 0, "last_send_ms": 0,
+        }
+        self._param_set_pending[item["name"]] = job
+        self._send_param_set(conn, job)
+
+    def _send_param_set(self, conn: Any, job: dict[str, Any]) -> None:
+        try:
+            conn.mav.param_set_send(
+                TARGET_SYSTEM, TARGET_COMPONENT,
+                job["name"].encode("ascii"), job["value"], job["ptype"])
+        except Exception as exc:
+            name = job["name"]
+            self._param_set_pending.pop(name, None)
+            self._report_param_ack(job, ok=False, text=f"send error: {exc}")
+            return
+        job["tries"] += 1
+        job["last_send_ms"] = _now_ms()
 
     def _request_message(self, conn: Any, tsys: int, tcomp: int, msg_id: int) -> None:
         now = _now_ms()
@@ -276,6 +452,57 @@ class Bridge:
                     L["elevator"] = pwm_pct(a[7])
                     L["rudder"] = 0
 
+            elif t == "SYS_STATUS":
+                # All enabled sensors healthy? (bitwise: enabled ⊆ healthy.)
+                en = msg.onboard_control_sensors_enabled
+                hl = msg.onboard_control_sensors_health
+                L["sysHealthy"] = (en & hl) == en
+                rem = msg.battery_remaining
+                L["batteryWarning"] = (
+                    None if rem < 0 or rem >= 20 else ("critical" if rem < 10 else "low"))
+
+            elif t == "GPS_RAW_INT":
+                L["gpsFix"] = msg.fix_type
+                L["gpsSats"] = msg.satellites_visible
+
+            elif t == "EKF_STATUS_REPORT":
+                # Healthy when attitude + horizontal velocity + absolute horizontal
+                # position estimates are all valid.
+                f = msg.flags
+                m = mavutil.mavlink
+                need = (m.ESTIMATOR_ATTITUDE | m.ESTIMATOR_VELOCITY_HORIZ
+                        | m.ESTIMATOR_POS_HORIZ_ABS)
+                L["ekfOk"] = (f & need) == need
+
+            elif t == "STATUSTEXT":
+                raw = msg.text
+                text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+                self._broadcast({"type": "statustext", "severity": msg.severity,
+                                 "text": text.rstrip("\x00").strip(), "t": now})
+
+            elif t == "PARAM_VALUE":
+                pid = msg.param_id
+                name = pid.decode("ascii", "replace") if isinstance(pid, bytes) else str(pid)
+                name = name.rstrip("\x00")
+                idx, count = msg.param_index, msg.param_count
+                # Stream the param to clients.
+                self._broadcast({"type": "param", "name": name, "value": msg.param_value,
+                                 "ptype": msg.param_type, "index": idx, "count": count})
+                # Refresh bookkeeping (index 65535 = a reply to a targeted read/set).
+                if self._param_refresh_active and 0 <= idx < 65535:
+                    self._param_count = count
+                    self._param_received.add(idx)
+                    self._param_last_rx_ms = now
+                    got = len(self._param_received)
+                    if got - self._param_last_progress >= PARAM_PROGRESS_EVERY or got >= count:
+                        self._param_last_progress = got
+                        self._broadcast({"type": "param_progress", "received": got, "count": count})
+                # Resolve a pending set when its echoed value matches.
+                job = self._param_set_pending.get(name)
+                if job is not None and abs(msg.param_value - job["value"]) <= 1e-4:
+                    del self._param_set_pending[name]
+                    self._report_param_ack(job, ok=True, text="set")
+
             elif t == "COMMAND_ACK":
                 # Resolve the oldest pending command with this MAV command number.
                 # (Commands are infrequent; typically one is in flight.)
@@ -291,6 +518,9 @@ class Bridge:
             elif t == "HEARTBEAT":
                 L["armed"] = bool(msg.base_mode & 128)  # MAV_MODE_FLAG_SAFETY_ARMED
                 L["mode"] = decode_mode(msg.custom_mode)
+                # PX4 raises system_status to CRITICAL/EMERGENCY in failsafe.
+                m = mavutil.mavlink
+                L["failsafe"] = msg.system_status in (m.MAV_STATE_CRITICAL, m.MAV_STATE_EMERGENCY)
                 # PX4 omits ACTUATOR_OUTPUT_STATUS / POSITION_TARGET on the GCS link
                 # by default; request them once we know PX4's address.
                 tsys, tcomp = msg.get_srcSystem(), msg.get_srcComponent()
@@ -376,6 +606,25 @@ class Bridge:
             self._pending_clients[cid] = ws
             self._cmd_queue.put({"id": cid, "mav_cmd": mav_cmd, "params": params})
 
+        elif mtype == "param_refresh":
+            # Read-only; any client may request the param set.
+            self._param_queue.put({"kind": "refresh"})
+
+        elif mtype == "param_set":
+            # A write -> commander only, like a command.
+            cid = msg.get("id")
+            if ws is not self._commander:
+                await self._send(ws, {"type": "param_ack", "id": cid, "name": msg.get("name"),
+                                      "value": msg.get("value"), "ok": False, "text": "not commander"})
+                return
+            self._pending_clients[cid] = ws
+            self._param_queue.put({"kind": "set", "id": cid, "name": msg.get("name"),
+                                   "value": msg.get("value"), "ptype": msg.get("ptype")})
+
+        elif mtype == "stream":
+            # Display preference (SET_MESSAGE_INTERVAL); open to any client.
+            self._misc_queue.put({"kind": "stream", "msgId": msg.get("msgId"), "hz": msg.get("hz", 0)})
+
     def _emit_ack(self, event: dict[str, Any]) -> None:
         # Runs in the asyncio loop (scheduled via call_soon_threadsafe).
         asyncio.create_task(self._deliver_ack(event))
@@ -387,6 +636,19 @@ class Bridge:
         await self._send(ws, {
             "type": "ack", "id": event["id"],
             "ok": event["ok"], "result": event["result"], "text": event["text"],
+        })
+
+    def _emit_param_ack(self, event: dict[str, Any]) -> None:
+        # Runs in the asyncio loop (scheduled via call_soon_threadsafe).
+        asyncio.create_task(self._deliver_param_ack(event))
+
+    async def _deliver_param_ack(self, event: dict[str, Any]) -> None:
+        ws = self._pending_clients.pop(event["id"], None)
+        if ws is None:
+            return
+        await self._send(ws, {
+            "type": "param_ack", "id": event["id"], "name": event["name"],
+            "value": event["value"], "ok": event["ok"], "text": event["text"],
         })
 
     async def _serve(self) -> None:
