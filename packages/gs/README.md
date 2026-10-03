@@ -2,8 +2,8 @@
 
 Standalone Python daemon (pymavlink, **no MAVSDK**) that owns the MAVLink link to
 PX4 and exposes a thin WS/HTTP contract to the `console` UI. It holds the
-command-authority and protocol state machines (arm/mode, params, missions) and
-the SIL-rehearsal gateway. See [`../../docs/roadmap.md`](../../docs/roadmap.md).
+command-authority and protocol state machines (arm/mode, params, missions).
+See [`../../docs/roadmap.md`](../../docs/roadmap.md).
 
 Why a separate process (not inside Next): a hot-reloading web framework must
 never own arm/disarm or a mission upload.

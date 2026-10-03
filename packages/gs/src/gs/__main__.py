@@ -1,8 +1,8 @@
 """Entry point for the ground-station daemon.
 
 Phase 0: the MAVLink/JSON -> WebSocket telemetry bridge, ported off the old
-in-Next bridge. Command authority, params, missions and SIL-rehearsal land
-incrementally per docs/roadmap.md.
+in-Next bridge. Command authority, params and missions land incrementally per
+docs/roadmap.md.
 """
 
 from __future__ import annotations
