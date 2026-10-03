@@ -160,6 +160,14 @@ const REBOOT_GAP_MS = 5000;
 let jsonTargetAt = 0;
 const TARGET_SOURCE_TTL_MS = 2000;
 
+// Battery has two possible sources too: PX4's MAVLink BATTERY_STATUS and the sim's
+// JSON feed. On a HITL bench the sim/hardware pack is authoritative and PX4's SITL
+// battery is a static dummy (~15.3 V / 50 % / -1 A), so track when JSON last
+// supplied a battery reading and let PX4's copy yield to it (same pattern as the
+// nav setpoint above).
+let jsonBatteryAt = 0;
+const BATTERY_SOURCE_TTL_MS = 3000;
+
 // When a setpoint (from EITHER source) last arrived. Drives re-requesting PX4's
 // msg 87 once the stream goes stale, so a dropped setpoint recovers instead of
 // freezing the orange overlay forever.
@@ -216,6 +224,9 @@ reader.on("data", (packet: any) => {
 			if (latest.heading === undefined) latest.heading = data.heading;
 			break;
 		case common.BatteryStatus: {
+			// Yield to the sim/HW battery when its JSON feed is fresh — PX4's SITL
+			// BATTERY_STATUS is a static dummy that would otherwise clobber it.
+			if (Date.now() - jsonBatteryAt < BATTERY_SOURCE_TTL_MS) break;
 			const mv = Array.isArray(data.voltages) ? data.voltages.filter((v: number) => v !== 65535) : [];
 			if (mv.length) latest.voltage = mv.reduce((a: number, b: number) => a + b, 0) / 1000;
 			if (data.currentBattery !== -1) latest.current = data.currentBattery / 100; // cA -> A
@@ -275,6 +286,8 @@ jsonSock.on("message", (buf) => {
 	// Claim the setpoint for the JSON feed so PX4's POSITION_TARGET yields to it,
 	// and mark the setpoint stream alive so the msg-87 re-request stays quiet.
 	if (obj.targetLat !== undefined) { jsonTargetAt = lastMsgAt; lastTargetAt = lastMsgAt; }
+	// Claim the battery for the JSON feed so PX4's dummy BATTERY_STATUS yields to it.
+	if (obj.voltage !== undefined || obj.current !== undefined || obj.batteryRemaining !== undefined) jsonBatteryAt = lastMsgAt;
 });
 jsonSock.on("error", (err) => console.error("[bridge] json udp error:", err.message));
 jsonSock.bind(JSON_UDP_PORT, () =>

@@ -3,7 +3,7 @@ dist/
 .next/
 next-env.d.ts
 # cesium assets copied at build time (scripts/copy-cesium.mjs)
-public/cesium/
+**/public/cesium/
 
 # dependencies
 node_modules/
@@ -27,3 +27,12 @@ pnpm-debug.log*
 
 # TypeScript incremental build cache
 tsconfig.tsbuildinfo
+
+# Python (packages/gs)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/

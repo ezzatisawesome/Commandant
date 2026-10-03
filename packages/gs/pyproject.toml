@@ -1,0 +1,25 @@
+[project]
+name = "gs"
+version = "0.1.0"
+description = "Commandant ground-station daemon — pymavlink link, command authority, and the thin WS/HTTP client contract to the console UI."
+requires-python = ">=3.11"
+dependencies = [
+    "pymavlink>=2.4.41",
+    "websockets>=12.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+gs = "gs.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gs"]
