@@ -165,3 +165,31 @@ heaviest test coverage**):
 - Ingest `MISSION_CURRENT` → `mission_current`, `MISSION_ITEM_REACHED` →
   `mission_reached`. `mission_set_current` → `MISSION_SET_CURRENT`.
 - `result` is the MAV_MISSION_RESULT code (0 = ACCEPTED).
+
+### Geofence + rally (Phase 4 extension)
+Same handshake, generalized by **`mission_type`** (`MAV_MISSION_TYPE_FENCE`=1,
+`MAV_MISSION_TYPE_RALLY`=2). Item kinds + MAV_CMD:
+
+| kind                     | MAV_CMD                              | params                    |
+|--------------------------|-------------------------------------|---------------------------|
+| `fence_inclusion`        | `NAV_FENCE_POLYGON_VERTEX_INCLUSION`| vertexCount (p1), lat, lon|
+| `fence_exclusion`        | `NAV_FENCE_POLYGON_VERTEX_EXCLUSION`| vertexCount (p1), lat, lon|
+| `fence_circle_inclusion` | `NAV_FENCE_CIRCLE_INCLUSION`        | radius (p1), lat, lon     |
+| `fence_circle_exclusion` | `NAV_FENCE_CIRCLE_EXCLUSION`        | radius (p1), lat, lon     |
+| `rally`                  | `NAV_RALLY_POINT`                   | lat, lon, alt             |
+
+console → gs: `fence_push {id,items}` / `fence_pull` / `rally_push {id,items}` /
+`rally_pull`.
+gs → console: `fence {count,items}` / `rally {count,items}` /
+`fence_ack {id,ok,result,text}` / `rally_ack {id,ok,result,text}`.
+(Polygon vertices of one inclusion/exclusion set share the same `vertexCount` and
+are consecutive, per the MAVLink fence convention.)
+
+## Param metadata (Phase 2 completion)
+PX4's `parameters.json` (name/shortDesc/longDesc/min/max/units/type/default) is
+bundled with the console and matched to live `param` values by name — units,
+range validation, and help text. Not on the MAVLink wire.
+
+## Authority confirm (polish)
+`claim` may carry an `id`; gs replies with an `ack {id, ok, text:"commander"|"not
+commander"}` so the console can show whether it holds command authority.
