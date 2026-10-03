@@ -1,9 +1,10 @@
-// Next calls register() once on server startup. We use it to launch the
-// telemetry bridge (UDP MAVLink/JSON -> WebSocket) inside the same process as
-// the web app — so `npm run dev` brings up both. Node runtime only.
-export async function register() {
-	if (process.env.NEXT_RUNTIME === "nodejs") {
-		const { startBridge } = await import("./lib/bridge/bridge");
-		startBridge();
-	}
-}
+// Next calls register() once on server startup.
+//
+// The telemetry bridge used to run in-process here (UDP MAVLink/JSON -> WS). It
+// now lives in the standalone `gs` daemon (packages/gs) so a hot-reloading web
+// framework never owns the link or, later, arm/disarm and mission uploads. Run
+// it alongside the console:  cd packages/gs && python -m gs
+//
+// The console connects to gs over WebSocket (ws://localhost:8790) exactly as
+// before (see services/telemetry.ts); nothing to start here.
+export async function register() {}
