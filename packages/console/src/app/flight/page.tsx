@@ -14,6 +14,8 @@ const FlightHUD = dynamic(() => import("@/components/flight/FlightHUD"), { ssr: 
 const ViewControls = dynamic(() => import("@/components/flight/ViewControls"), { ssr: false });
 const AirframeConfig = dynamic(() => import("@/components/flight/AirframeConfig"), { ssr: false });
 const ParamEditor = dynamic(() => import("@/components/flight/ParamEditor"), { ssr: false });
+const MissionLayer = dynamic(() => import("@/components/flight/MissionLayer"), { ssr: false });
+const MissionPanel = dynamic(() => import("@/components/flight/MissionPanel"), { ssr: false });
 const StatusLog = dynamic(() => import("@/components/flight/StatusLog").then((m) => m.StatusLog), { ssr: false });
 
 export default function FlightPage() {
@@ -21,6 +23,7 @@ export default function FlightPage() {
 		<>
 			<Globe />
 			<Aircraft />
+			<MissionLayer />
 
 			{/* Branding */}
 			<div className="fixed top-4 left-4 z-50 flex items-center gap-2">
@@ -35,6 +38,7 @@ export default function FlightPage() {
 				<FlightHUD />
 				<StatusLog />
 				<ViewControls />
+				<MissionPanel />
 				<ParamEditor />
 				<AirframeConfig />
 			</div>

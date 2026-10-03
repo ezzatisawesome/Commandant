@@ -5,6 +5,9 @@ import type {
 	AckMessage,
 	CommandName,
 	LinkState,
+	MissionAckMessage,
+	MissionItem,
+	MissionMessage,
 	ParamAckMessage,
 	ParamValueMessage,
 	ServerMessage,
@@ -15,6 +18,12 @@ import { $viewerStore } from "@/stores/cesium.store";
 import { $linkState } from "@/stores/link.store";
 import { pushStatus } from "@/stores/statustext.store";
 import { upsertParam, setParamProgress, clearParams } from "@/stores/params.store";
+import {
+	$missionCurrent,
+	$missionProgress,
+	$missionReached,
+	setMissionItems,
+} from "@/stores/mission.store";
 import envs from "@/lib/envs";
 
 // How long a command waits for its ack before we give up (gs retries internally
@@ -39,6 +48,17 @@ interface PendingParam {
 // give param_set a longer leash than a command.
 const PARAM_TIMEOUT_MS = 8000;
 
+// A mission upload is the multi-item MISSION_COUNT/REQUEST/ITEM/ACK handshake (gs
+// retransmits on timeout), so give it the longest leash.
+const MISSION_TIMEOUT_MS = 20000;
+
+// One mission_push awaiting its mission_ack (matched by id).
+interface PendingMission {
+	resolve: (ack: MissionAckMessage) => void;
+	reject: (err: Error) => void;
+	timer: ReturnType<typeof setTimeout>;
+}
+
 // WebSocket client for the gs daemon. Carries two directions over one socket:
 //   gs -> console: `telemetry` frames, `ack` responses, `link` state changes
 //   console -> gs: `command` requests, and a `claim` to be the commander
@@ -53,6 +73,8 @@ export class TelemetryClient {
 	// param_set requests awaiting their param_ack, keyed by id (separate channel
 	// from commands so a slow param write can't collide with a command ack).
 	private pendingParams = new Map<string, PendingParam>();
+	// mission_push requests awaiting their mission_ack, keyed by id.
+	private pendingMissions = new Map<string, PendingMission>();
 
 	constructor(private url: string = envs.MAVLINK_WS_ENDPOINT) {}
 
@@ -101,6 +123,20 @@ export class TelemetryClient {
 				setParamProgress(p.received, p.count);
 			} else if (type === "param_ack") {
 				this.resolveParamAck(msg as ParamAckMessage);
+			} else if (type === "mission") {
+				// Readback after a pull: replace the editable plan wholesale.
+				setMissionItems((msg as MissionMessage).items);
+				$missionProgress.set(null);
+			} else if (type === "mission_progress") {
+				const p = msg as { phase: "upload" | "download"; seq: number; count: number };
+				$missionProgress.set({ phase: p.phase, seq: p.seq, count: p.count });
+				if (p.count > 0 && p.seq + 1 >= p.count) $missionProgress.set(null);
+			} else if (type === "mission_ack") {
+				this.resolveMissionAck(msg as MissionAckMessage);
+			} else if (type === "mission_current") {
+				$missionCurrent.set((msg as { seq: number }).seq);
+			} else if (type === "mission_reached") {
+				$missionReached.set((msg as { seq: number }).seq);
 			} else {
 				this.onTelemetry(msg as TelemetryFrame & { type?: string });
 			}
@@ -217,6 +253,47 @@ export class TelemetryClient {
 		p.resolve(ack);
 	}
 
+	// --- missions (Phase 4) --------------------------------------------------
+
+	/**
+	 * Upload a mission and resolve with its mission_ack (matched by id). Like
+	 * sendCommand, a gs/PX4-rejected mission resolves with ok:false; only transport
+	 * failures / timeout reject. Re-uploading mid-flight is just another push.
+	 */
+	pushMission(items: MissionItem[]): Promise<MissionAckMessage> {
+		return new Promise((resolve, reject) => {
+			if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+				reject(new Error("not connected"));
+				return;
+			}
+			const id = uuidv4();
+			const timer = setTimeout(() => {
+				this.pendingMissions.delete(id);
+				reject(new Error("timeout"));
+			}, MISSION_TIMEOUT_MS);
+			this.pendingMissions.set(id, { resolve, reject, timer });
+			this.send({ type: "mission_push", id, items });
+		});
+	}
+
+	/** Download the vehicle's current mission; it arrives as a `mission` message. */
+	pullMission() {
+		this.send({ type: "mission_pull" });
+	}
+
+	/** Jump the active mission item (MISSION_SET_CURRENT). Fire-and-forget. */
+	setCurrentMissionItem(seq: number) {
+		this.send({ type: "mission_set_current", seq });
+	}
+
+	private resolveMissionAck(ack: MissionAckMessage) {
+		const p = this.pendingMissions.get(ack.id);
+		if (!p) return; // pull-side acks carry no id / unknown — ignore
+		clearTimeout(p.timer);
+		this.pendingMissions.delete(ack.id);
+		p.resolve(ack);
+	}
+
 	private failAllPending(reason: string) {
 		for (const [, p] of this.pending) {
 			clearTimeout(p.timer);
@@ -228,6 +305,11 @@ export class TelemetryClient {
 			p.reject(new Error(reason));
 		}
 		this.pendingParams.clear();
+		for (const [, p] of this.pendingMissions) {
+			clearTimeout(p.timer);
+			p.reject(new Error(reason));
+		}
+		this.pendingMissions.clear();
 	}
 
 	private send(obj: unknown) {

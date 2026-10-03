@@ -90,8 +90,30 @@ export interface StreamMessage {
     msgId: number,          // MAVLink message id to (de)activate
     hz: number,             // rate; 0 disables the stream
 }
+
+// --- missions (Phase 4), see docs/ws-contract.md -----------------------------
+// Console-friendly item; gs maps each `kind` to a MISSION_ITEM_INT.
+export type MissionKind =
+    | "takeoff" | "waypoint" | "loiter_unlim" | "loiter_time" | "loiter_turns" | "rtl" | "land";
+export interface MissionItem {
+    seq: number,
+    kind: MissionKind,
+    lat?: number,           // deg (omitted for rtl)
+    lon?: number,           // deg
+    alt?: number,           // m (relative-to-home)
+    params?: Record<string, number>, // kind-specific: radius / seconds / turns
+}
+export interface MissionPushMessage {
+    type: "mission_push",
+    id: string,             // uuid; echoed back in the matching MissionAckMessage
+    items: MissionItem[],
+}
+export interface MissionPullMessage { type: "mission_pull" }
+export interface MissionSetCurrentMessage { type: "mission_set_current", seq: number }
+
 export type ClientMessage =
-    | CommandMessage | ClaimMessage | ParamRefreshMessage | ParamSetMessage | StreamMessage;
+    | CommandMessage | ClaimMessage | ParamRefreshMessage | ParamSetMessage | StreamMessage
+    | MissionPushMessage | MissionPullMessage | MissionSetCurrentMessage;
 
 // gs -> console
 export interface TelemetryMessage extends TelemetryFrame { type: "telemetry" }
@@ -131,6 +153,25 @@ export interface ParamAckMessage {
     text: string,
 }
 
+export interface MissionMessage { type: "mission", count: number, items: MissionItem[] }
+export interface MissionProgressMessage {
+    type: "mission_progress",
+    phase: "upload" | "download",
+    seq: number,            // item just transferred
+    count: number,          // total items
+}
+export interface MissionAckMessage {
+    type: "mission_ack",
+    id: string,             // matches MissionPushMessage.id ("" for pull-side acks)
+    ok: boolean,
+    result: number,         // MAV_MISSION_RESULT (0 = ACCEPTED)
+    text: string,
+}
+export interface MissionCurrentMessage { type: "mission_current", seq: number }
+export interface MissionReachedMessage { type: "mission_reached", seq: number }
+
 export type ServerMessage =
     | TelemetryMessage | AckMessage | LinkMessage | StatusTextMessage
-    | ParamValueMessage | ParamProgressMessage | ParamAckMessage;
+    | ParamValueMessage | ParamProgressMessage | ParamAckMessage
+    | MissionMessage | MissionProgressMessage | MissionAckMessage
+    | MissionCurrentMessage | MissionReachedMessage;
