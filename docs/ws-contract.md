@@ -123,3 +123,45 @@ console → gs:
 ```
 → `SET_MESSAGE_INTERVAL` (hz=0 disables). Generalizes the daemon's existing
 hardcoded extra-stream requests.
+
+## Missions (Phase 4)
+
+A console-friendly item shape; gs maps each `kind` to a `MISSION_ITEM_INT`
+(lat/lon as int 1e7, `MAV_FRAME_GLOBAL_RELATIVE_ALT_INT` for waypoints):
+
+| kind           | MAV_CMD                    | params used                     |
+|----------------|----------------------------|---------------------------------|
+| `takeoff`      | `NAV_TAKEOFF`              | alt                             |
+| `waypoint`     | `NAV_WAYPOINT`            | lat, lon, alt                   |
+| `loiter_unlim` | `NAV_LOITER_UNLIM`        | lat, lon, alt, (radius)         |
+| `loiter_time`  | `NAV_LOITER_TIME`         | lat, lon, alt, seconds, radius  |
+| `loiter_turns` | `NAV_LOITER_TURNS`        | lat, lon, alt, turns, radius    |
+| `rtl`          | `NAV_RETURN_TO_LAUNCH`    | —                               |
+| `land`         | `NAV_LAND`                | lat, lon                        |
+
+Item: `{ "seq": 0, "kind": "waypoint", "lat": 37.4, "lon": -122.1, "alt": 80, "params": { "radius": 60 } }`
+
+console → gs:
+```json
+{ "type": "mission_push", "id": "<uuid>", "items": [ ... ] }
+{ "type": "mission_pull" }
+{ "type": "mission_set_current", "seq": 3 }
+```
+gs → console:
+```json
+{ "type": "mission", "count": 5, "items": [ ... ] }                 // after a pull
+{ "type": "mission_progress", "phase": "upload", "seq": 3, "count": 5 }
+{ "type": "mission_ack", "id": "<uuid>", "ok": true, "result": 0, "text": "accepted" }
+{ "type": "mission_current", "seq": 2 }
+{ "type": "mission_reached", "seq": 1 }
+```
+
+gs behavior (hand-rolled, on the mav thread; **the most error-prone protocol —
+heaviest test coverage**):
+- **push:** `MISSION_COUNT` → answer each `MISSION_REQUEST_INT` (out-of-order,
+  retransmit, timeout) with `MISSION_ITEM_INT` → `MISSION_ACK`. Commander-gated.
+- **pull:** `MISSION_REQUEST_LIST` → `MISSION_COUNT` → request each item →
+  collect `MISSION_ITEM_INT` → `MISSION_ACK` → emit `mission`.
+- Ingest `MISSION_CURRENT` → `mission_current`, `MISSION_ITEM_REACHED` →
+  `mission_reached`. `mission_set_current` → `MISSION_SET_CURRENT`.
+- `result` is the MAV_MISSION_RESULT code (0 = ACCEPTED).
