@@ -4,13 +4,11 @@ The hub is both the ground station and the base station: it runs the `gs` daemon
 (the plane's radio link) and serves the `console` web app, as its own standalone
 WiFi AP reachable at `commandant.local`. This CLI is the single interface to it.
 
-    commandant install            # provision a fresh Raspberry Pi into the hub
-    commandant update             # pull + re-run the installer + restart services
-    commandant status             # hub + service health
-    commandant up | down          # start / stop the hub services
-    commandant logs [gs|console]  # tail service logs
-    commandant uninstall          # remove services/config (repo & data kept)
-    commandant dev                # laptop test: run gs + console locally
+    commandant install   # provision a fresh Raspberry Pi into the hub
+    commandant update    # pull + re-run the installer + restart services
+
+The hub autostarts on boot (systemd), so those two are all you need. For health
+or debugging, use systemctl / journalctl on the Pi directly.
 
 Field story: plane on, hub on, join WiFi 'commandant', open http://commandant.local/
 — you just see the plane, live.
@@ -23,17 +21,7 @@ import sys
 from typing import Optional
 
 from . import __version__
-from .hub import (
-    DEFAULTS,
-    cmd_dev,
-    cmd_down,
-    cmd_install,
-    cmd_logs,
-    cmd_status,
-    cmd_uninstall,
-    cmd_up,
-    cmd_update,
-)
+from .hub import DEFAULTS, cmd_install, cmd_update
 
 
 def _add_provision_opts(p: argparse.ArgumentParser) -> None:
@@ -62,29 +50,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     _add_provision_opts(p)
     p.add_argument("--no-pull", action="store_true", help="Don't git-pull before re-running")
     p.set_defaults(fn=cmd_update)
-
-    p = sub.add_parser("status", help="Show hub + service health")
-    p.set_defaults(fn=cmd_status)
-
-    p = sub.add_parser("up", help="Start the hub services (gs + console)")
-    p.set_defaults(fn=cmd_up)
-
-    p = sub.add_parser("down", help="Stop the hub services")
-    p.set_defaults(fn=cmd_down)
-
-    p = sub.add_parser("logs", help="Tail hub service logs")
-    p.add_argument("service", nargs="?", choices=["gs", "console"],
-                   help="Which service (default: both)")
-    p.set_defaults(fn=cmd_logs)
-
-    p = sub.add_parser("uninstall", help="Remove hub services/config (repo & data kept)")
-    p.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
-    p.set_defaults(fn=cmd_uninstall)
-
-    p = sub.add_parser("dev", help="Laptop test: run gs + console locally")
-    p.add_argument("--repo", help="Monorepo path (default: this CLI's monorepo)")
-    p.add_argument("--radio", help="gs endpoint (default: udpin:0.0.0.0:14550 for bench/SITL)")
-    p.set_defaults(fn=cmd_dev)
 
     args = parser.parse_args(argv)
     try:

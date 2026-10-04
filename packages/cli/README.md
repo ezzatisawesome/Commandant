@@ -22,11 +22,8 @@ ground station and the base station. Modeled on Guppi's CLI.
 |---------|--------------|
 | `commandant install` | Provision a fresh Raspberry Pi: apt deps, AP (hostapd) + DHCP (dnsmasq) + mDNS (avahi), build `gs` venv + production `console`, install & enable systemd units, set hostname. Idempotent. |
 | `commandant update` | `git pull` + re-run the installer + restart services. No delta updates — the installer is the source of truth. |
-| `commandant status` | Hub + service health (gs, console, hostapd, dnsmasq, avahi). |
-| `commandant up` / `down` | Start / stop the hub services. |
-| `commandant logs [gs\|console]` | Tail service logs (journalctl). |
-| `commandant uninstall [-y]` | Remove services/config. Repo and data are kept. |
-| `commandant dev` | Laptop test: run `gs` + the console dev server locally (default endpoint `udpin:0.0.0.0:14550` for bench/SITL). |
+
+That's the whole surface. The hub autostarts on boot (systemd), so there's nothing to "start". For health or debugging on the Pi, use `systemctl status gs console` and `journalctl -u gs -u console -f` directly.
 
 Install flags (install/update): `--ssid --passphrase --country --ap-ip --radio
 --hostname --user --repo --force`. All default to sensible values; the WiFi
