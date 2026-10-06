@@ -11,5 +11,8 @@
     "build": "npm run build --workspace console",
     "console": "npm run dev --workspace console",
     "view": "npm run dev --workspace console -- -p 4301"
+  },
+  "overrides": {
+    "@zip.js/zip.js": "2.7.73"
   }
 }

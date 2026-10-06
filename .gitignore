@@ -41,3 +41,5 @@ venv/
 .venv/
 __pycache__/
 .pytest_cache/
+.vercel
+.env*
