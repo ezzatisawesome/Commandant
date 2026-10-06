@@ -50,7 +50,11 @@ export interface TelemetryFrame {
     targetLon?: number,     // deg
     targetAlt?: number,     // m (frame-dependent; horizontal path is the useful part)
     connected: boolean,     // bridge <-> MAVLink link alive
-    linkState?: LinkState,  // richer link state (connected == linkState === "alive")
+    linkState?: LinkState,
+    // Age of the newest VEHICLE data in ms (null before any arrives). A live
+    // frame with a large dataAgeMs means gs is re-serving a stale fix, which is
+    // what a frozen simulator or a dead autopilot looks like from here.
+    dataAgeMs?: number | null,  // richer link state (connected == linkState === "alive")
     // Health / status (see docs/ws-contract.md), merged into the frame by gs.
     ekfOk?: boolean,        // EKF_STATUS_REPORT flags nominal
     gpsFix?: number,        // GPS_RAW_INT.fix_type (0 none … 3 3D … 6 RTK-fixed)

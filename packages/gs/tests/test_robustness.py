@@ -26,6 +26,18 @@ from pymavlink import mavutil
 m = mavutil.mavlink
 
 
+async def _recv_until(ws, predicate, tries=200, timeout=0.5):
+    """Read WS messages until one matches (shared with the other test modules)."""
+    for _ in range(tries):
+        try:
+            msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=timeout))
+        except asyncio.TimeoutError:
+            continue
+        if predicate(msg):
+            return msg
+    return None
+
+
 # --- JSON safety ------------------------------------------------------------
 
 def test_dumps_never_emits_nan():
@@ -314,7 +326,7 @@ def test_foreign_heartbeats_do_not_overwrite_vehicle_state(monkeypatch):
         return ns
     # A QGC heartbeat first: not a vehicle, must not lock.
     b._on_mav(conn, hb(255, 190, m.MAV_TYPE_GCS, m.MAV_AUTOPILOT_INVALID, 0, 0))
-    assert b._vehicle is None and b.last_msg_at == 0
+    assert b._vehicle is None and b.last_mav_at == 0
     # PX4 with a non-default sysid: lock on, armed, AUTO.LOITER.
     b._on_mav(conn, hb(7, 1, m.MAV_TYPE_FIXED_WING, m.MAV_AUTOPILOT_PX4, 128, (4 << 16) | (3 << 24)))
     assert b._vehicle == (7, 1) and b.tsys == 7
@@ -525,3 +537,71 @@ def test_json_feed_disabled_when_its_port_is_taken(ports, capsys):
         assert "JSON telemetry disabled" in capsys.readouterr().out
     finally:
         hog.close()
+
+
+def test_json_feed_cannot_keep_the_link_green_for_a_dead_autopilot(ports, monkeypatch):
+    """The failure this guards against was observed live: PX4's MAVLink died
+    mid-flight, the sim's JSON power feed kept arriving, and gs reported
+    linkState "alive" for an hour while re-broadcasting one frozen position.
+
+    MAVLink is the flight link. Once a vehicle has been seen, only MAVLink
+    freshness may decide link health."""
+    monkeypatch.setattr(bridgemod, "STALE_MS", 200)
+    monkeypatch.setattr(bridgemod, "LOST_MS", 600)
+    b = Bridge(mavlink_endpoint=f"udpin:127.0.0.1:{ports['mav']}",
+               json_port=ports["json"], ws_port=ports["ws"])
+    threading.Thread(target=b._json_loop, daemon=True).start()
+
+    async def scenario():
+        serve_task = asyncio.create_task(b._serve())
+        await asyncio.sleep(0.3)
+        async with websockets.connect(f"ws://127.0.0.1:{ports['ws']}") as ws:
+            # A vehicle exists and is healthy.
+            conn = FakeConn()
+            b._on_mav(conn, _msg("HEARTBEAT", type=m.MAV_TYPE_FIXED_WING,
+                                 autopilot=m.MAV_AUTOPILOT_PX4, base_mode=128,
+                                 custom_mode=(4 << 16) | (3 << 24),
+                                 system_status=m.MAV_STATE_ACTIVE))
+            assert await _recv_until(ws, lambda x: x.get("linkState") == "alive") is not None
+
+            # Now MAVLink dies, but the sim keeps publishing its JSON feed.
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+            async def keep_json_alive():
+                for _ in range(40):
+                    sock.sendto(json.dumps({"genW": 210.0, "loadW": 70.0}).encode(),
+                                ("127.0.0.1", ports["json"]))
+                    await asyncio.sleep(0.05)
+
+            pump = asyncio.create_task(keep_json_alive())
+            lost = await _recv_until(ws, lambda x: x.get("linkState") in ("stale", "lost"),
+                                     tries=60)
+            pump.cancel()
+            assert lost is not None, "JSON traffic kept the vehicle link reported alive"
+            assert lost["dataAgeMs"] is not None and lost["dataAgeMs"] >= 200
+            # The JSON values still flow through — only the link VERDICT changed.
+            assert lost.get("genW") == 210.0
+        serve_task.cancel()
+
+    asyncio.run(scenario())
+
+
+def test_a_flightlink_only_run_still_reports_alive(ports, monkeypatch):
+    """The no-PX4 path: with no vehicle ever seen, the JSON feed is genuinely the
+    only source and must still drive link health."""
+    monkeypatch.setattr(bridgemod, "STALE_MS", 400)
+    b = Bridge(mavlink_endpoint=f"udpin:127.0.0.1:{ports['mav']}",
+               json_port=ports["json"], ws_port=ports["ws"])
+    threading.Thread(target=b._json_loop, daemon=True).start()
+
+    async def scenario():
+        serve_task = asyncio.create_task(b._serve())
+        await asyncio.sleep(0.3)
+        async with websockets.connect(f"ws://127.0.0.1:{ports['ws']}") as ws:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.sendto(json.dumps({"lat": 37.4, "lon": -122.1}).encode(),
+                        ("127.0.0.1", ports["json"]))
+            assert await _recv_until(ws, lambda x: x.get("linkState") == "alive") is not None
+        serve_task.cancel()
+
+    asyncio.run(scenario())

@@ -23,6 +23,10 @@ import { HealthStrip } from "./HealthStrip";
 
 // Connection-indicator styling per link state: amber pulse while connecting,
 // green alive, amber stale, red lost.
+// Beyond this, the newest vehicle data is old enough that the numbers on screen
+// describe the past. Say so rather than letting a frozen position read as live.
+const STALE_DATA_MS = 3000;
+
 const LINK_DOT: Record<LinkState, { className: string; title: string }> = {
 	connecting: { className: "bg-amber-400 animate-pulse", title: "Connecting…" },
 	alive: { className: "bg-emerald-400", title: "MAVLink alive" },
@@ -102,6 +106,8 @@ export default function FlightHUD() {
 	}, [history, charted]);
 
 	const dot = LINK_DOT[linkState];
+	const age = f?.dataAgeMs;
+	const frozen = typeof age === "number" && age > STALE_DATA_MS;
 
 	return (
 		<div className="w-64 rounded-md border border-white/10 bg-black/60 p-3 backdrop-blur">
@@ -115,6 +121,14 @@ export default function FlightHUD() {
 					Telemetry
 				</button>
 				<div className="flex items-center gap-2">
+					{frozen ? (
+						<span
+							className="rounded border border-red-500/50 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-red-400"
+							title={`No new vehicle data for ${Math.round((age as number) / 1000)} s — the values shown are stale`}
+						>
+							stale {Math.round((age as number) / 1000)}s
+						</span>
+					) : null}
 					<button
 						onClick={() => setConfigOpen((c) => !c)}
 						className={`${configOpen ? "text-white" : "text-white/40"} hover:text-white`}

@@ -104,3 +104,14 @@ describe("appendTrail", () => {
 		expect(t).toHaveLength(3000);
 	});
 });
+
+describe("stale vehicle data", () => {
+	it("dataAgeMs rides through to the store so the HUD can flag a frozen feed", () => {
+		pushFrame(base({ t: 50_000, dataAgeMs: 42_000 }));
+		expect($hudFrame.get()?.dataAgeMs).toBe(42_000);
+	});
+	it("a null dataAgeMs (no vehicle data yet) is normalized away, not shown as 0", () => {
+		pushFrame({ ...base({ t: 51_000 }), dataAgeMs: null } as TelemetryFrame);
+		expect($hudFrame.get()?.dataAgeMs).toBeUndefined();
+	});
+});

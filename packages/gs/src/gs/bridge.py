@@ -375,7 +375,16 @@ class Bridge:
 
         self._lock = threading.Lock()
         self.latest: dict[str, Any] = {"t": 0, "connected": False}
-        self.last_msg_at = 0
+        # Link freshness is tracked PER SOURCE, deliberately.
+        #
+        # `last_mav_at` is the only thing that says the *vehicle* is alive, because
+        # MAVLink is the flight link. `last_json_at` is the sim's supplementary
+        # flightlink feed (power model, no PX4). Collapsing them into one timestamp
+        # is how a live JSON feed reported `linkState:"alive"` for an hour while
+        # PX4's MAVLink was dead and the console re-drew the same frozen position —
+        # a GCS showing a stale aircraft as live, which is the worst failure it has.
+        self.last_mav_at = 0
+        self.last_json_at = 0
 
         # Source-arbitration / stream-health bookkeeping (mirrors the TS bridge).
         self._last_pos_boot_ms = -1
@@ -845,7 +854,7 @@ class Bridge:
         if self._vehicle is not None and src != self._vehicle:
             return  # a companion / second autopilot: never let it overwrite our state
         with self._lock:
-            self.last_msg_at = now
+            self.last_mav_at = now
             L = self.latest
 
             if t == "GLOBAL_POSITION_INT":
@@ -1094,7 +1103,7 @@ class Bridge:
                 continue
             now = _now_ms()
             with self._lock:
-                self.last_msg_at = now
+                self.last_json_at = now
                 for k, v in obj.items():
                     if k in JSON_KEYS and v is not None:
                         self.latest[k] = v
@@ -1106,6 +1115,7 @@ class Bridge:
 
     # --- link state ----------------------------------------------------------
     def _link_state(self, now: int, last: int) -> str:
+        """Freshness of the VEHICLE's data (see last_mav_at / last_json_at)."""
         if last == 0:
             return "connecting"
         age = now - last
@@ -1275,13 +1285,21 @@ class Bridge:
                 await asyncio.sleep(interval)
                 now = _now_ms()
                 with self._lock:
-                    last = self.last_msg_at
+                    mav_at, json_at = self.last_mav_at, self.last_json_at
                     frame = dict(self.latest)
+                # A MAVLink vehicle, once seen, is the sole authority on link health:
+                # the JSON feed must never keep the link green for a dead autopilot.
+                # A pure flightlink run (no PX4) falls back to the JSON feed, which
+                # is then genuinely the only source there is.
+                last = mav_at if mav_at else json_at
                 state = self._link_state(now, last)
                 frame["type"] = "telemetry"
                 frame["t"] = now
                 frame["linkState"] = state
                 frame["connected"] = (state == "alive")
+                # How old the newest vehicle data actually is, so the UI can say
+                # "frozen 42 s ago" instead of quietly showing a stale position.
+                frame["dataAgeMs"] = (now - last) if last else None
                 payload = dumps(frame)
                 if self._clients:
                     websockets.broadcast(self._clients, payload)
