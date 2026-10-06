@@ -2,7 +2,7 @@
 
 import { useStore } from "@nanostores/react";
 
-import { $aircraftStore } from "@/stores/aircraft.store";
+import { $hudFrame } from "@/stores/aircraft.store";
 
 // GPS fix-type labels (GPS_RAW_INT.fix_type).
 const GPS_FIX = ["NO GPS", "NO FIX", "2D", "3D", "DGPS", "RTK→", "RTK"];
@@ -25,7 +25,7 @@ function Chip({ label, ok, warn, text }: { label: string; ok?: boolean; warn?: b
 // warning — the at-a-glance "is it safe to fly" strip. Fields come from gs
 // (SYS_STATUS / GPS_RAW_INT / EKF_STATUS_REPORT), merged into the telemetry frame.
 export function HealthStrip() {
-	const f = useStore($aircraftStore);
+	const f = useStore($hudFrame);
 
 	const ekfKnown = f?.ekfOk !== undefined;
 	const fix = f?.gpsFix;
@@ -43,9 +43,9 @@ export function HealthStrip() {
 			/>
 			<Chip
 				label="GPS"
-				ok={fix !== undefined && fix >= 3}
-				warn={fix === undefined || (fix >= 2 && fix < 3)}
-				text={fix === undefined ? "—" : `${GPS_FIX[fix] ?? fix}${sats !== undefined ? ` ${sats}` : ""}`}
+				ok={typeof fix === "number" && fix >= 3}
+				warn={typeof fix !== "number" || (fix >= 2 && fix < 3)}
+				text={typeof fix !== "number" ? "—" : `${GPS_FIX[fix] ?? fix}${typeof sats === "number" ? ` ${sats}` : ""}`}
 			/>
 			<Chip label="FS" ok={f?.failsafe === false} warn={f?.failsafe === undefined} text={fsActive ? "ACTIVE" : f?.failsafe === undefined ? "—" : "clear"} />
 			{batt ? <Chip label="BATT" ok={false} text={batt} /> : null}

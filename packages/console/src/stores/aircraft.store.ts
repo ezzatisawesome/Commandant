@@ -4,8 +4,32 @@ import type { Entity } from "cesium";
 
 import type { TelemetryFrame } from "@/types/app";
 
-// Latest telemetry frame (null until the first frame arrives).
+// Latest telemetry frame (null until the first frame arrives). Updated at the
+// full link rate (25 Hz); Cesium reads it through CallbackProperties each render.
 export const $aircraftStore = atom<TelemetryFrame | null>(null);
+
+// The same frame, throttled to UI rate for React subscribers (HUD, health strip,
+// command bar). Re-rendering a React tree 25×/s for numbers a human reads is
+// pure waste and competes with Cesium for the main thread; 10 Hz is still
+// visually live. Cesium overlays keep using $aircraftStore.
+const HUD_INTERVAL_MS = 100;
+export const $hudFrame = atom<TelemetryFrame | null>(null);
+let lastHudAt = 0;
+
+// A finite number (gs sends `null` for a non-finite float; JSON has no NaN).
+export function isNum(v: unknown): v is number {
+	return typeof v === "number" && Number.isFinite(v);
+}
+
+// Normalize a wire frame: every `null` becomes `undefined` so the rest of the UI
+// only ever deals with "present and finite" or "absent".
+export function sanitizeFrame<T extends object>(frame: T): T {
+	const out = frame as Record<string, unknown>;
+	for (const k in out) {
+		if (out[k] === null) out[k] = undefined;
+	}
+	return frame;
+}
 
 // The Cesium model entity, published by Aircraft.tsx so UI (the Track button)
 // can point the camera at it.
@@ -44,6 +68,7 @@ export const $historyStore = atom<TelemetryFrame[]>([]);
 let wasConnected = false;
 
 export function pushFrame(frame: TelemetryFrame) {
+	sanitizeFrame(frame);
 	if (frame.connected && !wasConnected) {
 		$trailStore.set([]);
 		$historyStore.set([]);
@@ -52,6 +77,10 @@ export function pushFrame(frame: TelemetryFrame) {
 	wasConnected = frame.connected;
 
 	$aircraftStore.set(frame);
+	if (frame.t - lastHudAt >= HUD_INTERVAL_MS || !frame.connected) {
+		lastHudAt = frame.t;
+		$hudFrame.set(frame);
+	}
 
 	// Append to the downsampled history if enough time has passed since the
 	// last stored sample (using the frame's own bridge timestamp `t`).
@@ -67,7 +96,7 @@ export function pushFrame(frame: TelemetryFrame) {
 	// segment instead of being chorded to the last. "No valid fix" also rejects the
 	// null-island (0,0) sentinel some glitch/uninitialized frames carry — otherwise
 	// the polyline shoots a long chord off to (0,0), which reads as a "cone".
-	if (!hasFix(frame.lat, frame.lon) || frame.alt === undefined) {
+	if (!hasFix(frame.lat, frame.lon) || !isNum(frame.alt)) {
 		return;
 	}
 
@@ -86,7 +115,7 @@ export function pushFrame(frame: TelemetryFrame) {
 
 // A usable horizontal fix: both defined, finite, and not the null-island (0,0)
 // sentinel (|lat|,|lon| < ~0.0001 deg ≈ 11 m of the Gulf of Guinea origin).
-function hasFix(lat?: number, lon?: number): boolean {
+export function hasFix(lat?: number, lon?: number): boolean {
 	return (
 		lat !== undefined && lon !== undefined &&
 		Number.isFinite(lat) && Number.isFinite(lon) &&
@@ -94,13 +123,21 @@ function hasFix(lat?: number, lon?: number): boolean {
 	);
 }
 
+// Minimum spacing between trail points. At 25 Hz a 15 m/s aircraft moves 0.6 m
+// per frame; storing every frame burned the 3000-point cap in 2 minutes and
+// re-copied the array 25×/s. Decimating to ≥2 m stretches the trail to tens of
+// minutes and makes most frames a no-op (no new array, no Cesium re-upload).
+const TRAIL_MIN_STEP_M = 2;
+
 // Append a point to a bounded trail, DROPPING an outlier that jumps more than
 // TRAIL_JUMP_M from the last point (a single glitch frame) rather than chording
 // to it or reseeding the path on it — either of which draws the stray line.
-function appendTrail(trail: Cartesian3[], point: Cartesian3): Cartesian3[] {
+export function appendTrail(trail: Cartesian3[], point: Cartesian3): Cartesian3[] {
 	const last = trail[trail.length - 1];
-	if (last && Cartesian3.distance(last, point) > TRAIL_JUMP_M) {
-		return trail; // outlier — ignore it, keep the existing path intact
+	if (last) {
+		const d = Cartesian3.distance(last, point);
+		if (d > TRAIL_JUMP_M) return trail; // outlier — ignore it, keep the existing path intact
+		if (d < TRAIL_MIN_STEP_M) return trail; // hasn't moved enough to be worth a vertex
 	}
 	const next = trail.length >= TRAIL_MAX ? trail.slice(trail.length - TRAIL_MAX + 1) : trail.slice();
 	next.push(point);

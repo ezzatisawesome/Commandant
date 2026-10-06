@@ -149,6 +149,8 @@ export type ClientMessage =
 // gs -> console
 export interface TelemetryMessage extends TelemetryFrame { type: "telemetry" }
 export interface AckMessage {
+    // false = interim MAV_RESULT_IN_PROGRESS notice; the final ack follows (≤15 s).
+    final?: boolean,
     type: "ack",
     id: string,             // matches the CommandMessage.id
     ok: boolean,            // convenience: result === 0 (ACCEPTED) or a local accept
@@ -170,10 +172,17 @@ export interface ParamValueMessage {
     index: number,          // position in the full list
     count: number,          // total params (for progress)
 }
+// gs coalesces the PARAM_VALUE stream into batches (one WS message per ~50 ms).
+export interface ParamsBatchMessage {
+    type: "params",
+    items: ParamValueMessage[],
+}
 export interface ParamProgressMessage {
     type: "param_progress",
     received: number,
     count: number,
+    done?: boolean,         // refresh finished (all values received, or given up)
+    error?: string,         // set with `done` when gs gave up (e.g. "timeout")
 }
 export interface ParamAckMessage {
     type: "param_ack",
@@ -208,7 +217,7 @@ export interface RallyAckMessage { type: "rally_ack", id: string, ok: boolean, r
 
 export type ServerMessage =
     | TelemetryMessage | AckMessage | LinkMessage | StatusTextMessage
-    | ParamValueMessage | ParamProgressMessage | ParamAckMessage
+    | ParamValueMessage | ParamsBatchMessage | ParamProgressMessage | ParamAckMessage
     | MissionMessage | MissionProgressMessage | MissionAckMessage
     | MissionCurrentMessage | MissionReachedMessage
     | FenceMessage | RallyMessage | FenceAckMessage | RallyAckMessage;

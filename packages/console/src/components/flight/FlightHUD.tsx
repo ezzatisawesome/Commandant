@@ -1,10 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { useStore } from "@nanostores/react";
 import { ChevronUp, ChevronDown, Settings, ArrowUp, ArrowDown } from "lucide-react";
 
-import { $aircraftStore, $historyStore } from "@/stores/aircraft.store";
+import { $hudFrame, $historyStore, isNum } from "@/stores/aircraft.store";
 import { $linkState } from "@/stores/link.store";
 import {
 	$visibleFields, $chartedFields, FIELD_CATALOG, FIELD_BY_KEY,
@@ -13,6 +13,7 @@ import {
 import type { FieldDef } from "@/stores/displayConfig.store";
 import type { LinkState, TelemetryFrame } from "@/types/app";
 import { telemetryClient } from "@/services/telemetry";
+import { IS_VIEW } from "@/lib/envs";
 import { Sparkline } from "./Sparkline";
 import { ControlBar } from "./ControlBar";
 import { AttitudeIndicator } from "./AttitudeIndicator";
@@ -40,13 +41,14 @@ const STREAMS: Array<{ id: number; label: string }> = [
 	{ id: 375, label: "ACTUATOR_OUTPUT" },
 ];
 
-const fmt = (v: number | undefined, digits = 1) =>
-	v === undefined ? "—" : v.toFixed(digits);
+// Anything that isn't a finite number renders as a dash: fields are optional and
+// gs sends `null` for a non-finite float, and `null.toFixed` would take the page
+// down with it.
+const fmt = (v: unknown, digits = 1) => (isNum(v) ? v.toFixed(digits) : "—");
 
-function Row({
-	def, frame, spark,
-}: { def: FieldDef; frame: TelemetryFrame | null; spark?: Array<number | undefined> }) {
-	const raw = frame ? (frame[def.key] as number | boolean | string | undefined) : undefined;
+const Row = memo(function Row({
+	def, raw, spark,
+}: { def: FieldDef; raw: number | boolean | string | undefined; spark?: Array<number | undefined> }) {
 
 	let value: string;
 	let graphic: React.ReactNode = null;
@@ -55,10 +57,10 @@ function Row({
 			? (raw === undefined ? "—" : raw ? "ARMED" : "DISARMED")
 			: (raw as string | undefined) ?? "—";
 	} else if (def.kind === "control") {
-		value = fmt(raw as number | undefined, def.digits ?? 0);
-		graphic = <ControlBar value={raw as number | undefined} />;
+		value = fmt(raw, def.digits ?? 0);
+		graphic = <ControlBar value={isNum(raw) ? raw : undefined} />;
 	} else {
-		value = fmt(raw as number | undefined, def.digits ?? 1);
+		value = fmt(raw, def.digits ?? 1);
 		if (spark) graphic = <Sparkline values={spark} className={def.sparkClassName} />;
 	}
 
@@ -74,10 +76,10 @@ function Row({
 			</div>
 		</div>
 	);
-}
+});
 
 export default function FlightHUD() {
-	const f = useStore($aircraftStore);
+	const f = useStore($hudFrame);
 	const history = useStore($historyStore);
 	const linkState = useStore($linkState);
 	const visible = useStore($visibleFields);
@@ -87,11 +89,19 @@ export default function FlightHUD() {
 	const [streamId, setStreamId] = useState(STREAMS[0].id);
 	const [streamHz, setStreamHz] = useState(10);
 
-	const series = (key: keyof TelemetryFrame) =>
-		history.map((frame) => frame[key] as number | undefined);
+	// Sparkline series only change when the (4 Hz) history does, not per HUD
+	// frame; memoize per charted key so each Row gets a stable array reference.
+	const chartedSet = useMemo(() => new Set(charted), [charted]);
+	const seriesByKey = useMemo(() => {
+		const out: Partial<Record<keyof TelemetryFrame, Array<number | undefined>>> = {};
+		for (const key of charted) {
+			const k = key as keyof TelemetryFrame;
+			out[k] = history.map((frame) => frame[k] as number | undefined);
+		}
+		return out;
+	}, [history, charted]);
 
 	const dot = LINK_DOT[linkState];
-	const chartedSet = new Set(charted);
 
 	return (
 		<div className="w-64 rounded-md border border-white/10 bg-black/60 p-3 backdrop-blur">
@@ -146,6 +156,7 @@ export default function FlightHUD() {
 							</div>
 						);
 					})}
+					{IS_VIEW ? null : <>
 					<div className="mt-2 mb-1 uppercase tracking-wide text-white/40">Stream control</div>
 					<div className="flex items-center gap-1">
 						<select
@@ -169,6 +180,7 @@ export default function FlightHUD() {
 							Apply
 						</button>
 					</div>
+					</>}
 				</div>
 			) : null}
 
@@ -182,12 +194,15 @@ export default function FlightHUD() {
 				{visible.map((key) => {
 					const def = FIELD_BY_KEY[key];
 					if (!def) return null;
-					const spark = def.kind === "num" && chartedSet.has(key) ? series(def.key) : undefined;
-					return <Row key={key} def={def} frame={f} spark={spark} />;
+					const spark = def.kind === "num" && chartedSet.has(key) ? seriesByKey[def.key] : undefined;
+					const raw = f ? (f[def.key] as number | boolean | string | undefined) : undefined;
+					return <Row key={key} def={def} raw={raw} spark={spark} />;
 				})}
 			</div>
 			<HealthStrip />
-			<CommandBar />
+			{/* Commanding exists only in the cockpit build. The hosted viewer has
+			    no command surface at all, and its client refuses to transmit. */}
+			{IS_VIEW ? null : <CommandBar />}
 			</>
 			)}
 		</div>

@@ -4,6 +4,9 @@ import dynamic from "next/dynamic";
 import { Shield } from "lucide-react";
 import { Saira_Condensed } from "next/font/google";
 
+import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { IS_VIEW } from "@/lib/envs";
+
 const saira = Saira_Condensed({ subsets: ["latin"], weight: ["600"] });
 
 // Cesium touches the DOM, so every island is client-only (no SSR) — the Next
@@ -34,17 +37,31 @@ export default function FlightPage() {
 				<span className={`${saira.className} text-lg font-semibold uppercase tracking-wide text-white`}>
 					Commandant
 				</span>
+				{IS_VIEW ? (
+					<span
+						className="rounded border border-sky-400/40 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-sky-300"
+						title="Read-only view of a live flight. Commanding happens only on the ground-station hub."
+					>
+						watching
+					</span>
+				) : null}
 			</div>
 
 			{/* Right rail: HUD, status log, view controls, params, airframe config. */}
 			<div className="fixed top-4 right-4 z-50 flex max-h-[calc(100vh-2rem)] flex-col items-end gap-2 overflow-y-auto">
-				<FlightHUD />
-				<StatusLog />
-				<ViewControls />
-				<MissionPanel />
-				<GeoPanel />
-				<ParamEditor />
-				<AirframeConfig />
+				<ErrorBoundary name="Telemetry"><FlightHUD /></ErrorBoundary>
+				<ErrorBoundary name="Status log"><StatusLog /></ErrorBoundary>
+				<ErrorBoundary name="View controls"><ViewControls /></ErrorBoundary>
+				{/* Authoring and parameter writing are cockpit-only. The globe still
+				    draws the mission and fence the vehicle is actually flying. */}
+				{IS_VIEW ? null : (
+					<>
+						<ErrorBoundary name="Mission"><MissionPanel /></ErrorBoundary>
+						<ErrorBoundary name="Geofence"><GeoPanel /></ErrorBoundary>
+						<ErrorBoundary name="Parameters"><ParamEditor /></ErrorBoundary>
+						<ErrorBoundary name="Airframe"><AirframeConfig /></ErrorBoundary>
+					</>
+				)}
 			</div>
 		</>
 	);

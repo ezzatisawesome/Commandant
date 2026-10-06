@@ -6,6 +6,7 @@ import {
 	Cartesian2,
 	Cartesian3,
 	Cartographic,
+	CallbackProperty,
 	CallbackPositionProperty,
 	Color,
 	Entity,
@@ -18,6 +19,7 @@ import {
 } from "cesium";
 
 import { $viewerStore } from "@/stores/cesium.store";
+import { IS_VIEW } from "@/lib/envs";
 import { $aircraftStore } from "@/stores/aircraft.store";
 import {
 	$fenceItems,
@@ -53,12 +55,30 @@ export default function GeoLayer() {
 		if (!$viewer) return;
 		const alt = () => $aircraftStore.get()?.alt ?? 0;
 
-		// All geo entities are rebuilt whenever either set changes structurally.
+		// Geo entities are rebuilt only when either set changes STRUCTURALLY
+		// (count/kind/order). Positions and radii are read live through callback
+		// properties so a marker drag never tears everything down per mouse-move.
 		let ents: Entity[] = [];
+		let structure = "";
 		const rebuild = () => {
+			const sig = $fenceItems.get().map((it) => `${it.seq}:${it.kind}`).join(",")
+				+ "|" + $rallyItems.get().map((it) => it.seq).join(",");
+			if (sig === structure) return;
+			structure = sig;
 			ents.forEach((e) => $viewer.entities.remove(e));
 			ents = [];
 			const fence = $fenceItems.get();
+			// Live polygon vertices for the run [i, j) of the same kind.
+			const polyPositions = (kind: FenceItem["kind"], i: number, j: number) => () => {
+				const cur = $fenceItems.get();
+				const pts: Cartesian3[] = [];
+				for (let k = i; k < j && k < cur.length; k++) {
+					const g = cur[k];
+					if (g.kind !== kind) break;
+					pts.push(Cartesian3.fromDegrees(g.lon, g.lat, 0));
+				}
+				return pts.length >= 3 ? new PolygonHierarchy(pts) : undefined;
+			};
 
 			// Polygons: each contiguous run of the same polygon kind is one polygon.
 			let i = 0;
@@ -69,15 +89,16 @@ export default function GeoLayer() {
 					while (j < fence.length && fence[j].kind === it.kind) j++;
 					const group = fence.slice(i, j);
 					if (group.length >= 3) {
-						const positions = group.map((g) => Cartesian3.fromDegrees(g.lon, g.lat, 0));
 						const col = fenceColor(it.kind);
+						// No `height`: a ground polygon is clamped to the terrain mesh.
+						// With an explicit height 0 it sat at the ellipsoid and was
+						// buried under any terrain above sea level.
 						ents.push($viewer.entities.add({
 							polygon: {
-								hierarchy: new PolygonHierarchy(positions),
+								hierarchy: new CallbackProperty(polyPositions(it.kind, i, j), false),
 								material: col.withAlpha(0.12),
 								outline: true,
 								outlineColor: col.withAlpha(0.8),
-								height: 0,
 							},
 						}));
 					}
@@ -90,17 +111,21 @@ export default function GeoLayer() {
 			// Circle fences: one ellipse per circle item, radius from params.
 			for (const c of fence) {
 				if (!isCircleKind(c.kind)) continue;
-				const r = c.params?.radius ?? 100;
+				const seq = c.seq;
 				const col = fenceColor(c.kind);
+				const radius = new CallbackProperty(
+					() => $fenceItems.get().find((x) => x.seq === seq)?.params?.radius ?? 100, false);
 				ents.push($viewer.entities.add({
-					position: Cartesian3.fromDegrees(c.lon, c.lat, 0),
+					position: new CallbackPositionProperty(() => {
+						const cur = $fenceItems.get().find((x) => x.seq === seq);
+						return cur ? Cartesian3.fromDegrees(cur.lon, cur.lat, 0) : undefined;
+					}, false),
 					ellipse: {
-						semiMajorAxis: r,
-						semiMinorAxis: r,
+						semiMajorAxis: radius,
+						semiMinorAxis: radius,
 						material: col.withAlpha(0.12),
 						outline: true,
 						outlineColor: col.withAlpha(0.8),
-						height: 0,
 					},
 				}));
 			}
@@ -151,7 +176,7 @@ export default function GeoLayer() {
 		let didDrag = false;
 
 		handler.setInputAction((m: { position: Cartesian2 }) => {
-			if (!$geoEdit.get() || didDrag) return;
+			if (IS_VIEW || !$geoEdit.get() || didDrag) return;
 			const cart = $viewer.camera.pickEllipsoid(m.position, $viewer.scene.globe.ellipsoid);
 			if (!cart) return;
 			const geo = Cartographic.fromCartesian(cart);
@@ -163,6 +188,7 @@ export default function GeoLayer() {
 		}, ScreenSpaceEventType.LEFT_CLICK);
 
 		handler.setInputAction((m: { position: Cartesian2 }) => {
+			if (IS_VIEW) return;  // read-only: markers are not draggable
 			const picked = $viewer.scene.pick(m.position);
 			const id: unknown = picked?.id?.id;
 			if (typeof id !== "string") return;

@@ -48,14 +48,29 @@ export function lookupMeta(meta: Record<string, ParamMeta>, name: string): Param
 	return meta[name] ?? meta[name.toUpperCase()];
 }
 
+// MAV_PARAM_TYPE 1..8 are the integer kinds (UINT8..UINT64/INT64); 9/10 are float.
+export function isIntegerPtype(ptype: number | undefined): boolean {
+	return typeof ptype === "number" && ptype >= 1 && ptype <= 8;
+}
+
+// Parse what the operator typed. An empty/blank field is NOT zero — `Number("")`
+// is 0, which once let a cleared input write 0 to the vehicle.
+export function parseParamInput(raw: string): number {
+	const t = raw.trim();
+	return t === "" ? NaN : Number(t);
+}
+
 // Validate a candidate value against the metadata's range/type. Returns an error
 // string if invalid, or null if acceptable (or if there's no metadata to check).
-export function validateParam(meta: ParamMeta | undefined, value: number): string | null {
+// `ptype` (from the wire) decides integer-ness even for params missing from the
+// bundled metadata.
+export function validateParam(meta: ParamMeta | undefined, value: number, ptype?: number): string | null {
 	if (!Number.isFinite(value)) return "not a number";
-	if (!meta) return null;
-	if ((meta.type === "Int32" || meta.type === "Int16") && !Number.isInteger(value)) {
+	const intByType = meta?.type === "Int32" || meta?.type === "Int16" || meta?.type === "Int8";
+	if ((isIntegerPtype(ptype) || intByType) && !Number.isInteger(value)) {
 		return "must be an integer";
 	}
+	if (!meta) return null;
 	if (meta.min !== undefined && value < meta.min) return `below min (${meta.min})`;
 	if (meta.max !== undefined && value > meta.max) return `above max (${meta.max})`;
 	return null;

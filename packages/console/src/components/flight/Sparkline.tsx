@@ -1,8 +1,11 @@
 "use client";
 
+import { memo } from "react";
+
 // Tiny inline sparkline. Pure SVG, no charting dependency — sized to sit next
-// to a HUD field. Auto-scales to the min/max of the values it's given.
-export function Sparkline({
+// to a HUD field. Auto-scales to the min/max of the values it's given. Memoized:
+// the history it draws updates at 4 Hz, so it must not redraw on every HUD frame.
+export const Sparkline = memo(function Sparkline({
 	values,
 	width = 60,
 	height = 16,
@@ -21,8 +24,8 @@ export function Sparkline({
 		return <svg width={width} height={height} className={className} aria-hidden />;
 	}
 
-	const min = Math.min(...pts);
-	const max = Math.max(...pts);
+	let min = Infinity, max = -Infinity;
+	for (const v of pts) { if (v < min) min = v; if (v > max) max = v; }
 	const range = max - min || 1; // avoid /0 on a flat series
 	const pad = 1; // keep the stroke off the top/bottom edges
 	const usable = height - pad * 2;
@@ -54,4 +57,4 @@ export function Sparkline({
 			/>
 		</svg>
 	);
-}
+});

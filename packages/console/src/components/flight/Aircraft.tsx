@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import { useStore } from "@nanostores/react";
 import {
+	ArcType,
 	Cartesian2,
 	Cartesian3,
 	Cartographic,
@@ -22,22 +23,12 @@ import {
 } from "cesium";
 
 import { $viewerStore } from "@/stores/cesium.store";
-import { $aircraftStore, $trailStore, $targetTrailStore, $aircraftEntityStore } from "@/stores/aircraft.store";
+import { $aircraftStore, $trailStore, $targetTrailStore, $aircraftEntityStore, hasFix, isNum } from "@/stores/aircraft.store";
 import { $showTriad, $showHorizPlane } from "@/stores/viewControls.store";
 import { $linkState } from "@/stores/link.store";
 import { pushStatus } from "@/stores/statustext.store";
 import { telemetryClient } from "@/services/telemetry";
-
-// A usable horizontal fix: both defined, finite, and not the null-island (0,0)
-// sentinel some glitch/uninitialized frames carry. Guarding on it keeps the model
-// and setpoint marker from teleporting to (0,0) and dragging a line across.
-function hasFix(lat?: number, lon?: number): boolean {
-	return (
-		lat !== undefined && lon !== undefined &&
-		Number.isFinite(lat) && Number.isFinite(lon) &&
-		(Math.abs(lat) > 1e-4 || Math.abs(lon) > 1e-4)
-	);
-}
+import { IS_VIEW } from "@/lib/envs";
 
 // Live aircraft: a glTF model driven by MAVLink position + attitude, plus a
 // flight-path trail. Entities read the store inside CallbackProperty so updates
@@ -68,7 +59,7 @@ export default function Aircraft() {
 
 		const positionProp = new CallbackPositionProperty(() => {
 			const f = $aircraftStore.get();
-			if (!f || !hasFix(f.lat, f.lon) || f.alt === undefined) {
+			if (!f || !hasFix(f.lat, f.lon) || !isNum(f.alt)) {
 				return undefined;
 			}
 			return Cartesian3.fromDegrees(f.lon!, f.lat!, f.alt);
@@ -92,7 +83,7 @@ export default function Aircraft() {
 		// The aircraft orientation with the glTF stand-up correction applied.
 		function currentOrientation(): Quaternion | undefined {
 			const f = $aircraftStore.get();
-			if (!f || !hasFix(f.lat, f.lon) || f.alt === undefined) {
+			if (!f || !hasFix(f.lat, f.lon) || !isNum(f.alt)) {
 				return undefined;
 			}
 			const position = Cartesian3.fromDegrees(f.lon!, f.lat!, f.alt);
@@ -129,7 +120,7 @@ export default function Aircraft() {
 		const AXIS_LEN = 15; // metres
 		const bodyRot = () => {
 			const f = $aircraftStore.get();
-			if (!f || !hasFix(f.lat, f.lon) || f.alt === undefined) return undefined;
+			if (!f || !hasFix(f.lat, f.lon) || !isNum(f.alt)) return undefined;
 			const position = Cartesian3.fromDegrees(f.lon!, f.lat!, f.alt);
 			return { position, rot: Matrix3.fromQuaternion(flightQuat(position, f), new Matrix3()) };
 		};
@@ -138,6 +129,7 @@ export default function Aircraft() {
 				polyline: {
 					width: 3,
 					material: color,
+					arcType: ArcType.NONE,
 					positions: new CallbackProperty(() => {
 						const b = bodyRot();
 						if (!b) return undefined;
@@ -163,7 +155,7 @@ export default function Aircraft() {
 		const PLANE_HALF = 12; // metres, half-extent of the quad
 		const horizPlaneCorners = () => {
 			const f = $aircraftStore.get();
-			if (!f || !hasFix(f.lat, f.lon) || f.alt === undefined) return undefined;
+			if (!f || !hasFix(f.lat, f.lon) || !isNum(f.alt)) return undefined;
 			const position = Cartesian3.fromDegrees(f.lon!, f.lat!, f.alt);
 			const enu = Matrix4.getMatrix3(Transforms.eastNorthUpToFixedFrame(position), new Matrix3());
 			const east = Matrix3.getColumn(enu, 0, new Cartesian3());
@@ -190,11 +182,15 @@ export default function Aircraft() {
 		});
 		horizPlaneRef.current = horizPlane;
 
+		// ArcType.NONE: consecutive fixes are metres apart, so the geodesic
+		// subdivision Cesium would otherwise run over all 3000 points EVERY frame
+		// (dynamic positions are re-evaluated per render) is pure cost.
 		const trail = $viewer.entities.add({
 			polyline: {
 				positions: new CallbackProperty(() => $trailStore.get(), false),
 				width: 2,
 				material: Color.CYAN.withAlpha(0.8),
+				arcType: ArcType.NONE,
 			},
 		});
 
@@ -207,6 +203,7 @@ export default function Aircraft() {
 				positions: new CallbackProperty(() => $targetTrailStore.get(), false),
 				width: 2,
 				material: Color.ORANGE.withAlpha(0.9),
+				arcType: ArcType.NONE,
 			},
 		});
 
@@ -214,7 +211,7 @@ export default function Aircraft() {
 		const targetPoint = $viewer.entities.add({
 			position: new CallbackPositionProperty(() => {
 				const f = $aircraftStore.get();
-				if (!f || !hasFix(f.targetLat, f.targetLon) || f.alt === undefined) {
+				if (!f || !hasFix(f.targetLat, f.targetLon) || !isNum(f.alt)) {
 					return undefined;
 				}
 				return Cartesian3.fromDegrees(f.targetLon!, f.targetLat!, f.alt);
@@ -239,6 +236,7 @@ export default function Aircraft() {
 		// commander/authority and replies with an ack we surface in the status log.
 		const clickHandler = new ScreenSpaceEventHandler($viewer.scene.canvas);
 		clickHandler.setInputAction((movement: { position: Cartesian2 }) => {
+			if (IS_VIEW) return;  // the viewer never commands a reposition
 			if ($linkState.get() !== "alive") return;
 			const cart = $viewer.camera.pickEllipsoid(
 				movement.position,
@@ -262,12 +260,12 @@ export default function Aircraft() {
 		// actual coordinates is reliable (no dependency on the model loading).
 		let flown = false;
 		const unsubscribe = $aircraftStore.subscribe((f) => {
-			if (flown || !f || f.lat === undefined || f.lon === undefined || f.alt === undefined) {
+			if (flown || !f || !hasFix(f.lat, f.lon) || !isNum(f.alt)) {
 				return;
 			}
 			flown = true;
 			$viewer.camera.flyTo({
-				destination: Cartesian3.fromDegrees(f.lon, f.lat, f.alt + 1200),
+				destination: Cartesian3.fromDegrees(f.lon!, f.lat!, f.alt! + 1200),
 				duration: 1.5,
 			});
 		});

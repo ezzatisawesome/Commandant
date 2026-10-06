@@ -2,8 +2,9 @@
 
 import { useState } from "react";
 import { useStore } from "@nanostores/react";
+import { computed } from "nanostores";
 
-import { $aircraftStore } from "@/stores/aircraft.store";
+import { $hudFrame } from "@/stores/aircraft.store";
 import { $linkState, $commander } from "@/stores/link.store";
 import { telemetryClient } from "@/services/telemetry";
 import type { CommandName } from "@/types/app";
@@ -22,8 +23,12 @@ const MODES: Array<{ label: string; main: number; sub: number }> = [
 // (takeoff/land/RTL), and mode set. Everything is disabled unless the link is
 // alive; each command's ack result (or failure) is surfaced inline. "Fly to here"
 // is a globe double-click, handled in Aircraft.tsx.
+// The only telemetry this panel needs is the arm state; a derived store means it
+// re-renders on arm/disarm, not on every frame.
+const $armed = computed($hudFrame, (f) => f?.armed ?? false);
+
 export function CommandBar() {
-	const f = useStore($aircraftStore);
+	const armed = useStore($armed);
 	const linkState = useStore($linkState);
 	const commander = useStore($commander);
 	const [busy, setBusy] = useState(false);
@@ -34,7 +39,6 @@ export function CommandBar() {
 	// them anyway). null/true = we have (or optimistically assume) control.
 	const notCommander = commander === false;
 	const live = linkState === "alive" && !notCommander;
-	const armed = f?.armed ?? false;
 
 	async function run(name: CommandName, args: Record<string, unknown> = {}) {
 		setBusy(true);

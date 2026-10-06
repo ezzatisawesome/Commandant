@@ -93,13 +93,13 @@ def _fake_px4_download(port: int, items: list[dict], mtype: int, seen_type: dict
                 it.get("p1", 0), 0, 0, 0, int(it["lat"] * 1e7), int(it["lon"] * 1e7), 0, mtype)
 
 
-def test_fence_upload_roundtrip():
+def test_fence_upload_roundtrip(ports):
     received: dict = {}
     seen: dict = {}
-    bridge = Bridge(mavlink_endpoint="udpin:127.0.0.1:15020", json_port=15021, ws_port=8780)
+    bridge = Bridge(mavlink_endpoint=f"udpin:127.0.0.1:{ports['mav']}", json_port=ports["json"], ws_port=ports["ws"])
     threading.Thread(target=bridge._mav_loop, daemon=True).start()
     stop = threading.Event()
-    threading.Thread(target=_fake_px4_upload, args=(15020, received, seen, stop), daemon=True).start()
+    threading.Thread(target=_fake_px4_upload, args=(ports["mav"], received, seen, stop), daemon=True).start()
 
     # A 3-vertex inclusion polygon + one circular exclusion.
     items = [
@@ -112,7 +112,7 @@ def test_fence_upload_roundtrip():
     async def scenario():
         serve_task = asyncio.create_task(bridge._serve())
         await asyncio.sleep(0.4)
-        async with websockets.connect("ws://127.0.0.1:8780") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{ports['ws']}") as ws:
             await ws.send(json.dumps({"type": "claim", "id": "c1"}))
             assert await _recv_until(ws, lambda x: x.get("type") == "ack" and x.get("id") == "c1")
             await ws.send(json.dumps({"type": "fence_push", "id": "f1", "items": items}))
@@ -136,13 +136,13 @@ def test_fence_upload_roundtrip():
     assert received[3]["p1"] == 50          # radius
 
 
-def test_rally_upload_roundtrip():
+def test_rally_upload_roundtrip(ports):
     received: dict = {}
     seen: dict = {}
-    bridge = Bridge(mavlink_endpoint="udpin:127.0.0.1:15022", json_port=15023, ws_port=8781)
+    bridge = Bridge(mavlink_endpoint=f"udpin:127.0.0.1:{ports['mav']}", json_port=ports["json"], ws_port=ports["ws"])
     threading.Thread(target=bridge._mav_loop, daemon=True).start()
     stop = threading.Event()
-    threading.Thread(target=_fake_px4_upload, args=(15022, received, seen, stop), daemon=True).start()
+    threading.Thread(target=_fake_px4_upload, args=(ports["mav"], received, seen, stop), daemon=True).start()
 
     items = [
         {"kind": "rally", "lat": 37.50, "lon": -122.30, "alt": 60},
@@ -152,7 +152,7 @@ def test_rally_upload_roundtrip():
     async def scenario():
         serve_task = asyncio.create_task(bridge._serve())
         await asyncio.sleep(0.4)
-        async with websockets.connect("ws://127.0.0.1:8781") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{ports['ws']}") as ws:
             await ws.send(json.dumps({"type": "claim", "id": "c1"}))
             assert await _recv_until(ws, lambda x: x.get("type") == "ack" and x.get("id") == "c1")
             await ws.send(json.dumps({"type": "rally_push", "id": "r1", "items": items}))
@@ -171,22 +171,22 @@ def test_rally_upload_roundtrip():
     assert all(r["mtype"] == m.MAV_MISSION_TYPE_RALLY for r in received.values())
 
 
-def test_fence_download_roundtrip():
+def test_fence_download_roundtrip(ports):
     items = [
         {"cmd": m.MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION, "lat": 37.40, "lon": -122.20, "p1": 3},
         {"cmd": m.MAV_CMD_NAV_FENCE_CIRCLE_EXCLUSION, "lat": 37.405, "lon": -122.195, "p1": 50},
     ]
     seen: dict = {}
-    bridge = Bridge(mavlink_endpoint="udpin:127.0.0.1:15024", json_port=15025, ws_port=8782)
+    bridge = Bridge(mavlink_endpoint=f"udpin:127.0.0.1:{ports['mav']}", json_port=ports["json"], ws_port=ports["ws"])
     threading.Thread(target=bridge._mav_loop, daemon=True).start()
     stop = threading.Event()
     threading.Thread(target=_fake_px4_download,
-                     args=(15024, items, m.MAV_MISSION_TYPE_FENCE, seen, stop), daemon=True).start()
+                     args=(ports["mav"], items, m.MAV_MISSION_TYPE_FENCE, seen, stop), daemon=True).start()
 
     async def scenario():
         serve_task = asyncio.create_task(bridge._serve())
         await asyncio.sleep(0.4)
-        async with websockets.connect("ws://127.0.0.1:8782") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{ports['ws']}") as ws:
             await ws.send(json.dumps({"type": "fence_pull"}))
             fence = await _recv_until(ws, lambda x: x.get("type") == "fence")
             assert fence is not None, "no fence downloaded"

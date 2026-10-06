@@ -15,6 +15,19 @@ was caught and fixed). Hub = `commandant` CLI scaffolded. Geofence + rally, PX4 
 live-validated (fence+rally upload/readback against SITL). **Not yet done:**
 Phase 3 SIL-rehearsal (real-aircraft gate) and real-Pi hub validation.
 
+**Hardening pass (2026-10-05):** transport-chain audit + fixes, both ends.
+gs: handler exceptions can no longer kill the mav thread; serial/TCP links reopen
+with backoff; vehicle sysid/compid lock-on (foreign heartbeats ignored); PX4
+byte-wise INT param encoding (INT32 values were displayed/written as garbage);
+NaN-safe JSON; `params` batching; bounded param refresh with a `done`/`error`
+marker; prompt failure on rejected PARAM_SET and mission-download NAK;
+IN_PROGRESS acks relayed; malformed WS messages acked, not fatal. Console: null
+fields can't crash the HUD (error boundaries per panel); HUD renders at 10 Hz off
+a throttled store; trails decimated + `ArcType.NONE`; marker drags no longer
+rebuild entities; fences clamp to terrain; unknown WS types dropped; reconnect
+with backoff that keeps the trail; empty param field can't write 0. Tests: 42
+daemon (pytest, fake-PX4 + unit) and 34 console (vitest).
+
 ## Scope boundary (the two-plane rule)
 
 Commandant owns the aircraft as a **flying vehicle** — flight/ops plane, MAVLink,
@@ -237,6 +250,44 @@ The solar/power/MPPT dashboard already exists; this generalizes the rest.
 - [ ] Layout presets (flight-test / power-debug / mission view), persisted.
 
 ---
+
+## Phase 6 — hosted viewer (commandant.guppi.com)
+
+Public, read-only visibility into a live flight. Flight **history** is Guppi's,
+not Commandant's: Guppi is the data plane and already has the viewer for it, so
+this phase deliberately ships no replay, no flight index and no archive UI.
+
+- [x] `packages/relay` — outbound-only websocket relay; token to publish, open to
+      watch; retains current state for instant page loads; tells viewers when the
+      hub vanishes. Read-only by construction (viewer sockets are never read).
+- [x] `gs --relay` — outbound publisher, 5 Hz, latest-wins queue, jittered
+      reconnect. Cannot block the 25 Hz loop or grow unbounded.
+- [x] Console `NEXT_PUBLIC_MODE=view` — relay endpoint, no command bar, no
+      authoring, no param writes, and a transmit chokepoint that refuses to send.
+- [ ] Deploy: container + domain + token (`packages/relay/fly.toml`).
+- [ ] Guppi egress from the hub, so flights land in Guppi's store and viewer.
+
+## Scope boundary amendment — authority follows vehicle STATE
+
+The original rule ("does it change how it flies?") cannot answer where an MPPT
+toggle belongs. The rule is now:
+
+- **On the bench / HITL** the power system is a component under test. **Guppi has
+  full authority** over MPPTs, switches, loads and power-firmware params.
+- **In flight** every power action is a flight action (the power system feeds
+  propulsion and avionics), and there is no NATS link to an airborne aircraft at
+  all. **Commandant has sole authority**, and any in-flight power verb is a
+  MAVLink-side Commandant verb under the claim and the SIL-rehearsal gate.
+- Guppi is **the data plane**: all flight telemetry and history land there.
+  Commandant publishes outbound and subscribes to nothing.
+
+Consequence for Phase 5: generic charting (chart-any-field, multi-plot,
+time-window scrub, layout presets) is Guppi's viewer rebuilt worse. Commandant
+keeps a fixed set of flight instruments and stops there, so the cockpit stays
+fully useful with Guppi unreachable.
+
+Open: PX4 does not model the MPPTs, so an in-flight power verb needs either
+custom MAVLink through the autopilot or a companion relaying DroneCAN. Undecided.
 
 ## Deferred (post-MVP)
 
