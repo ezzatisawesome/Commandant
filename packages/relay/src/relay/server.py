@@ -102,11 +102,17 @@ class Relay:
         finally:
             if self._publisher is ws:
                 self._publisher = None
-                # Tell watchers the hub is gone rather than freezing the last frame.
+                # The flight is over. DROP the retained state: keeping the last
+                # telemetry frame would mean the next viewer — possibly days later,
+                # possibly before a different flight — opens the page and sees an
+                # aircraft sitting at the previous flight's final position. Within a
+                # flight retention is what makes a page load instant; across flights
+                # it is stale data wearing a live aircraft's clothes.
+                self._retained.clear()
                 lost = json.dumps({"type": "link", "state": "lost", "lastMsgMs": _now_ms()})
                 self._retained["link"] = lost
                 await self._broadcast(lost)
-            print("[relay] publisher disconnected")
+            print("[relay] publisher disconnected; retained state cleared")
 
     # --- viewer (a browser) -------------------------------------------------
     async def _handle_viewer(self, ws: ServerConnection) -> None:
@@ -118,7 +124,9 @@ class Relay:
                 payload = self._retained.get(kind)
                 if payload is not None:
                     await ws.send(payload)
-            if self._publisher is None:
+            if self._publisher is None and "link" not in self._retained:
+                # No hub has ever published here. (When one has and then left, the
+                # retained `link` already said "lost" — don't say it twice.)
                 await ws.send(json.dumps({"type": "link", "state": "lost", "lastMsgMs": 0}))
             # Hold the socket open WITHOUT reading it. A viewer has no inbound
             # protocol; anything it sends is ignored at the transport level.
@@ -167,8 +175,13 @@ class Relay:
             quiet = time.monotonic() - self._last_publish_at
             if quiet > STALE_AFTER_S and not told:
                 told = True
-                await self._broadcast(json.dumps(
-                    {"type": "link", "state": "lost", "lastMsgMs": _now_ms()}))
+                # Same reasoning as a disconnect: a hub that holds its socket open
+                # but stops sending is not flying, so its last frame must not be
+                # replayed to someone who arrives later.
+                self._retained.pop("telemetry", None)
+                lost = json.dumps({"type": "link", "state": "lost", "lastMsgMs": _now_ms()})
+                self._retained["link"] = lost
+                await self._broadcast(lost)
             elif quiet <= STALE_AFTER_S:
                 told = False
 

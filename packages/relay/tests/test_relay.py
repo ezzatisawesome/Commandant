@@ -215,3 +215,59 @@ async def test_junk_from_the_publisher_is_ignored():
         await pub.send(json.dumps(TELEM))
         assert await _recv_until(v, lambda m: m.get("type") == "telemetry") is not None
         await pub.close(); await v.close()
+
+
+@pytest.mark.asyncio
+async def test_a_finished_flight_is_not_replayed_to_a_later_viewer():
+    """Retention makes a page load instant DURING a flight. After the hub goes
+    away it must not hand the next viewer the last frame, or the page shows an
+    aircraft parked at the previous flight's final position as though it were
+    live."""
+    async with Harness() as h:
+        pub = await h.publisher()
+        await asyncio.sleep(0.1)
+        await pub.send(json.dumps(TELEM))
+        await pub.send(json.dumps({"type": "mission", "count": 1, "items": [
+            {"seq": 0, "kind": "waypoint", "lat": 37.4, "lon": -122.1, "alt": 100}]}))
+        await asyncio.sleep(0.2)
+        # Mid-flight: a joiner does get the current state at once.
+        mid = await h.viewer()
+        assert await _recv_until(mid, lambda m: m.get("type") == "telemetry") is not None
+        await mid.close()
+
+        await pub.close()          # flight over
+        await asyncio.sleep(0.3)
+
+        after = await h.viewer()
+        kinds = []
+        for _ in range(5):
+            try:
+                kinds.append(json.loads(await asyncio.wait_for(after.recv(), timeout=0.4))["type"])
+            except asyncio.TimeoutError:
+                break
+        assert "telemetry" not in kinds, f"stale flight replayed: {kinds}"
+        assert "mission" not in kinds, f"stale plan replayed: {kinds}"
+        assert kinds == ["link"]
+        await after.close()
+
+
+@pytest.mark.asyncio
+async def test_a_wedged_hub_also_stops_being_replayed(monkeypatch):
+    """A hub whose socket stays open but stops sending is not flying either."""
+    from relay import server as mod
+    monkeypatch.setattr(mod, "STALE_AFTER_S", 0.3)
+    async with Harness() as h:
+        pub = await h.publisher()
+        await asyncio.sleep(0.1)
+        await pub.send(json.dumps(TELEM))
+        await asyncio.sleep(1.6)   # go quiet without closing
+
+        late = await h.viewer()
+        kinds = []
+        for _ in range(4):
+            try:
+                kinds.append(json.loads(await asyncio.wait_for(late.recv(), timeout=0.4))["type"])
+            except asyncio.TimeoutError:
+                break
+        assert "telemetry" not in kinds, f"stale frame replayed: {kinds}"
+        await late.close(); await pub.close()
