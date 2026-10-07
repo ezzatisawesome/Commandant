@@ -48,7 +48,7 @@ export const FIELD_CATALOG: FieldDef[] = [
 // stores/derived.store.ts (terrain clearance, wind, sun, geofence). They are in
 // the same catalog so the strip is configured from ONE list rather than having a
 // hardcoded "situation" section the operator cannot rearrange.
-export const DERIVED_KEYS = ["aglFt", "wind", "drift", "sunEl", "fenceDist"] as const;
+export const DERIVED_KEYS = ["aglFt", "wind", "drift", "sunEl", "fenceDist", "targetDist"] as const;
 export type DerivedKey = (typeof DERIVED_KEYS)[number];
 
 export const DERIVED_CATALOG: Array<{ key: DerivedKey; label: string; unit?: string }> = [
@@ -57,6 +57,7 @@ export const DERIVED_CATALOG: Array<{ key: DerivedKey; label: string; unit?: str
 	{ key: "drift", label: "Drift", unit: "°" },
 	{ key: "sunEl", label: "Sun", unit: "°" },
 	{ key: "fenceDist", label: "Fence", unit: "m" },
+	{ key: "targetDist", label: "To setpoint", unit: "m" },
 ];
 
 export const DERIVED_BY_KEY = Object.fromEntries(
@@ -118,7 +119,7 @@ export const $chartedFields = persistentAtom<string[]>("cmdt:chartedFields", DEF
 // $visibleFields stays as row 0 for backward compatibility with the saved config
 // of anyone who used the old right-hand rail; extra rows live alongside it.
 const DEFAULT_EXTRA_ROWS: string[][] = [
-	["aglFt", "wind", "drift", "sunEl", "fenceDist"],
+	["aglFt", "wind", "drift", "sunEl", "fenceDist", "targetDist"],
 ];
 
 const jsonRows = {

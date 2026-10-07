@@ -9,6 +9,7 @@ import { atom } from "nanostores";
 
 import {
 	solveWind, trackFromFixes, sunPosition, fenceProximity, aglM, clearanceBand,
+	distanceM,
 	type Wind, type SunPosition, type FenceProximity, type ClearanceBand, isNum,
 } from "@/lib/flightGeometry";
 import { $hudFrame } from "@/stores/aircraft.store";
@@ -25,11 +26,20 @@ export interface DerivedState {
 	trackDeg: number | null;
 	sun: SunPosition | null;
 	fence: FenceProximity | null;
+	/** Horizontal distance from the aircraft to the commanded setpoint, metres.
+	 *
+	 *  This exists to answer a question the globe alone cannot: the commanded path
+	 *  (orange) sitting well away from the flown path (cyan) can mean either a
+	 *  decoding bug OR correct behaviour, because on fixed-wing PX4 a loiter's
+	 *  position setpoint is the orbit CENTRE — which is one radius away by
+	 *  definition. If this reads ~= the loiter radius, the separation is right. If
+	 *  it reads kilometres, something is wrong. */
+	targetDistM: number | null;
 }
 
 export const EMPTY_DERIVED: DerivedState = {
 	aglM: null, clearance: "unknown", terrainM: null,
-	wind: null, trackDeg: null, sun: null, fence: null,
+	wind: null, trackDeg: null, sun: null, fence: null, targetDistM: null,
 };
 
 export const $derived = atom<DerivedState>(EMPTY_DERIVED);
@@ -41,25 +51,59 @@ export function setTerrainSampler(fn: (() => number | null) | null) {
 	terrainSampler = fn;
 }
 
-// Previous fix, for deriving track. Kept module-local because it is pure
-// bookkeeping, not state anyone should read.
-let prev: { lat: number; lon: number } | null = null;
+// Track is derived from an ANCHOR fix, not the previous one.
+//
+// MEASURED: with consecutive 10 Hz fixes the baseline at 13 m/s is 1.3 m, while
+// the sim's configured GPS noise is 1.5 m CEP (rev6.bridge-config.xml). Noise
+// exceeded signal, so flying dead straight in ZERO wind the readout invented
+// 8.6 m/s of wind and the track wandered over a 56-degree spread. A wind
+// instrument that fabricates 8 m/s is worse than no wind instrument.
+//
+// So the anchor is only advanced once the aircraft has actually moved far enough
+// for the bearing to mean something. At 30 m the angular error from 1.5 m of
+// noise is about 4 degrees, which is usable; the cost is ~2.3 s of lag at
+// cruise, which for a wind readout is nothing.
+const TRACK_BASELINE_M = 30;
+
+// The wind solution is additionally smoothed, because airspeed and groundspeed
+// carry their own noise and the operator wants a number that sits still.
+const WIND_SMOOTHING = 0.25;   // weight of each new solution
+
+let anchor: { lat: number; lon: number } | null = null;
 let lastTrackDeg: number | null = null;
+let smoothedWind: Wind | null = null;
+
+/** Drop all derived state and its bookkeeping.
+ *
+ *  This must happen on a link loss as well as on a lost fix. The anchor,
+ *  held track and smoothed wind are history, and replaying them after a gap
+ *  would present stale geometry as current — the same failure mode as a frozen
+ *  position reported "alive". */
+export function resetDerived(): void {
+	anchor = null;
+	lastTrackDeg = null;
+	smoothedWind = null;
+	$derived.set(EMPTY_DERIVED);
+}
 
 /** Recompute from the current frame. Called on each $hudFrame change. */
 export function recomputeDerived(): void {
 	const f = $hudFrame.get();
-	if (!f || !isNum(f.lat) || !isNum(f.lon)) {
-		prev = null; lastTrackDeg = null;
-		$derived.set(EMPTY_DERIVED);
+	// A disconnected frame is not a position report, even if it carries a stale
+	// lat/lon, so the derived state goes with it.
+	if (!f || !f.connected || !isNum(f.lat) || !isNum(f.lon)) {
+		resetDerived();
 		return;
 	}
 
-	// Track: bearing between consecutive fixes. Hold the last good value through
-	// a slow patch rather than flickering to null, since wind depends on it.
-	const t = prev ? trackFromFixes(prev.lat, prev.lon, f.lat, f.lon) : null;
-	if (t !== null) lastTrackDeg = t;
-	prev = { lat: f.lat, lon: f.lon };
+	// Track over a long enough baseline that GPS noise does not dominate.
+	if (!anchor) {
+		anchor = { lat: f.lat, lon: f.lon };
+	} else if (distanceM(anchor.lat, anchor.lon, f.lat, f.lon) >= TRACK_BASELINE_M) {
+		const t = trackFromFixes(anchor.lat, anchor.lon, f.lat, f.lon, TRACK_BASELINE_M * 0.5);
+		if (t !== null) lastTrackDeg = t;
+		anchor = { lat: f.lat, lon: f.lon };
+	}
 	const trackDeg = lastTrackDeg;
 
 	const terrainM = terrainSampler ? terrainSampler() : null;
@@ -72,9 +116,31 @@ export function recomputeDerived(): void {
 		? ((f.yaw * 180) / Math.PI + 360) % 360
 		: (isNum(f.heading) ? f.heading : null);
 
-	const wind = (headingDeg !== null && trackDeg !== null)
+	const solved = (headingDeg !== null && trackDeg !== null)
 		? solveWind(headingDeg, f.airspeed as number, trackDeg, f.groundspeed as number)
 		: null;
+	// Exponential smoothing, in the vector domain so the direction wraps cleanly
+	// (averaging 359 and 1 degrees must give 0, not 180).
+	if (solved === null) {
+		smoothedWind = null;
+	} else if (smoothedWind === null) {
+		smoothedWind = solved;
+	} else {
+		const a = WIND_SMOOTHING, b = 1 - a;
+		const toXY = (w: Wind) => {
+			const r = (w.fromDeg * Math.PI) / 180;
+			return [w.speedMps * Math.cos(r), w.speedMps * Math.sin(r)] as const;
+		};
+		const [nx, ny] = toXY(solved);
+		const [ox, oy] = toXY(smoothedWind);
+		const x = a * nx + b * ox, y = a * ny + b * oy;
+		smoothedWind = {
+			speedMps: Math.hypot(x, y),
+			fromDeg: ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360,
+			driftDeg: a * solved.driftDeg + b * smoothedWind.driftDeg,
+		};
+	}
+	const wind = smoothedWind;
 
 	// Sun from the SIMULATED instant: the sim owns time-of-day, so using the wall
 	// clock here would put the sun in the wrong place for every replay and run.
@@ -86,6 +152,9 @@ export function recomputeDerived(): void {
 		terrainM: terrainM ?? null,
 		wind, trackDeg, sun,
 		fence: fenceProximity(f.lat, f.lon, $fenceItems.get()),
+		targetDistM: (isNum(f.targetLat) && isNum(f.targetLon))
+			? distanceM(f.lat, f.lon, f.targetLat, f.targetLon)
+			: null,
 	});
 }
 

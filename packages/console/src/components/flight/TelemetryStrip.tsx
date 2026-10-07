@@ -156,6 +156,18 @@ export function TelemetryStrip() {
 						tone: d.sun && d.sun.elevationDeg < 0 ? "text-sky-300/60" : "text-white",
 						title: d.sun ? `azimuth ${d.sun.azimuthDeg.toFixed(0)}°` : "needs the sim clock",
 					};
+				case "targetDist":
+					return {
+						label: meta.label, unit: d.targetDistM === null ? undefined : meta.unit,
+						value: d.targetDistM === null ? "—" : d.targetDistM.toFixed(0),
+						// On fixed-wing PX4 a loiter setpoint is the orbit CENTRE, so a
+						// distance near the loiter radius is correct, not an error.
+						tone: d.targetDistM === null ? "text-white/40"
+							: d.targetDistM > 3000 ? "text-amber-400" : "text-white",
+						title: "Distance to the commanded setpoint (orange path). "
+							+ "For a loiter this should be about the orbit radius; "
+							+ "kilometres means the setpoint is being mis-decoded.",
+					};
 				case "fenceDist":
 					return {
 						label: meta.label, unit: d.fence ? meta.unit : undefined,
