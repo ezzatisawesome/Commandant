@@ -11,7 +11,9 @@
 
 import type { Viewer } from "cesium";
 
-import { $aircraftStore, $trailStore, $targetTrailStore } from "@/stores/aircraft.store";
+import {
+	$aircraftStore, $trailTail, $targetTail,
+} from "@/stores/aircraft.store";
 import { $missionItems, $missionCurrent, $missionReached } from "@/stores/mission.store";
 import { $fenceItems, $rallyItems } from "@/stores/geo.store";
 import { $derived } from "@/stores/derived.store";
@@ -59,8 +61,8 @@ export function driveRendering(viewer: Viewer): () => void {
 	// which would request a render per store just for mounting.
 	const unsubscribers = [
 		$aircraftStore.listen(request),
-		$trailStore.listen(request),
-		$targetTrailStore.listen(request),
+		$trailTail.listen(request),
+		$targetTail.listen(request),
 		$missionItems.listen(request),
 		$missionCurrent.listen(request),
 		$missionReached.listen(request),

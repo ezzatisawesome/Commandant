@@ -93,6 +93,19 @@ def open_connection(endpoint: str, baud: int = DEFAULT_SERIAL_BAUD) -> Any:
 
 _GCS_ID = {"source_system": GCS_SYSTEM, "source_component": GCS_COMPONENT}
 
+# POSITION_TARGET_GLOBAL_INT is only interpretable as lat/lon in these frames.
+_GLOBAL_FRAMES = frozenset({
+    mavutil.mavlink.MAV_FRAME_GLOBAL,                      # 0
+    mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,         # 3
+    mavutil.mavlink.MAV_FRAME_GLOBAL_INT,                  # 5
+    mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,     # 6
+    mavutil.mavlink.MAV_FRAME_GLOBAL_TERRAIN_ALT,          # 10
+    mavutil.mavlink.MAV_FRAME_GLOBAL_TERRAIN_ALT_INT,      # 11
+})
+# type_mask bits 0/1 = X/Y position IGNORE. Either set means there is no position
+# setpoint in this message, whatever lat_int/lon_int happen to contain.
+_POS_IGNORE_BITS = 0b11
+
 # PX4 message ids not in the default GCS stream; we request them QGC-style.
 MSG_ACTUATOR_OUTPUT_STATUS = mavutil.mavlink.MAVLINK_MSG_ID_ACTUATOR_OUTPUT_STATUS  # 375
 MSG_POSITION_TARGET_GLOBAL_INT = mavutil.mavlink.MAVLINK_MSG_ID_POSITION_TARGET_GLOBAL_INT  # 87
@@ -882,10 +895,33 @@ class Bridge:
                 # Yield to flightlink's JSON setpoint when it's live (augment runs).
                 if now - self._json_target_at < TARGET_SOURCE_TTL_MS:
                     return
+                self._last_target_at = now  # stream alive; hold off re-requesting
+
+                # Two checks that were missing, and whose absence put the commanded
+                # path (orange) far away from the actual path (cyan) on the globe.
+                #
+                # 1. coordinate_frame. lat_int/lon_int are only degrees*1e7 for the
+                #    GLOBAL frames. In MAV_FRAME_LOCAL_NED they are local metres, so
+                #    dividing by 1e7 yields a point near null island — metres of
+                #    offset become tens of degrees.
+                # 2. type_mask. The mask declares which components are VALID. PX4
+                #    frequently publishes a velocity or acceleration setpoint with the
+                #    position bits set to IGNORE, in which case lat_int/lon_int carry
+                #    nothing meaningful and plotting them draws a line to noise.
+                #
+                # When either check fails the setpoint is dropped AND cleared, so the
+                # overlay disappears instead of freezing at a wrong position — the
+                # same "stale data must not look live" rule as the link state.
+                if (getattr(msg, "coordinate_frame", 0) not in _GLOBAL_FRAMES
+                        or (msg.type_mask & _POS_IGNORE_BITS)):
+                    L.pop("targetLat", None)
+                    L.pop("targetLon", None)
+                    L.pop("targetAlt", None)
+                    return
+
                 L["targetLat"] = msg.lat_int / 1e7
                 L["targetLon"] = msg.lon_int / 1e7
                 L["targetAlt"] = msg.alt
-                self._last_target_at = now  # stream alive; hold off re-requesting
 
             elif t == "VFR_HUD":
                 L["airspeed"] = msg.airspeed

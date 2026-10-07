@@ -605,3 +605,43 @@ def test_a_flightlink_only_run_still_reports_alive(ports, monkeypatch):
         serve_task.cancel()
 
     asyncio.run(scenario())
+
+
+def test_setpoint_ignored_unless_frame_and_mask_say_it_is_a_position(monkeypatch):
+    """The commanded-path overlay (orange) appeared far from the actual path
+    (cyan) on the globe. Two causes, both here:
+
+      * lat_int/lon_int are degrees*1e7 ONLY in the GLOBAL frames. In
+        MAV_FRAME_LOCAL_NED they are local metres, so /1e7 lands near null
+        island — a few hundred metres of offset becomes tens of degrees.
+      * type_mask declares which components are valid. PX4 often publishes a
+        velocity setpoint with the position bits set to IGNORE, in which case
+        those fields carry nothing meaningful.
+    """
+    b, _ = _bridge_with_loop(monkeypatch)
+    conn = FakeConn()
+
+    def target(frame, mask, lat_e7, lon_e7):
+        return _msg("POSITION_TARGET_GLOBAL_INT", coordinate_frame=frame,
+                    type_mask=mask, lat_int=lat_e7, lon_int=lon_e7, alt=233.0)
+
+    # A genuine global position setpoint is used.
+    b._on_mav(conn, target(m.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, 0b111111000, 373985511, -1221488530))
+    assert abs(b.latest["targetLat"] - 37.3985511) < 1e-6
+    assert abs(b.latest["targetLon"] - (-122.148853)) < 1e-6
+
+    # A LOCAL_NED setpoint must be dropped, not divided by 1e7. 500 m north
+    # would otherwise plot as 50 degrees of latitude.
+    b._on_mav(conn, target(m.MAV_FRAME_LOCAL_NED, 0b111111000, 500_000_000, 0))
+    assert "targetLat" not in b.latest, "LOCAL_NED coordinates were treated as lat/lon"
+
+    # Re-establish a good one, then prove a position-IGNORE mask clears it rather
+    # than leaving a stale overlay frozen somewhere wrong.
+    b._on_mav(conn, target(m.MAV_FRAME_GLOBAL_INT, 0, 373985511, -1221488530))
+    assert "targetLat" in b.latest
+    b._on_mav(conn, target(m.MAV_FRAME_GLOBAL_INT, 0b000000011, 373985511, -1221488530))
+    assert "targetLat" not in b.latest, "a velocity-only setpoint was plotted as a position"
+
+    # And the stream is still considered alive either way, so gs does not spam
+    # SET_MESSAGE_INTERVAL re-requests for a message it is receiving fine.
+    assert b._last_target_at > 0

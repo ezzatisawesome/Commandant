@@ -35,6 +35,23 @@ export function sanitizeFrame<T extends object>(frame: T): T {
 // can point the camera at it.
 export const $aircraftEntityStore = atom<Entity | null>(null);
 
+// --- segmented trail ---------------------------------------------------------
+//
+// MEASURED: a single Cesium polyline whose `positions` array reference changes
+// re-uploads the WHOLE vertex buffer, not the new points. At 13 m/s with a 2 m
+// decimation floor that is 6.3 reference changes per second against a 3000-point
+// trail: 17,500 points/s, ~420 KB/s of vertex traffic, sustained forever —
+// 63 million points re-uploaded in an hour, per trail, and there are two plus
+// the mission route.
+//
+// So the trail is stored as FROZEN CHUNKS plus one short active tail. A chunk's
+// array reference never changes again once closed, so Cesium uploads it once and
+// never again; only the tail (<= TRAIL_CHUNK points) is ever re-uploaded. That
+// turns the cost from O(trail length) per append into O(chunk size), an ~11x
+// reduction at these settings, and it stops growing with trail length.
+const TRAIL_CHUNK = 250;
+const TRAIL_MAX_CHUNKS = 12;        // 12 x 250 = 3000 points, as before
+
 // Bounded trail of recent positions for the flight path polyline.
 const TRAIL_MAX = 3000;
 // Distance (m) between consecutive fixes beyond which we treat the path as
@@ -43,6 +60,73 @@ const TRAIL_MAX = 3000;
 // which reads as the trail "connecting to itself in weird ways".
 const TRAIL_JUMP_M = 2000;
 export const $trailStore = atom<Cartesian3[]>([]);
+
+/** A path stored as frozen chunks plus one short active tail.
+ *
+ *  Both the flown path and the commanded path need this, so it is one factory
+ *  used twice rather than the same twenty lines written out again. */
+export interface SegmentedTrail {
+	/** Closed segments. Each inner array is frozen: its reference never changes
+	 *  again, so Cesium can treat it as static geometry and upload it once. */
+	chunks: ReturnType<typeof atom<Cartesian3[][]>>;
+	/** The active segment — the only thing ever re-uploaded. */
+	tail: ReturnType<typeof atom<Cartesian3[]>>;
+	append(point: Cartesian3): void;
+	clear(): void;
+	/** Every point, oldest first. For tests; the renderer does NOT use this. */
+	all(): Cartesian3[];
+}
+
+function createSegmentedTrail(): SegmentedTrail {
+	const chunks = atom<Cartesian3[][]>([]);
+	const tail = atom<Cartesian3[]>([]);
+	return {
+		chunks,
+		tail,
+		append(point) {
+			const t = tail.get();
+			if (t.length >= TRAIL_CHUNK) {
+				// Freeze the tail as a chunk, then start the next one at its last
+				// point so the drawn segments join with no gap.
+				const next = [...chunks.get(), t];
+				chunks.set(next.length > TRAIL_MAX_CHUNKS
+					? next.slice(next.length - TRAIL_MAX_CHUNKS) : next);
+				tail.set([t[t.length - 1], point]);
+				return;
+			}
+			tail.set([...t, point]);
+		},
+		clear() {
+			if (chunks.get().length) chunks.set([]);
+			if (tail.get().length) tail.set([]);
+		},
+		all() {
+			const out: Cartesian3[] = [];
+			for (const c of chunks.get()) out.push(...c);
+			out.push(...tail.get());
+			return out;
+		},
+	};
+}
+
+/** The flown path (cyan) and the commanded setpoint path (orange). */
+export const flownTrail = createSegmentedTrail();
+export const targetTrail = createSegmentedTrail();
+
+// Named exports kept for the renderer and the render driver.
+export const $trailChunks = flownTrail.chunks;
+export const $trailTail = flownTrail.tail;
+export const $targetChunks = targetTrail.chunks;
+export const $targetTail = targetTrail.tail;
+
+function clearSegmented(): void {
+	flownTrail.clear();
+	targetTrail.clear();
+}
+
+export function trailAllPoints(): Cartesian3[] {
+	return flownTrail.all();
+}
 
 // Bounded trail of the autopilot's commanded position setpoint
 // (POSITION_TARGET_GLOBAL_INT) — "what the autopilot wants to do". Drawn as a
@@ -80,6 +164,7 @@ export function pushFrame(frame: TelemetryFrame) {
 		clearIfNeeded($trailStore);
 		clearIfNeeded($historyStore);
 		clearIfNeeded($targetTrailStore);
+		clearSegmented();
 	}
 	wasConnected = frame.connected;
 
@@ -108,7 +193,14 @@ export function pushFrame(frame: TelemetryFrame) {
 	}
 
 	const point = Cartesian3.fromDegrees(frame.lon!, frame.lat!, frame.alt);
-	$trailStore.set(appendTrail($trailStore.get(), point));
+	const before = $trailStore.get();
+	const after = appendTrail(before, point);
+	if (after !== before) {
+		// appendTrail already applied decimation and outlier rejection, so the
+		// segmented copy only sees points that were actually accepted.
+		$trailStore.set(after);
+		flownTrail.append(point);
+	}
 
 	// Commanded-path trail: place the setpoint at the aircraft's current altitude
 	// so the two polylines are coplanar and the horizontal comparison (does the
@@ -117,7 +209,12 @@ export function pushFrame(frame: TelemetryFrame) {
 		return;
 	}
 	const target = Cartesian3.fromDegrees(frame.targetLon!, frame.targetLat!, frame.alt);
-	$targetTrailStore.set(appendTrail($targetTrailStore.get(), target));
+	const tBefore = $targetTrailStore.get();
+	const tAfter = appendTrail(tBefore, target);
+	if (tAfter !== tBefore) {
+		$targetTrailStore.set(tAfter);
+		targetTrail.append(target);
+	}
 }
 
 // A usable horizontal fix: both defined, finite, and not the null-island (0,0)
@@ -154,4 +251,5 @@ export function appendTrail(trail: Cartesian3[], point: Cartesian3): Cartesian3[
 export function clearTrail() {
 	$trailStore.set([]);
 	$targetTrailStore.set([]);
+	clearSegmented();
 }

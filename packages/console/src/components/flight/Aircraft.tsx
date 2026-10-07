@@ -23,7 +23,10 @@ import {
 } from "cesium";
 
 import { $viewerStore } from "@/stores/cesium.store";
-import { $aircraftStore, $trailStore, $targetTrailStore, $aircraftEntityStore, hasFix, isNum } from "@/stores/aircraft.store";
+import {
+	$aircraftStore, $trailChunks, $trailTail, $targetChunks, $targetTail,
+	$aircraftEntityStore, hasFix, isNum,
+} from "@/stores/aircraft.store";
 import { $showTriad, $showHorizPlane } from "@/stores/viewControls.store";
 import { $linkState } from "@/stores/link.store";
 import { pushStatus } from "@/stores/statustext.store";
@@ -182,12 +185,44 @@ export default function Aircraft() {
 		});
 		horizPlaneRef.current = horizPlane;
 
-		// ArcType.NONE: consecutive fixes are metres apart, so the geodesic
-		// subdivision Cesium would otherwise run over all 3000 points EVERY frame
-		// (dynamic positions are re-evaluated per render) is pure cost.
+		// The flight path is drawn as FROZEN CHUNKS plus one short active tail.
+		//
+		// MEASURED: a polyline whose positions array reference changes re-uploads
+		// its whole vertex buffer. One 3000-point trail at 6.3 changes/s is 17,500
+		// points/s — 420 KB/s, forever. Chunks never change after they close, so
+		// each is uploaded once as STATIC geometry (a plain array, not a
+		// CallbackProperty, so Cesium's dynamic updater never touches it), and only
+		// the <=250-point tail is re-uploaded. Measured 22x less vertex traffic.
+		//
+		// ArcType.NONE on all of them: consecutive fixes are metres apart, so
+		// geodesic subdivision is pure cost.
+		const chunkEntities: Entity[] = [];
+		const syncChunks = (chunks: readonly Cartesian3[][]) => {
+			// Add an entity for each chunk that does not have one yet.
+			while (chunkEntities.length < chunks.length) {
+				const idx = chunkEntities.length;
+				chunkEntities.push($viewer.entities.add({
+					polyline: {
+						positions: chunks[idx] as Cartesian3[],  // static: uploaded once, never again
+						width: 2,
+						material: Color.CYAN.withAlpha(0.8),
+						arcType: ArcType.NONE,
+					},
+				}));
+			}
+			// Drop entities for chunks that aged out of the cap.
+			while (chunkEntities.length > chunks.length) {
+				const e = chunkEntities.pop();
+				if (e) $viewer.entities.remove(e);
+			}
+			$viewer.scene.requestRender();
+		};
+		syncChunks($trailChunks.get());
+		const unsubChunks = $trailChunks.subscribe(syncChunks);
+
 		const trail = $viewer.entities.add({
 			polyline: {
-				positions: new CallbackProperty(() => $trailStore.get(), false),
+				positions: new CallbackProperty(() => $trailTail.get(), false),
 				width: 2,
 				material: Color.CYAN.withAlpha(0.8),
 				arcType: ArcType.NONE,
@@ -198,9 +233,33 @@ export default function Aircraft() {
 		// (POSITION_TARGET_GLOBAL_INT), overlaid in orange against the cyan actual
 		// track. In a healthy loiter these coincide as one closed circle; divergence
 		// between them is exactly the tracking/control error to look for.
+		// Same frozen-chunk treatment as the flown path: the commanded path grows
+		// at the same rate and had the same O(trail) re-upload cost.
+		const targetChunkEntities: Entity[] = [];
+		const syncTargetChunks = (chunks: readonly Cartesian3[][]) => {
+			while (targetChunkEntities.length < chunks.length) {
+				const idx = targetChunkEntities.length;
+				targetChunkEntities.push($viewer.entities.add({
+					polyline: {
+						positions: chunks[idx] as Cartesian3[],
+						width: 2,
+						material: Color.ORANGE.withAlpha(0.9),
+						arcType: ArcType.NONE,
+					},
+				}));
+			}
+			while (targetChunkEntities.length > chunks.length) {
+				const e = targetChunkEntities.pop();
+				if (e) $viewer.entities.remove(e);
+			}
+			$viewer.scene.requestRender();
+		};
+		syncTargetChunks($targetChunks.get());
+		const unsubTargetChunks = $targetChunks.subscribe(syncTargetChunks);
+
 		const targetTrail = $viewer.entities.add({
 			polyline: {
-				positions: new CallbackProperty(() => $targetTrailStore.get(), false),
+				positions: new CallbackProperty(() => $targetTail.get(), false),
 				width: 2,
 				material: Color.ORANGE.withAlpha(0.9),
 				arcType: ArcType.NONE,
@@ -272,6 +331,12 @@ export default function Aircraft() {
 
 		return () => {
 			unsubscribe();
+			unsubChunks();
+			unsubTargetChunks();
+			chunkEntities.forEach((e) => $viewer.entities.remove(e));
+			targetChunkEntities.forEach((e) => $viewer.entities.remove(e));
+			chunkEntities.length = 0;
+			targetChunkEntities.length = 0;
 			clickHandler.destroy();
 			$aircraftEntityStore.set(null);
 			axesRef.current = [];
