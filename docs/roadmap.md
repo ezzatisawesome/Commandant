@@ -316,6 +316,26 @@ fully useful with Guppi unreachable.
 Open: PX4 does not model the MPPTs, so an in-flight power verb needs either
 custom MAVLink through the autopilot or a companion relaying DroneCAN. Undecided.
 
+## Known issue — PX4 SITL stalls on long flights (open)
+
+Observed three times in one afternoon, at roughly 1 h, 2.5 h and 41 min. PX4
+logs `ERROR [simulator_mavlink] poll timeout` once and its simulated clock never
+advances again. Nothing crashes; both PX4 and the JSBSim bridge spin at full CPU,
+so process-level health checks report healthy while the aircraft is frozen.
+
+Mitigations applied (AircraftSim): the container CPU cap was raised from 2 to 4,
+and the bridge's `enable_lockstep` can now be turned off per rig so the bridge
+never blocks on PX4. **Neither is a cure** — the 41-minute freeze happened with
+lockstep already disabled, because `px4_sitl_default` is still compiled with
+`ENABLE_LOCKSTEP_SCHEDULER=yes` and PX4's clock still comes from sensor
+timestamps. A real fix means rebuilding PX4 without the lockstep scheduler.
+
+What Commandant contributes, and why this is in *this* roadmap: gs now reports
+the failure instead of hiding it. Link health is attributed per source, so the
+sim's JSON feed can no longer vouch for a dead autopilot, and every frame carries
+`dataAgeMs`. The console shows a red `stale Ns` badge past 3 s. Before that fix
+the console reported `alive` for an hour while redrawing one frozen position.
+
 ## Deferred (post-MVP)
 
 - Flight log download & playback / scrub — `LOG_REQUEST_*`.
