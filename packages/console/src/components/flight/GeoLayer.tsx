@@ -48,6 +48,21 @@ function fenceColor(kind: FenceItem["kind"]): Color {
 // rally markers; in geo-edit mode a left-click places the selected kind and any
 // vertex/rally marker can be dragged. Kept separate from the mission + aircraft
 // layers so each overlay owns its own entities/handlers.
+// A geofence has no altitude on the MAVLink wire — PX4 fences are lateral, with
+// the ceiling held in a parameter. So the curtain is drawn from the terrain up to
+// a height that keeps it meaningful next to the aircraft: tall enough to be a
+// barrier, not so tall it fills the sky.
+const FENCE_BASE_M = 0;
+const FENCE_MIN_TOP_M = 300;
+const FENCE_HEADROOM_M = 150;
+
+function fenceCeilingM(): number {
+	const alt = $aircraftStore.get()?.alt;
+	return typeof alt === "number" && Number.isFinite(alt)
+		? Math.max(FENCE_MIN_TOP_M, alt + FENCE_HEADROOM_M)
+		: FENCE_MIN_TOP_M;
+}
+
 export default function GeoLayer() {
 	const $viewer = useStore($viewerStore);
 
@@ -69,7 +84,7 @@ export default function GeoLayer() {
 			ents = [];
 			const fence = $fenceItems.get();
 			// Live polygon vertices for the run [i, j) of the same kind.
-			const polyPositions = (kind: FenceItem["kind"], i: number, j: number) => () => {
+			const ringPoints = (kind: FenceItem["kind"], i: number, j: number) => {
 				const cur = $fenceItems.get();
 				const pts: Cartesian3[] = [];
 				for (let k = i; k < j && k < cur.length; k++) {
@@ -77,8 +92,14 @@ export default function GeoLayer() {
 					if (g.kind !== kind) break;
 					pts.push(Cartesian3.fromDegrees(g.lon, g.lat, 0));
 				}
+				return pts;
+			};
+			const polyPositions = (kind: FenceItem["kind"], i: number, j: number) => () => {
+				const pts = ringPoints(kind, i, j);
 				return pts.length >= 3 ? new PolygonHierarchy(pts) : undefined;
 			};
+			const ringLength = (kind: FenceItem["kind"], i: number, j: number) =>
+				ringPoints(kind, i, j).length;
 
 			// Polygons: each contiguous run of the same polygon kind is one polygon.
 			let i = 0;
@@ -90,13 +111,43 @@ export default function GeoLayer() {
 					const group = fence.slice(i, j);
 					if (group.length >= 3) {
 						const col = fenceColor(it.kind);
-						// No `height`: a ground polygon is clamped to the terrain mesh.
-						// With an explicit height 0 it sat at the ellipsoid and was
-						// buried under any terrain above sea level.
+						const exclusion = it.kind.includes("exclusion");
+						// A fence is a VOLUME the aircraft may not cross, so draw it as
+						// one: a vertical curtain standing on the terrain. A flat ground
+						// outline reads as a drawing on a map; a wall reads as a barrier,
+						// and at a shallow camera angle it is the only form you can
+						// actually see from the cockpit view.
+						ents.push($viewer.entities.add({
+							wall: {
+								positions: new CallbackProperty(() => {
+									const h = polyPositions(it.kind, i, j)();
+									if (!h) return undefined;
+									// Close the ring so there is no gap in the barrier.
+									const pts = h.positions.slice();
+									if (pts.length) pts.push(pts[0]);
+									return pts;
+								}, false),
+								// Stand the wall from the ground up to the fence ceiling.
+								minimumHeights: new CallbackProperty(() => {
+									const n = ringLength(it.kind, i, j) + 1;
+									return new Array(n).fill(FENCE_BASE_M);
+								}, false),
+								maximumHeights: new CallbackProperty(() => {
+									const n = ringLength(it.kind, i, j) + 1;
+									return new Array(n).fill(fenceCeilingM());
+								}, false),
+								// Exclusion reads as "keep out", so it is more opaque and
+								// more saturated than an inclusion boundary you fly inside.
+								material: col.withAlpha(exclusion ? 0.28 : 0.14),
+								outline: true,
+								outlineColor: col.withAlpha(0.9),
+							},
+						}));
+						// Translucent floor, so the footprint is still legible from above.
 						ents.push($viewer.entities.add({
 							polygon: {
 								hierarchy: new CallbackProperty(polyPositions(it.kind, i, j), false),
-								material: col.withAlpha(0.12),
+								material: col.withAlpha(exclusion ? 0.16 : 0.07),
 								outline: true,
 								outlineColor: col.withAlpha(0.8),
 							},
@@ -113,17 +164,43 @@ export default function GeoLayer() {
 				if (!isCircleKind(c.kind)) continue;
 				const seq = c.seq;
 				const col = fenceColor(c.kind);
-				const radius = new CallbackProperty(
-					() => $fenceItems.get().find((x) => x.seq === seq)?.params?.radius ?? 100, false);
+				const exclusion = c.kind.includes("exclusion");
+				const radiusOf = () =>
+					$fenceItems.get().find((x) => x.seq === seq)?.params?.radius ?? 100;
+				const radius = new CallbackProperty(radiusOf, false);
+				const centre = () => $fenceItems.get().find((x) => x.seq === seq);
+
+				// A cylinder, for the same reason polygons became walls: a circle
+				// fence is a volume, and a flat disc does not read as one.
 				ents.push($viewer.entities.add({
 					position: new CallbackPositionProperty(() => {
-						const cur = $fenceItems.get().find((x) => x.seq === seq);
+						const cur = centre();
+						if (!cur) return undefined;
+						const ceil = fenceCeilingM();
+						return Cartesian3.fromDegrees(cur.lon, cur.lat, (FENCE_BASE_M + ceil) / 2);
+					}, false),
+					cylinder: {
+						length: new CallbackProperty(
+							() => Math.max(10, fenceCeilingM() - FENCE_BASE_M), false,
+						) as unknown as number,
+						topRadius: radius,
+						bottomRadius: radius,
+						material: col.withAlpha(exclusion ? 0.22 : 0.10),
+						outline: true,
+						outlineColor: col.withAlpha(0.85),
+						numberOfVerticalLines: 16,
+					},
+				}));
+				// Footprint on the ground for the top-down view.
+				ents.push($viewer.entities.add({
+					position: new CallbackPositionProperty(() => {
+						const cur = centre();
 						return cur ? Cartesian3.fromDegrees(cur.lon, cur.lat, 0) : undefined;
 					}, false),
 					ellipse: {
 						semiMajorAxis: radius,
 						semiMinorAxis: radius,
-						material: col.withAlpha(0.12),
+						material: col.withAlpha(exclusion ? 0.16 : 0.07),
 						outline: true,
 						outlineColor: col.withAlpha(0.8),
 					},

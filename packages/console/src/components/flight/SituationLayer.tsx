@@ -3,9 +3,9 @@
 import { useEffect } from "react";
 import { useStore } from "@nanostores/react";
 import {
-	ArcType, Cartesian3, CallbackProperty, CallbackPositionProperty, Cartographic,
-	Color, Entity, LabelStyle, Math as CesiumMath, Transforms, Matrix3, Matrix4,
-	VerticalOrigin,
+	ArcType, Cartesian2, Cartesian3, CallbackProperty, CallbackPositionProperty,
+	Cartographic, Color, Entity, HorizontalOrigin, LabelStyle, Math as CesiumMath,
+	NearFarScalar, Transforms, Matrix3, Matrix4, VerticalOrigin,
 } from "cesium";
 
 import { $viewerStore } from "@/stores/cesium.store";
@@ -130,6 +130,41 @@ export default function SituationLayer() {
 				return Cartesian3.fromDegrees(f.lon, f.lat, terrain);
 			}, false),
 			point: { pixelSize: 6, color: Color.WHITE.withAlpha(0.5) },
+		}));
+
+		// The dimension itself, written beside the middle of the nadir line. A
+		// measurement line without its number is decoration; this is the whole
+		// point of drawing it — read the clearance off the globe, in feet and
+		// metres, without looking away at a panel.
+		ents.push($viewer.entities.add({
+			position: new CallbackPositionProperty(() => {
+				if (!$showClearance.get()) return undefined;
+				const d = $derived.get();
+				const f = $aircraftStore.get();
+				if (d.terrainM === null || d.aglM === null) return undefined;
+				if (!f || !isNum(f.lat) || !isNum(f.lon)) return undefined;
+				// Midpoint of the drop-line, so the label sits against it.
+				return Cartesian3.fromDegrees(f.lon, f.lat, d.terrainM + d.aglM / 2);
+			}, false),
+			label: {
+				text: new CallbackProperty(() => {
+					const d = $derived.get();
+					if (d.aglM === null) return "";
+					return `${(d.aglM * 3.28084).toFixed(0)} ft AGL\n${d.aglM.toFixed(0)} m`;
+				}, false) as unknown as string,
+				font: "11px monospace",
+				fillColor: new CallbackProperty(
+					() => CLEARANCE_COLOR[$derived.get().clearance], false,
+				) as unknown as Color,
+				outlineColor: Color.BLACK,
+				outlineWidth: 3,
+				style: LabelStyle.FILL_AND_OUTLINE,
+				verticalOrigin: VerticalOrigin.CENTER,
+				horizontalOrigin: HorizontalOrigin.LEFT,
+				pixelOffset: new Cartesian2(8, 0),
+				// Keep it legible without dominating when zoomed far out.
+				scaleByDistance: new NearFarScalar(500, 1.0, 20000, 0.5),
+			},
 		}));
 
 		// --- wind arrow -----------------------------------------------------

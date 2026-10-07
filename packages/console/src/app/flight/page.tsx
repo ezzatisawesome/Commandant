@@ -13,7 +13,8 @@ const saira = Saira_Condensed({ subsets: ["latin"], weight: ["600"] });
 // equivalent of Astro's client:only="react".
 const Globe = dynamic(() => import("@/components/Globe"), { ssr: false });
 const Aircraft = dynamic(() => import("@/components/flight/Aircraft"), { ssr: false });
-const FlightHUD = dynamic(() => import("@/components/flight/FlightHUD"), { ssr: false });
+const InstrumentPanel = dynamic(() => import("@/components/flight/InstrumentPanel"), { ssr: false });
+const TelemetryStrip = dynamic(() => import("@/components/flight/TelemetryStrip").then((m) => m.TelemetryStrip), { ssr: false });
 const ViewControls = dynamic(() => import("@/components/flight/ViewControls"), { ssr: false });
 const AirframeConfig = dynamic(() => import("@/components/flight/AirframeConfig"), { ssr: false });
 const ParamEditor = dynamic(() => import("@/components/flight/ParamEditor"), { ssr: false });
@@ -33,6 +34,9 @@ export default function FlightPage() {
 			<GeoLayer />
 			<SituationLayer />
 
+			{/* Telemetry readout: a band over the bottom edge of the globe. */}
+			<ErrorBoundary name="Telemetry strip"><TelemetryStrip /></ErrorBoundary>
+
 			{/* Branding */}
 			<div className="fixed top-4 left-4 z-50 flex items-center gap-2">
 				<Shield className="h-[22px] w-[22px] text-white" />
@@ -51,7 +55,7 @@ export default function FlightPage() {
 
 			{/* Right rail: HUD, status log, view controls, params, airframe config. */}
 			<div className="fixed top-4 right-4 z-50 flex max-h-[calc(100vh-2rem)] flex-col items-end gap-2 overflow-y-auto">
-				<ErrorBoundary name="Telemetry"><FlightHUD /></ErrorBoundary>
+				<ErrorBoundary name="Instruments"><InstrumentPanel /></ErrorBoundary>
 				<ErrorBoundary name="Status log"><StatusLog /></ErrorBoundary>
 				<ErrorBoundary name="View controls"><ViewControls /></ErrorBoundary>
 				{/* Authoring and parameter writing are cockpit-only. The globe still
