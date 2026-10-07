@@ -67,12 +67,19 @@ export const $historyStore = atom<TelemetryFrame[]>([]);
 // to where the previous run left off.
 let wasConnected = false;
 
+/** Set only if it would change anything. nanostores compares by reference, so
+ *  assigning a fresh `[]` to an already-empty store still notifies every
+ *  subscriber and still makes Cesium re-upload an empty vertex buffer. */
+function clearIfNeeded<T>(store: { get(): T[]; set(v: T[]): void }) {
+	if (store.get().length !== 0) store.set([]);
+}
+
 export function pushFrame(frame: TelemetryFrame) {
 	sanitizeFrame(frame);
 	if (frame.connected && !wasConnected) {
-		$trailStore.set([]);
-		$historyStore.set([]);
-		$targetTrailStore.set([]);
+		clearIfNeeded($trailStore);
+		clearIfNeeded($historyStore);
+		clearIfNeeded($targetTrailStore);
 	}
 	wasConnected = frame.connected;
 

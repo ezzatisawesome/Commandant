@@ -20,6 +20,7 @@ const ParamEditor = dynamic(() => import("@/components/flight/ParamEditor"), { s
 const MissionLayer = dynamic(() => import("@/components/flight/MissionLayer"), { ssr: false });
 const MissionPanel = dynamic(() => import("@/components/flight/MissionPanel"), { ssr: false });
 const GeoLayer = dynamic(() => import("@/components/flight/GeoLayer"), { ssr: false });
+const SituationLayer = dynamic(() => import("@/components/flight/SituationLayer"), { ssr: false });
 const GeoPanel = dynamic(() => import("@/components/flight/GeoPanel"), { ssr: false });
 const StatusLog = dynamic(() => import("@/components/flight/StatusLog").then((m) => m.StatusLog), { ssr: false });
 
@@ -30,6 +31,7 @@ export default function FlightPage() {
 			<Aircraft />
 			<MissionLayer />
 			<GeoLayer />
+			<SituationLayer />
 
 			{/* Branding */}
 			<div className="fixed top-4 left-4 z-50 flex items-center gap-2">

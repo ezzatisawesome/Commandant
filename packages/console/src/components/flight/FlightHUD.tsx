@@ -20,6 +20,7 @@ import { AttitudeIndicator } from "./AttitudeIndicator";
 import { Compass } from "./Compass";
 import { CommandBar } from "./CommandBar";
 import { HealthStrip } from "./HealthStrip";
+import { FlightState } from "./FlightState";
 
 // Connection-indicator styling per link state: amber pulse while connecting,
 // green alive, amber stale, red lost.
@@ -214,6 +215,7 @@ export default function FlightHUD() {
 				})}
 			</div>
 			<HealthStrip />
+			<FlightState />
 			{/* Commanding exists only in the cockpit build. The hosted viewer has
 			    no command surface at all, and its client refuses to transmit. */}
 			{IS_VIEW ? null : <CommandBar />}

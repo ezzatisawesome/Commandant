@@ -6,6 +6,7 @@ import { Viewer, Ion, createWorldTerrainAsync, ArcGisMapServerImageryProvider } 
 
 import envs from "@/lib/envs";
 import { $viewerStore } from "@/stores/cesium.store";
+import { driveRendering } from "@/lib/driveRendering";
 import { $timeStore } from "@/stores/states.store";
 
 // Generic Cesium globe. Owns only the Viewer + container; domain layers
@@ -33,6 +34,21 @@ export default function Globe() {
 		// Initialize Cesium Viewer.
 		Ion.defaultAccessToken = envs.CESIUM_KEY;
 		const viewer = new Viewer("cesiumContainer", {
+			// On-demand rendering. Without this Cesium redraws at display refresh
+			// forever, whether or not anything moved: a parked aircraft still cost
+			// ~60 fps of globe, which is most of the fan noise with a tab open.
+			// Telemetry arrives at 25 Hz (5 Hz on the hosted viewer), so the scene
+			// never needs more than that.
+			//
+			// The catch: every entity driven by a CallbackProperty is invisible to
+			// Cesium's change detection, so SOMETHING must call requestRender when
+			// the data moves. driveRendering() below subscribes to the frame store
+			// and does exactly that; camera input and tile loads are handled by
+			// Cesium itself.
+			requestRenderMode: true,
+			// Still redraw at least this often so slow-changing scene state (sun
+			// angle, atmosphere, terrain streaming) keeps up when data is static.
+			maximumRenderTimeChange: 0.5,
 			timeline: false,
 			geocoder: false, // Search button
 			homeButton: false,
@@ -79,12 +95,17 @@ export default function Globe() {
 			viewer.imageryLayers.addImageryProvider(esri);
 		});
 
+		// Ask for a frame whenever the aircraft state changes. This is what makes
+		// requestRenderMode safe with CallbackProperty-driven entities.
+		const stopDriving = driveRendering(viewer);
+
 		// Set up clock.
 		viewer.clock.startTime = $time.clone();
 		viewer.clock.currentTime = $time.clone();
 
 		// Cleanup: destroy THIS viewer and clear the shared store.
 		return () => {
+			stopDriving();
 			if (!viewer.isDestroyed()) viewer.destroy();
 			$viewerStore.set(null);
 		};

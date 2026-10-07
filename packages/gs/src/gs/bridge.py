@@ -863,6 +863,10 @@ class Bridge:
                 if boot <= self._last_pos_boot_ms and self._last_pos_boot_ms - boot < REBOOT_GAP_MS:
                     return
                 self._last_pos_boot_ms = boot
+                # PX4's own uptime clock, surfaced for diagnostics: when the
+                # simulator stalls this is the value PX4's clock stops at, which
+                # is what distinguishes a counter overflow from a race.
+                L["bootMs"] = boot
                 L["lat"] = msg.lat / 1e7
                 L["lon"] = msg.lon / 1e7
                 L["alt"] = msg.alt / 1000.0  # mm -> m (MSL)
