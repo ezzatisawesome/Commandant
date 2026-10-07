@@ -1,11 +1,11 @@
-# Hosting commandant.guppi.com
+# Hosting commandant.guppidev.com
 
 Two pieces, two hosts, because they have different runtime needs.
 
-| Piece | Where | Why |
-|---|---|---|
-| Console in **view** mode | Vercel | A Next app with no backend; Vercel's native case |
-| **Relay** | Fly.io | Needs one always-on process holding long websockets, which serverless cannot do |
+| URL | Serves | Host | Status |
+|---|---|---|---|
+| `commandant.guppidev.com` | the UI, what people visit | Vercel | domain attached; needs one DNS record |
+| `commandant-relay.fly.dev` | the live telemetry WebSocket | Fly.io | deployed |
 
 ```
   browser ──https──► Vercel (console, NEXT_PUBLIC_MODE=view)
@@ -13,61 +13,72 @@ Two pieces, two hosts, because they have different runtime needs.
      └────wss──────► Fly (relay) ◄────wss /publish──── field hub (gs --relay)
 ```
 
-The console is static as far as the data is concerned: it loads, then opens a
-websocket straight to the relay. Vercel never proxies telemetry.
+The console is static as far as data is concerned: it loads, then opens a
+WebSocket straight to the relay. Vercel never proxies telemetry.
 
-## 1. Relay on Fly
+**Why two hosts.** Vercel's functions cannot hold an open WebSocket for the
+duration of a flight, so the stream needs an always-on process. Nobody types the
+Fly hostname; the page opens it in the background.
+
+> `guppi.com` is not ours — it was registered in 1999 and sits on GoDaddy
+> nameservers. The domains in this account are `guppidev.com`, `guppi-dev.com`
+> and `guppi-ai.com`. That is why the site is on `guppidev.com`.
+
+## 1. Relay on Fly (done)
 
 ```sh
 cd packages/relay
 fly launch --no-deploy --name commandant-relay      # reads fly.toml
 fly secrets set RELAY_TOKEN="$(openssl rand -hex 32)"
 fly deploy
-fly secrets list                                    # keep the token for the hub
 ```
 
-Attach a hostname for the websocket. Keeping it on its own subdomain means the
-site and the stream scale and fail independently:
+It is served at `wss://commandant-relay.fly.dev/` with no custom domain, which
+is deliberate: one less DNS record, and the hostname is never user-facing.
 
-```sh
-fly certs add relay.commandant.guppi.com
-# then add the CNAME / A records Fly prints, at whatever manages guppi.com DNS
-```
-
-Check it:
+Smoke-test a deployment without PX4:
 
 ```sh
 cd packages/relay
 uv run python scripts/fake_hub.py \
-  --url wss://relay.commandant.guppi.com/publish --token "<RELAY_TOKEN>"
+  --url wss://commandant-relay.fly.dev/publish --token "<RELAY_TOKEN>"
 ```
 
-## 2. Console on Vercel
+The token is write-only once set as a Fly secret, so keep your own copy.
 
-Import `github.com/ezzatisawesome/Commandant` in the Vercel dashboard. The root
-`vercel.json` already points at the `console` workspace, so no build settings
-need changing. Set these environment variables:
+## 2. Console on Vercel (done, except DNS)
+
+The project is linked and deployed; the root `vercel.json` targets the `console`
+workspace. Environment variables, set on production and preview:
 
 | Variable | Value |
 |---|---|
 | `NEXT_PUBLIC_MODE` | `view` |
-| `NEXT_PUBLIC_RELAY_ENDPOINT` | `wss://relay.commandant.guppi.com/` |
-| `NEXT_PUBLIC_CESIUM_KEY` | your Cesium Ion token |
+| `NEXT_PUBLIC_RELAY_ENDPOINT` | `wss://commandant-relay.fly.dev/` |
+| `NEXT_PUBLIC_CESIUM_KEY` | the Cesium Ion token |
 
 `NEXT_PUBLIC_MODE=view` is what makes the deployment read-only: no command bar,
 no authoring, no parameter writes, and a telemetry client that refuses to
 transmit. **Never set it to `cockpit` on a public deployment.**
 
-Then add `commandant.guppi.com` as a domain on the Vercel project.
+The Cesium token ships in the client bundle (that is what `NEXT_PUBLIC_` means),
+so restrict it to your domains in Cesium Ion.
 
-## 3. Point the hub at it
+**Remaining step.** `guppidev.com` DNS is at Namecheap
+(`dns1/dns2.registrar-servers.com`). Add:
 
-On the Raspberry Pi hub (or any machine running the daemon):
+```
+Type: A    Host: commandant    Value: 76.76.21.21
+```
+
+Vercel verifies and issues the certificate automatically.
+
+## 3. Point a hub at it
 
 ```sh
 cd packages/gs
 uv run python -m gs \
-  --relay wss://relay.commandant.guppi.com/publish \
+  --relay wss://commandant-relay.fly.dev/publish \
   --relay-token "<RELAY_TOKEN>" \
   --flight-id "$(date -u +flight-%Y%m%d-%H%M%S)"
 ```
@@ -79,8 +90,26 @@ so every boot publishes automatically.
 
 Watching is open: what a viewer sees is an aircraft flying, which is not a
 secret. Publishing is gated because a forged publisher could show a fake
-aircraft. If the flights themselves ever need to be private, put access control
-on the Vercel project, not on the relay, and keep the relay's contract narrow.
+aircraft. If flights ever need to be private, put access control on the Vercel
+project and keep the relay's contract narrow.
+
+## Pinned dependencies (do not widen casually)
+
+`packages/console/package.json` pins `cesium` to `1.128.0`, and the root
+`package.json` holds `@zip.js/zip.js` on `2.7.73`. Cesium ≥ 1.132 ships
+wasm-bindgen glue whose inlined binary the production minifier rewrites into a
+template literal containing octal escapes — invalid JavaScript, so the bundle
+fails to parse and the page never mounts. Dev builds are unminified and hide it,
+so this only appears on a real deployment. 1.128 is the newest release that
+still has `CallbackPositionProperty` (needed by `Aircraft.tsx`) and predates the
+WASM module.
+
+Every build asserts what the browser needs:
+
+```sh
+cd packages/console && npm run build
+find .next/static/chunks -name '*.js' -exec node --check {} \;   # must be silent
+```
 
 ## What is deliberately not hosted
 

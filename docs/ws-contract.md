@@ -19,6 +19,24 @@ from the Phase 0 frame remain unchanged (`lat`, `lon`, `alt`, `roll`, `pitch`,
 
 - `linkState`: `"connecting" | "alive" | "stale" | "lost"`.
 - `connected` (bool) is kept for back-compat; `connected == (linkState === "alive")`.
+- `dataAgeMs` (int | null): age of the newest **vehicle** data. `null` before any
+  arrives.
+
+**Link health is attributed per source, and this matters.** gs takes two feeds:
+MAVLink from the autopilot, and the sim's flightlink JSON. Only MAVLink speaks
+for the vehicle. A single shared "last message" timestamp once let a live JSON
+power feed report `linkState:"alive"` for an hour while PX4's MAVLink was dead
+and gs re-broadcast one frozen fix — 839 consecutive frames with identical
+lat/lon/alt/roll, only the frame timestamp advancing. So:
+
+- once any MAVLink vehicle has been seen, **only** MAVLink freshness sets
+  `linkState` and `dataAgeMs`;
+- on a pure flightlink run (no PX4), the JSON feed is genuinely the only source
+  and drives both.
+
+A client should treat a large `dataAgeMs` as "these numbers describe the past"
+even while `linkState` is still `alive`; the console shows a red `stale Ns` badge
+past 3 s.
 
 ### `link` (on state change; optional, telemetry also carries `linkState`)
 ```json
@@ -207,7 +225,8 @@ range validation, and help text. Not on the MAVLink wire.
 
 ## The relay leg (hosted viewer)
 
-`packages/relay` serves `commandant.guppi.com`. The hub publishes the SAME
+`packages/relay` serves the hosted viewer (`commandant.guppidev.com` on
+Vercel, streaming from `wss://commandant-relay.fly.dev/`). The hub publishes the SAME
 messages defined above, outbound, to `wss://…/publish` with a bearer token;
 browsers subscribe at `wss://…/` and receive them verbatim.
 

@@ -1,6 +1,7 @@
 # relay — the public window onto a live flight
 
-Serves `commandant.guppi.com`. The field hub dials **out** and pushes telemetry;
+Backs the hosted viewer at `commandant.guppidev.com`, served from
+`wss://commandant-relay.fly.dev/`. The field hub dials **out** and pushes telemetry;
 browsers connect and watch. Nothing more.
 
 ```
@@ -52,13 +53,15 @@ From a real hub, point the daemon at it:
 ```sh
 cd packages/gs
 uv run python -m gs --relay ws://127.0.0.1:8791/publish --relay-token devtoken
+# deployed:  --relay wss://commandant-relay.fly.dev/publish --relay-token "<secret>"
 ```
 
 ## Deploy
 
-See `fly.toml` for the full sequence. In short: set `RELAY_TOKEN` as a secret,
-deploy the container, attach the domain, then give the hub `--relay
-wss://commandant.guppi.com/publish` with that token.
+See `fly.toml` and `../../docs/hosting.md`. In short: set `RELAY_TOKEN` as a
+secret, `fly deploy`, then give the hub
+`--relay wss://commandant-relay.fly.dev/publish` with that token. No custom
+domain: the hostname is never user-facing, so it is one less DNS record.
 
 One instance only. Viewers must reach the same process the hub publishes to, and
 the current frame is held in memory. Scaling out would need a shared bus first,

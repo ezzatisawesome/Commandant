@@ -76,3 +76,18 @@ Config/scaffolding only — none of this was run here. On a real Pi, validate:
   `nmcli`-based AP instead.
 - `wlan0` as AP can't also be a WiFi client; a Pi that must stay online needs a
   second interface.
+
+## Publishing a flight to the public viewer
+
+Optional and off by default. Uncomment `COMMANDANT_RELAY` and
+`COMMANDANT_RELAY_TOKEN` in `/etc/commandant/gs.env` and restart `gs`:
+
+```sh
+sudo systemctl restart gs
+```
+
+The hub then pushes telemetry **outbound** to the relay, which fans it out to
+read-only browsers at `commandant.guppidev.com`. The hub is never reachable
+inbound and the relay has no route back to it, so command authority stays on the
+hub's own WiFi. Nothing else about the hub changes, and with the variables unset
+the hub stays fully offline. See [`../../docs/hosting.md`](../../docs/hosting.md).

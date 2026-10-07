@@ -25,8 +25,8 @@ IN_PROGRESS acks relayed; malformed WS messages acked, not fatal. Console: null
 fields can't crash the HUD (error boundaries per panel); HUD renders at 10 Hz off
 a throttled store; trails decimated + `ArcType.NONE`; marker drags no longer
 rebuild entities; fences clamp to terrain; unknown WS types dropped; reconnect
-with backoff that keeps the trail; empty param field can't write 0. Tests: 42
-daemon (pytest, fake-PX4 + unit) and 34 console (vitest).
+with backoff that keeps the trail; empty param field can't write 0. Tests: 46
+daemon (pytest, fake-PX4 + unit), 10 relay, 39 console (vitest).
 
 ## Scope boundary (the two-plane rule)
 
@@ -251,7 +251,7 @@ The solar/power/MPPT dashboard already exists; this generalizes the rest.
 
 ---
 
-## Phase 6 — hosted viewer (commandant.guppi.com)
+## Phase 6 — hosted viewer (commandant.guppidev.com)
 
 Public, read-only visibility into a live flight. Flight **history** is Guppi's,
 not Commandant's: Guppi is the data plane and already has the viewer for it, so
@@ -264,8 +264,24 @@ this phase deliberately ships no replay, no flight index and no archive UI.
       reconnect. Cannot block the 25 Hz loop or grow unbounded.
 - [x] Console `NEXT_PUBLIC_MODE=view` — relay endpoint, no command bar, no
       authoring, no param writes, and a transmit chokepoint that refuses to send.
-- [ ] Deploy: container + domain + token (`packages/relay/fly.toml`).
+- [x] **Deployed.** Relay on Fly (`commandant-relay.fly.dev`, token as a secret,
+      one always-on machine); console on Vercel from the root `vercel.json`.
+      Verified end to end over the public internet, including that an anonymous
+      publish is refused and a viewer's `arm` reaches nothing. See
+      [`hosting.md`](hosting.md).
+- [ ] **DNS.** `commandant.guppidev.com` is attached to the Vercel project and
+      needs one A record (`commandant` → `76.76.21.21`) at Namecheap. Note
+      `guppi.com` is not ours — registered 1999, GoDaddy — hence `guppidev.com`.
 - [ ] Guppi egress from the hub, so flights land in Guppi's store and viewer.
+
+**Found while deploying** (would have bitten the hub too, not just the host):
+`cesium` had a caret range and had resolved to 1.146, whose wasm-bindgen glue the
+production minifier rewrites into a template literal with octal escapes. The
+bundle then fails to parse and the page never mounts. Dev builds are unminified,
+so only a real deployment surfaced it. Cesium is pinned to 1.128.0 and
+`@zip.js/zip.js` held on 2.7.73; every build now runs `node --check` over all
+emitted chunks. Do not widen either pin without loading a production build in a
+browser.
 
 ## Scope boundary amendment — authority follows vehicle STATE
 
