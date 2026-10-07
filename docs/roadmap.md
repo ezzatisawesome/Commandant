@@ -5,6 +5,11 @@ Status: **draft** · Last updated: 2026-10-02
 Turning Commandant from an ingest-only telemetry viewer into a real
 QGroundControl-replacement GCS for the solar aircraft.
 
+**Progress (2026-10-06):** checklists below were reconciled against the code —
+22 items were implemented but still showed unticked. What genuinely remains is
+Phase 3 (SIL rehearsal), param snapshots, real-Pi hub validation, one DNS record,
+and Guppi egress. Two Phase 5 items were dropped on purpose, not forgotten.
+
 **Progress (2026-10-03):** Monorepo (`packages/console` + `packages/gs` +
 `packages/cli`), all on `main`. **Phases 0, 1, 2, 4, 5 done** — commands, params,
 health/STATUSTEXT, configurable display, and mission planning, all validated
@@ -153,7 +158,7 @@ bridge (`src/lib/bridge/bridge.ts`) is RX-only and lives inside Next.
       disabled (`instrumentation.ts` is a no-op).
 - [x] **Link manager.** connecting/alive(<2s)/stale(<5s)/lost; `linkState` on
       every frame + `link` on transitions; console indicator + auto-reconnect.
-- [ ] **Transport abstraction.** UDP today; interface ready for TCP/serial so
+- [x] **Transport abstraction.** UDP today; interface ready for TCP/serial so
       real-radio is a config change, not a rewrite. Multi-endpoint capable.
       *(still pending — the one unticked foundation item.)*
 - [x] **Command ACK tracking.** `COMMAND_LONG` for arm/disarm/set_mode; 3 tries
@@ -171,19 +176,19 @@ bridge (`src/lib/bridge/bridge.ts`) is RX-only and lives inside Next.
 
 Control verbs. Small, high-value, and the prerequisite for missions.
 
-- [ ] Arm / disarm — `MAV_CMD_COMPONENT_ARM_DISARM` via `COMMAND_LONG`. (Reuse
+- [x] Arm / disarm — `MAV_CMD_COMPONENT_ARM_DISARM` via `COMMAND_LONG`. (Reuse
       `mavlink_io.py`.)
-- [ ] Set flight mode (Manual / Stabilized / Auto / Loiter / RTL / Offboard) —
+- [x] Set flight mode (Manual / Stabilized / Auto / Loiter / RTL / Offboard) —
       `SET_MODE` / `COMMAND_LONG`. Reuse mode decode already in `bridge.ts`.
-- [ ] Takeoff / Land / RTL / Hold buttons — `MAV_CMD_NAV_TAKEOFF` / `_LAND` /
+- [x] Takeoff / Land / RTL / Hold buttons — `MAV_CMD_NAV_TAKEOFF` / `_LAND` /
       `_RETURN_TO_LAUNCH` / `_LOITER_UNLIM`.
-- [ ] "Fly to here" — click globe → guided reposition (`MAV_CMD_DO_REPOSITION`).
+- [x] "Fly to here" — click globe → guided reposition (`MAV_CMD_DO_REPOSITION`).
       Note: on PX4 **fixed-wing** this is loiter-at-point, not a quad-style goto —
       build the UI/expectation accordingly.
-- [ ] Command UI: action bar + confirm-on-dangerous, ACK/failure feedback,
+- [x] Command UI: action bar + confirm-on-dangerous, ACK/failure feedback,
       disabled states driven by link + armed + mode.
-- [ ] `STATUSTEXT` log panel — surface PX4 warnings/errors/failsafe to the operator.
-- [ ] Health/status: EKF, GPS fix + sats, battery warning, failsafe state —
+- [x] `STATUSTEXT` log panel — surface PX4 warnings/errors/failsafe to the operator.
+- [x] Health/status: EKF, GPS fix + sats, battery warning, failsafe state —
       ingest `SYS_STATUS`, `GPS_RAW_INT`, `EKF_STATUS_REPORT`.
 
 ## Phase 2 — PX4 parameters (view + edit live)
@@ -191,18 +196,19 @@ Control verbs. Small, high-value, and the prerequisite for missions.
 "View PX4 variables and edit them on the fly." Turns the read-only
 `/api/airframe` panel into a live, writable editor.
 
-- [ ] Fetch full param set — `PARAM_REQUEST_LIST` → stream of `PARAM_VALUE`;
+- [x] Fetch full param set — `PARAM_REQUEST_LIST` → stream of `PARAM_VALUE`;
       hand-roll the missing-param / re-request sync robustly (index/count
       tracking, timeout, retransmit). Tested against SITL.
-- [ ] Searchable, filterable param table: name, value, type, units/min/max/desc.
+- [x] Searchable, filterable param table: name, value, type, units/min/max/desc.
       Metadata (units/min/max/description) is **not** on the MAVLink wire — source
       it from PX4's bundled `parameters.json`. Decide: bundle it, or ship
       value-only first.
-- [ ] Edit + write live — `PARAM_SET`, confirm via echoed `PARAM_VALUE`; dirty
+- [x] Edit + write live — `PARAM_SET`, confirm via echoed `PARAM_VALUE`; dirty
       indicators; reject/rollback on mismatch.
-- [ ] Diff vs airframe defaults (reuse the airframe init script already read via
+- [x] Diff vs airframe defaults (reuse the airframe init script already read via
       `/api/airframe`); highlight changed-from-default.
 - [ ] Param snapshots: save / load / compare sets to file (local persistence).
+      The only Phase 2 item not built.
 
 ## Phase 3 — SIL-rehearsal gateway
 
@@ -222,32 +228,37 @@ phase; the Phase 1/2 verbs (and Phase 4 missions) register with it.
 
 Create, edit, upload, and watch missions execute. All Commandant.
 
-- [ ] Waypoint authoring on the Cesium globe: click-to-add, drag-to-move.
-- [ ] Waypoint table: lat/lon/alt/speed/loiter; reorder; delete; per-item type
+- [x] Waypoint authoring on the Cesium globe: click-to-add, drag-to-move.
+- [x] Waypoint table: lat/lon/alt/speed/loiter; reorder; delete; per-item type
       (takeoff, waypoint, loiter time/turns/unlim, RTL, land) via
       `MISSION_ITEM_INT` frame/command fields.
-- [ ] **Upload** — hand-rolled `MISSION_COUNT` → `MISSION_REQUEST_INT` →
+- [x] **Upload** — hand-rolled `MISSION_COUNT` → `MISSION_REQUEST_INT` →
       `MISSION_ITEM_INT` → `MISSION_ACK` handshake (out-of-order requests,
       re-request, timeout, NAK decode). The most error-prone protocol; heaviest
       test coverage, and it routes through SIL-rehearsal.
-- [ ] **Download / read back** current mission — `MISSION_REQUEST_LIST`.
-- [ ] Live progress: highlight current item, distance-to-next —
+- [x] **Download / read back** current mission — `MISSION_REQUEST_LIST`.
+- [x] Live progress: highlight current item, distance-to-next —
       `MISSION_CURRENT`, `MISSION_ITEM_REACHED`. (Setpoint trail already exists.)
-- [ ] Edit mid-flight & re-upload without full restart; set-current item.
-- [ ] Later: geofence + rally points (`MAV_MISSION_TYPE_FENCE` / `_RALLY`).
+- [x] Edit mid-flight & re-upload without full restart; set-current item.
+- [x] Later: geofence + rally points (`MAV_MISSION_TYPE_FENCE` / `_RALLY`).
 
 ## Phase 5 — Configurable display
 
 "Seeing data and adjusting what's shown." Pure viewer-side, no control stakes.
 The solar/power/MPPT dashboard already exists; this generalizes the rest.
 
-- [ ] Add/remove/reorder HUD panels & fields (extends `FlightHUD.tsx` + store).
-- [ ] Chart any telemetry field, not a fixed set — generalize the `series()`
+- [x] Add/remove/reorder HUD panels & fields (extends `FlightHUD.tsx` + store).
+- [x] Chart any telemetry field, not a fixed set — generalize the `series()`
       sparkline helper over the whole frame.
-- [ ] On-demand stream control: turn MAVLink messages on/off and set rate from
+- [x] On-demand stream control: turn MAVLink messages on/off and set rate from
       the UI — generalize the existing `SET_MESSAGE_INTERVAL` TX.
-- [ ] Multi-plot, time-window select, pause-and-scrub (extend history store).
-- [ ] Layout presets (flight-test / power-debug / mission view), persisted.
+- [~] ~~Multi-plot, time-window select, pause-and-scrub~~ — **dropped.** This is
+      Guppi's viewer rebuilt worse; see the scope boundary below. The cockpit
+      keeps a fixed set of flight instruments so it stays fully useful with
+      Guppi unreachable, and stops there.
+- [~] ~~Layout presets (flight-test / power-debug / mission view)~~ — **dropped**,
+      same reason. Show/hide/reorder and the per-field chart toggle stay; they
+      are persisted per viewer in localStorage.
 
 ---
 
