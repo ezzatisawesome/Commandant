@@ -55,44 +55,53 @@ describe("terrain clearance", () => {
 	});
 });
 
-describe("wind", () => {
-	it("needs real movement before it can know the track", () => {
-		pushFrame(frame({ t: 20_000, yaw: 0, airspeed: 10, groundspeed: 10 }));
-		expect($derived.get().trackDeg).toBeNull();
+describe("wind and track come from the autopilot, not from here", () => {
+	// These used to be reconstructed by differencing consecutive GPS positions,
+	// which at 10 Hz and 13 m/s is a 1.3 m baseline against 1.5 m of GPS noise.
+	// It fabricated 8.6 m/s of wind in still air. Both now come from PX4's EKF:
+	// track from GLOBAL_POSITION_INT vx/vy, wind from WIND_COV.
+
+	it("reads track straight from the frame", () => {
+		pushFrame(frame({ t: 20_000, trackDeg: 123.4 }));
+		expect($derived.get().trackDeg).toBeCloseTo(123.4, 6);
+	});
+
+	it("reads the estimator's wind, including its uncertainty", () => {
+		pushFrame(frame({
+			t: 21_000, trackDeg: 0, yaw: 0,
+			windSpeed: 4.2, windFromDeg: 270, windSigma: 0.8,
+		}));
+		const w = $derived.get().wind!;
+		expect(w.speedMps).toBeCloseTo(4.2, 6);
+		expect(w.fromDeg).toBeCloseTo(270, 6);
+		expect(w.sigmaMps).toBeCloseTo(0.8, 6);
+	});
+
+	it("shows no wind at all until the estimator has one", () => {
+		// PX4 emits WIND_COV only once EKF2 has a wind estimate, which needs an
+		// airspeed sensor and some flight time. A dash is the honest answer; the
+		// old code invented a number here.
+		pushFrame(frame({ t: 22_000, trackDeg: 90, yaw: 1.57, airspeed: 13, groundspeed: 13 }));
 		expect($derived.get().wind).toBeNull();
 	});
 
-	it("solves a headwind from consecutive fixes", () => {
-		// Moving north; nose north (yaw 0); airspeed 12, groundspeed 8.
-		pushFrame(frame({ t: 21_000, yaw: 0, airspeed: 12, groundspeed: 8 }));
+	it("still computes drift, which is geometry rather than an estimate", () => {
+		// Nose north, tracking 045: pushed 45 degrees right of the nose.
 		pushFrame(frame({
-			t: 21_100, lat: LAT + BASELINE_M / M_PER_DEG, yaw: 0, airspeed: 12, groundspeed: 8,
+			t: 23_000, yaw: 0, trackDeg: 45, windSpeed: 10, windFromDeg: 270,
 		}));
-		const d = $derived.get();
-		expect(d.trackDeg).toBeCloseTo(0, 0);
-		expect(d.wind!.speedMps).toBeCloseTo(4, 2);
-		expect(d.wind!.fromDeg).toBeCloseTo(0, 0);   // from the north, on the nose
+		expect($derived.get().wind!.driftDeg).toBeCloseTo(45, 6);
 	});
 
-	it("prefers attitude yaw over the GPS heading field", () => {
-		// yaw says east (pi/2); `heading` says north. Track is east. If `heading`
-		// were used the triangle would show a huge phantom crosswind.
-		pushFrame(frame({ t: 22_000, yaw: Math.PI / 2, heading: 0, airspeed: 10, groundspeed: 10 }));
-		pushFrame(frame({
-			t: 22_100, lon: LON + BASELINE_M / (M_PER_DEG * Math.cos(LAT * Math.PI / 180)),
-			yaw: Math.PI / 2, heading: 0, airspeed: 10, groundspeed: 10,
-		}));
-		expect($derived.get().wind!.speedMps).toBeCloseTo(0, 1);
-	});
-
-	it("holds the last track through a stationary patch rather than flickering", () => {
-		pushFrame(frame({ t: 23_000, yaw: 0, airspeed: 10, groundspeed: 10 }));
-		pushFrame(frame({ t: 23_100, lat: LAT + BASELINE_M / M_PER_DEG, yaw: 0, airspeed: 10, groundspeed: 10 }));
-		const moving = $derived.get().trackDeg;
-		expect(moving).not.toBeNull();
-		// Same position again: below the baseline, so the last track is held.
-		pushFrame(frame({ t: 23_200, lat: LAT + BASELINE_M / M_PER_DEG, yaw: 0, airspeed: 10, groundspeed: 10 }));
-		expect($derived.get().trackDeg).toBeCloseTo(moving!, 6);
+	it("needs no history, so there is nothing to leak across a reconnect", () => {
+		pushFrame(frame({ t: 24_000, trackDeg: 90, windSpeed: 5, windFromDeg: 180 }));
+		expect($derived.get().wind).not.toBeNull();
+		pushFrame({ t: 24_100, connected: false });       // link drops
+		expect($derived.get()).toEqual(EMPTY_DERIVED);
+		// One frame is enough to be correct again: no baseline to re-accumulate.
+		pushFrame(frame({ t: 24_200, trackDeg: 270, windSpeed: 3, windFromDeg: 90 }));
+		expect($derived.get().trackDeg).toBeCloseTo(270, 6);
+		expect($derived.get().wind!.speedMps).toBeCloseTo(3, 6);
 	});
 });
 
@@ -145,8 +154,7 @@ describe("fence proximity", () => {
 describe("no fix", () => {
 	it("resets everything rather than reporting stale geometry", () => {
 		setTerrainSampler(() => GROUND);
-		pushFrame(frame({ t: 50_000, yaw: 0, airspeed: 10, groundspeed: 10 }));
-		pushFrame(frame({ t: 50_100, lat: LAT + BASELINE_M / M_PER_DEG, yaw: 0, airspeed: 10, groundspeed: 10 }));
+		pushFrame(frame({ t: 50_000, trackDeg: 0, windSpeed: 5, windFromDeg: 180 }));
 		expect($derived.get().wind).not.toBeNull();
 		pushFrame({ t: 50_200, connected: true });   // fix lost
 		expect($derived.get()).toEqual(EMPTY_DERIVED);

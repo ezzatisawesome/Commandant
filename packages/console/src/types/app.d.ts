@@ -54,7 +54,28 @@ export interface TelemetryFrame {
     // Age of the newest VEHICLE data in ms (null before any arrives). A live
     // frame with a large dataAgeMs means gs is re-serving a stale fix, which is
     // what a frozen simulator or a dead autopilot looks like from here.
-    dataAgeMs?: number | null,  // richer link state (connected == linkState === "alive")
+    dataAgeMs?: number | null,
+
+    // --- straight from the autopilot's estimator, not reconstructed here -----
+    // EKF velocity in NED (m/s), from GLOBAL_POSITION_INT vx/vy/vz. Doppler
+    // derived, so far more accurate than differencing positions.
+    vn?: number,
+    ve?: number,
+    vd?: number,
+    /** Course over ground, deg true — atan2(ve, vn) computed in gs. */
+    trackDeg?: number,
+    /** Climb rate, m/s positive up. */
+    climb?: number,
+    // PX4 EKF2's own wind estimate (WIND_COV). Absent until the estimator has
+    // one, which needs an airspeed sensor and some flight time.
+    /** Wind speed, m/s. */
+    windSpeed?: number,
+    /** Direction the wind blows FROM, deg true. */
+    windFromDeg?: number,
+    /** Vertical wind component, m/s. */
+    windDown?: number,
+    /** 1-sigma horizontal uncertainty of the wind estimate, m/s. */
+    windSigma?: number,  // richer link state (connected == linkState === "alive")
     // Health / status (see docs/ws-contract.md), merged into the frame by gs.
     ekfOk?: boolean,        // EKF_STATUS_REPORT flags nominal
     gpsFix?: number,        // GPS_RAW_INT.fix_type (0 none … 3 3D … 6 RTK-fixed)

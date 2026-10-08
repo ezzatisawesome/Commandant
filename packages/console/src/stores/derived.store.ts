@@ -8,8 +8,7 @@
 import { atom } from "nanostores";
 
 import {
-	solveWind, trackFromFixes, sunPosition, fenceProximity, aglM, clearanceBand,
-	distanceM,
+	sunPosition, fenceProximity, aglM, clearanceBand, distanceM, angleDiffDeg,
 	type Wind, type SunPosition, type FenceProximity, type ClearanceBand, isNum,
 } from "@/lib/flightGeometry";
 import { $hudFrame } from "@/stores/aircraft.store";
@@ -51,28 +50,9 @@ export function setTerrainSampler(fn: (() => number | null) | null) {
 	terrainSampler = fn;
 }
 
-// Track is derived from an ANCHOR fix, not the previous one.
-//
-// MEASURED: with consecutive 10 Hz fixes the baseline at 13 m/s is 1.3 m, while
-// the sim's configured GPS noise is 1.5 m CEP (rev6.bridge-config.xml). Noise
-// exceeded signal, so flying dead straight in ZERO wind the readout invented
-// 8.6 m/s of wind and the track wandered over a 56-degree spread. A wind
-// instrument that fabricates 8 m/s is worse than no wind instrument.
-//
-// So the anchor is only advanced once the aircraft has actually moved far enough
-// for the bearing to mean something. At 30 m the angular error from 1.5 m of
-// noise is about 4 degrees, which is usable; the cost is ~2.3 s of lag at
-// cruise, which for a wind readout is nothing.
-const TRACK_BASELINE_M = 30;
-
-// The wind solution is additionally smoothed, because airspeed and groundspeed
-// carry their own noise and the operator wants a number that sits still.
-const WIND_SMOOTHING = 0.25;   // weight of each new solution
-
-let anchor: { lat: number; lon: number } | null = null;
-let lastTrackDeg: number | null = null;
-let smoothedWind: Wind | null = null;
-
+// No local bookkeeping any more. Track and wind come from the autopilot's own
+// estimator (see below), so there is no anchor fix, no baseline, no smoothing and
+// nothing to leak across a reconnect.
 /** Drop all derived state and its bookkeeping.
  *
  *  This must happen on a link loss as well as on a lost fix. The anchor,
@@ -80,9 +60,6 @@ let smoothedWind: Wind | null = null;
  *  would present stale geometry as current — the same failure mode as a frozen
  *  position reported "alive". */
 export function resetDerived(): void {
-	anchor = null;
-	lastTrackDeg = null;
-	smoothedWind = null;
 	$derived.set(EMPTY_DERIVED);
 }
 
@@ -96,15 +73,11 @@ export function recomputeDerived(): void {
 		return;
 	}
 
-	// Track over a long enough baseline that GPS noise does not dominate.
-	if (!anchor) {
-		anchor = { lat: f.lat, lon: f.lon };
-	} else if (distanceM(anchor.lat, anchor.lon, f.lat, f.lon) >= TRACK_BASELINE_M) {
-		const t = trackFromFixes(anchor.lat, anchor.lon, f.lat, f.lon, TRACK_BASELINE_M * 0.5);
-		if (t !== null) lastTrackDeg = t;
-		anchor = { lat: f.lat, lon: f.lon };
-	}
-	const trackDeg = lastTrackDeg;
+	// Track comes straight from the EKF velocity (GLOBAL_POSITION_INT vx/vy,
+	// Doppler-derived), computed in gs. It replaced a position-differencing
+	// reconstruction here that needed a 30 m baseline and smoothing just to beat
+	// the GPS noise it was amplifying.
+	const trackDeg = isNum(f.trackDeg) ? f.trackDeg : null;
 
 	const terrainM = terrainSampler ? terrainSampler() : null;
 	const agl = aglM(f.alt, terrainM ?? undefined);
@@ -116,31 +89,24 @@ export function recomputeDerived(): void {
 		? ((f.yaw * 180) / Math.PI + 360) % 360
 		: (isNum(f.heading) ? f.heading : null);
 
-	const solved = (headingDeg !== null && trackDeg !== null)
-		? solveWind(headingDeg, f.airspeed as number, trackDeg, f.groundspeed as number)
+	// Wind is PX4's EKF2 estimate (WIND_COV), not a triangle solved here. The
+	// estimator fuses airspeed, GPS velocity and a sideslip model, and reports an
+	// uncertainty — which a hand-rolled triangle cannot. `sigmaMps` lets the UI
+	// say "unreliable" rather than being believed.
+	//
+	// NOTE: PX4 only produces this once EKF2 has a wind estimate, which needs an
+	// airspeed sensor and some flight time. Before then it is null, and the UI
+	// shows a dash rather than inventing a number.
+	const wind: Wind | null = (isNum(f.windSpeed) && isNum(f.windFromDeg))
+		? {
+			fromDeg: f.windFromDeg,
+			speedMps: f.windSpeed,
+			// Drift is still geometry, not an estimate: track minus heading.
+			driftDeg: (headingDeg !== null && trackDeg !== null)
+				? angleDiffDeg(trackDeg, headingDeg) : 0,
+			sigmaMps: isNum(f.windSigma) ? f.windSigma : undefined,
+		}
 		: null;
-	// Exponential smoothing, in the vector domain so the direction wraps cleanly
-	// (averaging 359 and 1 degrees must give 0, not 180).
-	if (solved === null) {
-		smoothedWind = null;
-	} else if (smoothedWind === null) {
-		smoothedWind = solved;
-	} else {
-		const a = WIND_SMOOTHING, b = 1 - a;
-		const toXY = (w: Wind) => {
-			const r = (w.fromDeg * Math.PI) / 180;
-			return [w.speedMps * Math.cos(r), w.speedMps * Math.sin(r)] as const;
-		};
-		const [nx, ny] = toXY(solved);
-		const [ox, oy] = toXY(smoothedWind);
-		const x = a * nx + b * ox, y = a * ny + b * oy;
-		smoothedWind = {
-			speedMps: Math.hypot(x, y),
-			fromDeg: ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360,
-			driftDeg: a * solved.driftDeg + b * smoothedWind.driftDeg,
-		};
-	}
-	const wind = smoothedWind;
 
 	// Sun from the SIMULATED instant: the sim owns time-of-day, so using the wall
 	// clock here would put the sun in the wrong place for every replay and run.

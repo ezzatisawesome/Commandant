@@ -109,6 +109,7 @@ _POS_IGNORE_BITS = 0b11
 # PX4 message ids not in the default GCS stream; we request them QGC-style.
 MSG_ACTUATOR_OUTPUT_STATUS = mavutil.mavlink.MAVLINK_MSG_ID_ACTUATOR_OUTPUT_STATUS  # 375
 MSG_POSITION_TARGET_GLOBAL_INT = mavutil.mavlink.MAVLINK_MSG_ID_POSITION_TARGET_GLOBAL_INT  # 87
+MSG_WIND_COV = mavutil.mavlink.MAVLINK_MSG_ID_WIND_COV  # 231 — EKF wind estimate
 
 
 def build_command(name: str, args: dict[str, Any]) -> tuple[int, list[float]]:
@@ -336,6 +337,14 @@ JSON_KEYS = {
     "voltage", "current", "batteryRemaining", "armed", "mode",
     "genW", "loadW", "propW", "motorCurrent", "irradiance", "sunEpochMs",
     "targetLat", "targetLon", "targetAlt",
+    # Course over ground, straight from the FDM's inertial velocity. Far better
+    # than differencing position fixes (that path is what fabricated 8.6 m/s of
+    # wind out of GPS noise), so the console prefers it when present.
+    "trackDeg",
+    # The sim's TRUTH wind (NED m/s, direction the air moves toward). Sim-only —
+    # it has no MAVLink carrier — and it exists so the console's own wind estimate
+    # can be CHECKED against the field the aircraft was actually flown in.
+    "windN", "windE", "windD",
 }
 
 
@@ -886,6 +895,23 @@ class Bridge:
                 if msg.hdg != 65535:
                     L["heading"] = msg.hdg / 100.0
 
+                # EKF velocity in NED, cm/s on the wire. These were being thrown
+                # away, and the console was reconstructing a worse version of the
+                # same information by differencing consecutive positions — a 1.3 m
+                # baseline at 10 Hz against 1.5 m of GPS noise. This is the
+                # estimator's own output, derived from Doppler rather than position
+                # differences, so track and groundspeed below are exact rather than
+                # noise-limited.
+                vn, ve, vd = msg.vx / 100.0, msg.vy / 100.0, msg.vz / 100.0
+                L["vn"], L["ve"], L["vd"] = vn, ve, vd
+                # Course over ground, degrees true. atan2(east, north) is the
+                # compass convention; the position-differencing version it replaces
+                # needed a 30 m baseline and smoothing to be usable at all.
+                L["trackDeg"] = (math.degrees(math.atan2(ve, vn)) + 360.0) % 360.0
+                L["groundspeed"] = math.hypot(vn, ve)
+                # Climb rate, positive up (NED down is positive).
+                L["climb"] = -vd
+
             elif t == "ATTITUDE":
                 L["roll"] = msg.roll
                 L["pitch"] = msg.pitch
@@ -925,8 +951,13 @@ class Bridge:
 
             elif t == "VFR_HUD":
                 L["airspeed"] = msg.airspeed
-                L["groundspeed"] = msg.groundspeed
                 L["throttle"] = msg.throttle
+                # Only fill groundspeed/climb if the EKF velocity has not already
+                # (GLOBAL_POSITION_INT is the better source: same estimator, more
+                # precision, and it gives the direction too).
+                if "vn" not in L:
+                    L["groundspeed"] = msg.groundspeed
+                    L["climb"] = msg.climb
                 if L.get("heading") is None:
                     L["heading"] = msg.heading
 
@@ -960,6 +991,26 @@ class Bridge:
                 rem = msg.battery_remaining
                 L["batteryWarning"] = (
                     None if rem < 0 or rem >= 20 else ("critical" if rem < 10 else "low"))
+
+            elif t == "WIND_COV":
+                # PX4's EKF2 estimates wind as part of its state, fusing airspeed
+                # with GPS velocity and a sideslip model, and reports it with
+                # variances. The console used to solve its own wind triangle from
+                # position differences; this is the estimator's answer, which has
+                # strictly more information (and an uncertainty, which a hand-rolled
+                # triangle cannot produce).
+                #
+                # wind_x/y are NED components of the air's motion, i.e. the
+                # direction it blows TOWARD. Aviation reports the direction it
+                # blows FROM, so the bearing is the reciprocal.
+                wx, wy = msg.wind_x, msg.wind_y
+                speed = math.hypot(wx, wy)
+                L["windSpeed"] = speed
+                L["windFromDeg"] = (math.degrees(math.atan2(wy, wx)) + 180.0) % 360.0
+                L["windDown"] = msg.wind_z
+                # Horizontal variance (m/s)^2 -> a 1-sigma figure the UI can show,
+                # so an unreliable estimate can say so instead of being believed.
+                L["windSigma"] = math.sqrt(max(0.0, msg.var_horiz))
 
             elif t == "GPS_RAW_INT":
                 L["gpsFix"] = msg.fix_type
@@ -1117,6 +1168,9 @@ class Bridge:
                 tsys, tcomp = msg.get_srcSystem(), msg.get_srcComponent()
                 if L.get("aileron") is None:
                     self._request_message(conn, tsys, tcomp, MSG_ACTUATOR_OUTPUT_STATUS)
+                if L.get("windSpeed") is None:
+                    # Not in PX4's default GCS stream; ask for it like QGC does.
+                    self._request_message(conn, tsys, tcomp, MSG_WIND_COV)
                 if now - self._last_target_at > TARGET_STALE_MS:
                     self._request_message(conn, tsys, tcomp, MSG_POSITION_TARGET_GLOBAL_INT)
 

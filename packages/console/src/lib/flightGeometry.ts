@@ -52,11 +52,17 @@ export interface Wind {
 	speedMps: number;
 	/** Track minus heading, degrees. Positive = pushed right of the nose. */
 	driftDeg: number;
+	/** 1-sigma horizontal uncertainty from the estimator, m/s, when known. */
+	sigmaMps?: number;
 }
 
 /**
- * Solve the wind triangle from what MAVLink already gives us, so this needs no
- * new telemetry at all.
+ * Solve the wind triangle from heading/airspeed and track/groundspeed.
+ *
+ * NOT used by the app: wind comes from PX4's EKF2 via WIND_COV, which fuses the
+ * same inputs with a sideslip model and reports an uncertainty. This is kept as
+ * a documented fallback for a vehicle that reports no WIND_COV, and because the
+ * identity below is what makes the estimator's output checkable.
  *
  *   ground velocity = air velocity + wind
  *

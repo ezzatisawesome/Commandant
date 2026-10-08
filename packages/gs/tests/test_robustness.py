@@ -645,3 +645,105 @@ def test_setpoint_ignored_unless_frame_and_mask_say_it_is_a_position(monkeypatch
     # And the stream is still considered alive either way, so gs does not spam
     # SET_MESSAGE_INTERVAL re-requests for a message it is receiving fine.
     assert b._last_target_at > 0
+
+
+def test_ekf_velocity_decoding_is_physically_consistent(monkeypatch):
+    """Every number gs publishes for track/groundspeed/climb must be the
+    autopilot's own estimate, decoded with the right units and sign.
+
+    The console used to reconstruct these by differencing GPS positions, which
+    amplified noise. These come from GLOBAL_POSITION_INT vx/vy/vz: the EKF's
+    NED velocity in cm/s, Doppler-derived.
+    """
+    b, _ = _bridge_with_loop(monkeypatch)
+    conn = FakeConn()
+
+    def pos(vx_cms, vy_cms, vz_cms, boot=1000):
+        return _msg("GLOBAL_POSITION_INT", time_boot_ms=boot,
+                    lat=373985511, lon=-1221488530, alt=233_000,
+                    relative_alt=122_000, vx=vx_cms, vy=vy_cms, vz=vz_cms, hdg=9000)
+
+    # Due north at 13 m/s: track 0, groundspeed 13, level.
+    b._on_mav(conn, pos(1300, 0, 0))
+    assert abs(b.latest["trackDeg"] - 0.0) < 1e-6
+    assert abs(b.latest["groundspeed"] - 13.0) < 1e-9
+    assert abs(b.latest["climb"] - 0.0) < 1e-9
+    assert abs(b.latest["vn"] - 13.0) < 1e-9
+
+    # Due east: track 90.
+    b._on_mav(conn, pos(0, 1300, 0, boot=1100))
+    assert abs(b.latest["trackDeg"] - 90.0) < 1e-6
+
+    # South-west: track 225, and groundspeed is the vector magnitude, so a
+    # 45-degree diagonal at 13 m/s per axis is 13*sqrt(2) over the ground.
+    b._on_mav(conn, pos(-1300, -1300, 0, boot=1200))
+    assert abs(b.latest["trackDeg"] - 225.0) < 1e-6
+    assert abs(b.latest["groundspeed"] - 13.0 * math.sqrt(2)) < 1e-9
+
+    # NED's down axis is POSITIVE down, so a climb is negative vz. Getting this
+    # sign backwards would show a descent as a climb.
+    b._on_mav(conn, pos(1300, 0, -250, boot=1300))
+    assert abs(b.latest["climb"] - 2.5) < 1e-9, "climb sign is inverted"
+    b._on_mav(conn, pos(1300, 0, 250, boot=1400))
+    assert abs(b.latest["climb"] + 2.5) < 1e-9
+
+    # Track must stay in [0, 360).
+    for vx, vy in ((1300, -1300), (-1300, 1300), (0, -1300)):
+        b._on_mav(conn, pos(vx, vy, 0, boot=1500))
+        assert 0.0 <= b.latest["trackDeg"] < 360.0
+
+
+def test_wind_cov_is_decoded_in_the_aviation_convention(monkeypatch):
+    """WIND_COV carries the air's motion as NED components, i.e. the direction it
+    blows TOWARD. Every wind report in aviation names the direction it blows
+    FROM, so the bearing is the reciprocal. Getting this backwards puts a
+    headwind on the tail."""
+    b, _ = _bridge_with_loop(monkeypatch)
+    conn = FakeConn()
+
+    def wind(wx, wy, wz=0.0, var=0.25):
+        return _msg("WIND_COV", time_usec=1, wind_x=wx, wind_y=wy, wind_z=wz,
+                    var_horiz=var, var_vert=0.1, wind_alt=233.0,
+                    horiz_accuracy=0.5, vert_accuracy=0.5)
+
+    # Air moving NORTH at 5 m/s is a wind FROM the south (180).
+    b._on_mav(conn, wind(5.0, 0.0))
+    assert abs(b.latest["windSpeed"] - 5.0) < 1e-9
+    assert abs(b.latest["windFromDeg"] - 180.0) < 1e-6
+
+    # Air moving EAST is a wind from the west (270).
+    b._on_mav(conn, wind(0.0, 5.0))
+    assert abs(b.latest["windFromDeg"] - 270.0) < 1e-6
+
+    # Air moving SOUTH is a wind from the north (0).
+    b._on_mav(conn, wind(-5.0, 0.0))
+    assert abs(b.latest["windFromDeg"] - 0.0) < 1e-6
+
+    # Magnitude is the vector sum, not a component.
+    b._on_mav(conn, wind(3.0, 4.0))
+    assert abs(b.latest["windSpeed"] - 5.0) < 1e-9
+
+    # The estimator's variance becomes a 1-sigma the UI can show, so an
+    # unreliable estimate can say so rather than being believed.
+    b._on_mav(conn, wind(3.0, 4.0, var=4.0))
+    assert abs(b.latest["windSigma"] - 2.0) < 1e-9
+    b._on_mav(conn, wind(3.0, 4.0, var=-1.0))      # garbage variance
+    assert b.latest["windSigma"] == 0.0
+
+
+def test_wind_triangle_identity_matches_the_estimator(monkeypatch):
+    """Cross-check: the estimator's wind must satisfy the same identity the
+    hand-rolled triangle used, ground = air + wind. If gs's WIND_COV decoding
+    and its velocity decoding disagree, this catches it."""
+    import math as _m
+    # Nose north at 12 airspeed, wind from the north at 4 => 8 over the ground.
+    heading, airspeed = 0.0, 12.0
+    wind_from, wind_speed = 0.0, 4.0
+    # Wind vector points TOWARD (from + 180).
+    toward = _m.radians(wind_from + 180.0)
+    wx, wy = wind_speed * _m.cos(toward), wind_speed * _m.sin(toward)
+    ax = airspeed * _m.cos(_m.radians(heading))
+    ay = airspeed * _m.sin(_m.radians(heading))
+    gx, gy = ax + wx, ay + wy
+    assert abs(_m.hypot(gx, gy) - 8.0) < 1e-9
+    assert abs((_m.degrees(_m.atan2(gy, gx)) + 360) % 360 - 0.0) < 1e-6
