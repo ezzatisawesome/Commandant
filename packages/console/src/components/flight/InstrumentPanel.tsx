@@ -2,9 +2,8 @@
 
 import { useState } from "react";
 import { useStore } from "@nanostores/react";
-import { ChevronUp, ChevronDown, Settings, ArrowUp, ArrowDown } from "lucide-react";
+import { ArrowUp, ArrowDown } from "lucide-react";
 
-import { $hudFrame } from "@/stores/aircraft.store";
 import { $linkState } from "@/stores/link.store";
 import {
 	$visibleFields, $chartedFields, FIELD_CATALOG,
@@ -12,18 +11,17 @@ import {
 } from "@/stores/displayConfig.store";
 import { telemetryClient } from "@/services/telemetry";
 import { IS_VIEW } from "@/lib/envs";
-import { AttitudeIndicator } from "./AttitudeIndicator";
-import { Compass } from "./Compass";
 import { CommandBar } from "./CommandBar";
 import { HealthStrip } from "./HealthStrip";
 
-// The right rail, reduced to what it should have been: instruments and controls.
+// Vehicle health, the command surface, and the configuration for the bottom
+// strip. Popover content for the dock, so it owns no position and no chrome.
 //
-// All numeric telemetry moved to TelemetryStrip along the bottom edge of the
-// globe. A side panel competes with the map for the widest part of the screen,
-// and the map IS the instrument. What stays here is the attitude/compass pair
-// (spatial, not numeric), vehicle health, the command surface, and the display
-// configuration that drives the bottom strip.
+// A side panel competes with the map for the widest part of the screen, and the
+// map IS the instrument. So numeric telemetry lives along the bottom edge
+// (TelemetryStrip), attitude and heading stay bare on the globe
+// (HeadsUpInstruments), and everything here is one click away rather than always
+// in the way.
 
 const STREAMS: Array<{ id: number; label: string }> = [
 	{ id: 30, label: "ATTITUDE" },
@@ -35,11 +33,9 @@ const STREAMS: Array<{ id: number; label: string }> = [
 ];
 
 export default function InstrumentPanel() {
-	const f = useStore($hudFrame);
 	const linkState = useStore($linkState);
 	const visible = useStore($visibleFields);
 	const charted = useStore($chartedFields);
-	const [collapsed, setCollapsed] = useState(false);
 	const [configOpen, setConfigOpen] = useState(false);
 	const [streamId, setStreamId] = useState(STREAMS[0].id);
 	const [streamHz, setStreamHz] = useState(10);
@@ -47,22 +43,15 @@ export default function InstrumentPanel() {
 	const chartedSet = new Set(charted);
 
 	return (
-		<div className="w-64 rounded-md border border-white/10 bg-black/60 p-3 backdrop-blur">
-			<div className={`flex items-center justify-between ${collapsed ? "" : "mb-2"}`}>
-				<button
-					onClick={() => setCollapsed((c) => !c)}
-					className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-white/50 hover:text-white"
-					title={collapsed ? "Expand instruments" : "Collapse instruments"}
-				>
-					{collapsed ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronUp className="h-3.5 w-3.5" />}
-					Instruments
-				</button>
+		<div className="w-64 text-xs text-white">
+			<div className="mb-2 flex items-center justify-between">
+				<span className="text-[10px] uppercase tracking-wide text-white/50">Instruments</span>
 				<button
 					onClick={() => setConfigOpen((c) => !c)}
-					className={`${configOpen ? "text-white" : "text-white/40"} hover:text-white`}
+					className={`${configOpen ? "text-white" : "text-white/40"} text-[10px] uppercase tracking-wide hover:text-white`}
 					title="Choose which fields show in the bottom strip"
 				>
-					<Settings className="h-3.5 w-3.5" />
+					Fields
 				</button>
 			</div>
 
@@ -125,18 +114,8 @@ export default function InstrumentPanel() {
 				</div>
 			) : null}
 
-			{collapsed ? null : (
-				<>
-					{/* Spatial instruments: these are pictures, not numbers, so they
-					    belong next to the globe rather than in the numeric strip. */}
-					<div className="mb-1 flex items-center justify-center gap-3 py-1">
-						<AttitudeIndicator roll={f?.roll ?? 0} pitch={f?.pitch ?? 0} size={80} />
-						<Compass heading={f?.heading ?? 0} size={80} />
-					</div>
-					<HealthStrip />
-					{IS_VIEW ? null : <CommandBar />}
-				</>
-			)}
+			<HealthStrip />
+			{IS_VIEW ? null : <CommandBar />}
 		</div>
 	);
 }

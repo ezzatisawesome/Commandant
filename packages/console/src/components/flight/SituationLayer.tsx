@@ -4,8 +4,8 @@ import { useEffect } from "react";
 import { useStore } from "@nanostores/react";
 import {
 	ArcType, Cartesian2, Cartesian3, CallbackProperty, CallbackPositionProperty,
-	Cartographic, Color, Entity, HorizontalOrigin, LabelStyle, Math as CesiumMath,
-	NearFarScalar, Transforms, Matrix3, Matrix4, VerticalOrigin,
+	Cartographic, Color, ColorMaterialProperty, Entity, HorizontalOrigin, LabelStyle,
+	Math as CesiumMath, NearFarScalar, Transforms, Matrix3, Matrix4, VerticalOrigin,
 } from "cesium";
 
 import { $viewerStore } from "@/stores/cesium.store";
@@ -114,9 +114,14 @@ export default function SituationLayer() {
 					if (!p || terrain === null || !f || !isNum(f.lat) || !isNum(f.lon)) return undefined;
 					return [p, Cartesian3.fromDegrees(f.lon, f.lat, terrain)];
 				}, false),
-				material: new CallbackProperty(
+				// A polyline's `material` must be a MaterialProperty: Cesium calls
+				// `getType()` on it every frame. A bare CallbackProperty returning a
+				// Color has no such method and throws inside the render loop, which
+				// kills the whole scene. ColorMaterialProperty wraps the callback and
+				// keeps the per-frame colour.
+				material: new ColorMaterialProperty(new CallbackProperty(
 					() => CLEARANCE_COLOR[$derived.get().clearance].withAlpha(0.55), false,
-				) as unknown as Color,
+				)),
 			},
 		}));
 
