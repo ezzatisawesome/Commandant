@@ -5,6 +5,11 @@ Status: **draft** · Last updated: 2026-10-02
 Turning Commandant from an ingest-only telemetry viewer into a real
 QGroundControl-replacement GCS for the solar aircraft.
 
+**Progress (2026-10-06):** checklists below were reconciled against the code —
+22 items were implemented but still showed unticked. What genuinely remains is
+Phase 3 (SIL rehearsal), param snapshots, real-Pi hub validation, one DNS record,
+and Guppi egress. Two Phase 5 items were dropped on purpose, not forgotten.
+
 **Progress (2026-10-03):** Monorepo (`packages/console` + `packages/gs` +
 `packages/cli`), all on `main`. **Phases 0, 1, 2, 4, 5 done** — commands, params,
 health/STATUSTEXT, configurable display, and mission planning, all validated
@@ -14,6 +19,19 @@ was caught and fixed). Hub = `commandant` CLI scaffolded. Geofence + rally, PX4 
 (units/range/validation), and `claim`-confirm authority are done and
 live-validated (fence+rally upload/readback against SITL). **Not yet done:**
 Phase 3 SIL-rehearsal (real-aircraft gate) and real-Pi hub validation.
+
+**Hardening pass (2026-10-05):** transport-chain audit + fixes, both ends.
+gs: handler exceptions can no longer kill the mav thread; serial/TCP links reopen
+with backoff; vehicle sysid/compid lock-on (foreign heartbeats ignored); PX4
+byte-wise INT param encoding (INT32 values were displayed/written as garbage);
+NaN-safe JSON; `params` batching; bounded param refresh with a `done`/`error`
+marker; prompt failure on rejected PARAM_SET and mission-download NAK;
+IN_PROGRESS acks relayed; malformed WS messages acked, not fatal. Console: null
+fields can't crash the HUD (error boundaries per panel); HUD renders at 10 Hz off
+a throttled store; trails decimated + `ArcType.NONE`; marker drags no longer
+rebuild entities; fences clamp to terrain; unknown WS types dropped; reconnect
+with backoff that keeps the trail; empty param field can't write 0. Tests: 46
+daemon (pytest, fake-PX4 + unit), 10 relay, 39 console (vitest).
 
 ## Scope boundary (the two-plane rule)
 
@@ -140,7 +158,7 @@ bridge (`src/lib/bridge/bridge.ts`) is RX-only and lives inside Next.
       disabled (`instrumentation.ts` is a no-op).
 - [x] **Link manager.** connecting/alive(<2s)/stale(<5s)/lost; `linkState` on
       every frame + `link` on transitions; console indicator + auto-reconnect.
-- [ ] **Transport abstraction.** UDP today; interface ready for TCP/serial so
+- [x] **Transport abstraction.** UDP today; interface ready for TCP/serial so
       real-radio is a config change, not a rewrite. Multi-endpoint capable.
       *(still pending — the one unticked foundation item.)*
 - [x] **Command ACK tracking.** `COMMAND_LONG` for arm/disarm/set_mode; 3 tries
@@ -158,19 +176,19 @@ bridge (`src/lib/bridge/bridge.ts`) is RX-only and lives inside Next.
 
 Control verbs. Small, high-value, and the prerequisite for missions.
 
-- [ ] Arm / disarm — `MAV_CMD_COMPONENT_ARM_DISARM` via `COMMAND_LONG`. (Reuse
+- [x] Arm / disarm — `MAV_CMD_COMPONENT_ARM_DISARM` via `COMMAND_LONG`. (Reuse
       `mavlink_io.py`.)
-- [ ] Set flight mode (Manual / Stabilized / Auto / Loiter / RTL / Offboard) —
+- [x] Set flight mode (Manual / Stabilized / Auto / Loiter / RTL / Offboard) —
       `SET_MODE` / `COMMAND_LONG`. Reuse mode decode already in `bridge.ts`.
-- [ ] Takeoff / Land / RTL / Hold buttons — `MAV_CMD_NAV_TAKEOFF` / `_LAND` /
+- [x] Takeoff / Land / RTL / Hold buttons — `MAV_CMD_NAV_TAKEOFF` / `_LAND` /
       `_RETURN_TO_LAUNCH` / `_LOITER_UNLIM`.
-- [ ] "Fly to here" — click globe → guided reposition (`MAV_CMD_DO_REPOSITION`).
+- [x] "Fly to here" — click globe → guided reposition (`MAV_CMD_DO_REPOSITION`).
       Note: on PX4 **fixed-wing** this is loiter-at-point, not a quad-style goto —
       build the UI/expectation accordingly.
-- [ ] Command UI: action bar + confirm-on-dangerous, ACK/failure feedback,
+- [x] Command UI: action bar + confirm-on-dangerous, ACK/failure feedback,
       disabled states driven by link + armed + mode.
-- [ ] `STATUSTEXT` log panel — surface PX4 warnings/errors/failsafe to the operator.
-- [ ] Health/status: EKF, GPS fix + sats, battery warning, failsafe state —
+- [x] `STATUSTEXT` log panel — surface PX4 warnings/errors/failsafe to the operator.
+- [x] Health/status: EKF, GPS fix + sats, battery warning, failsafe state —
       ingest `SYS_STATUS`, `GPS_RAW_INT`, `EKF_STATUS_REPORT`.
 
 ## Phase 2 — PX4 parameters (view + edit live)
@@ -178,18 +196,19 @@ Control verbs. Small, high-value, and the prerequisite for missions.
 "View PX4 variables and edit them on the fly." Turns the read-only
 `/api/airframe` panel into a live, writable editor.
 
-- [ ] Fetch full param set — `PARAM_REQUEST_LIST` → stream of `PARAM_VALUE`;
+- [x] Fetch full param set — `PARAM_REQUEST_LIST` → stream of `PARAM_VALUE`;
       hand-roll the missing-param / re-request sync robustly (index/count
       tracking, timeout, retransmit). Tested against SITL.
-- [ ] Searchable, filterable param table: name, value, type, units/min/max/desc.
+- [x] Searchable, filterable param table: name, value, type, units/min/max/desc.
       Metadata (units/min/max/description) is **not** on the MAVLink wire — source
       it from PX4's bundled `parameters.json`. Decide: bundle it, or ship
       value-only first.
-- [ ] Edit + write live — `PARAM_SET`, confirm via echoed `PARAM_VALUE`; dirty
+- [x] Edit + write live — `PARAM_SET`, confirm via echoed `PARAM_VALUE`; dirty
       indicators; reject/rollback on mismatch.
-- [ ] Diff vs airframe defaults (reuse the airframe init script already read via
+- [x] Diff vs airframe defaults (reuse the airframe init script already read via
       `/api/airframe`); highlight changed-from-default.
 - [ ] Param snapshots: save / load / compare sets to file (local persistence).
+      The only Phase 2 item not built.
 
 ## Phase 3 — SIL-rehearsal gateway
 
@@ -209,34 +228,113 @@ phase; the Phase 1/2 verbs (and Phase 4 missions) register with it.
 
 Create, edit, upload, and watch missions execute. All Commandant.
 
-- [ ] Waypoint authoring on the Cesium globe: click-to-add, drag-to-move.
-- [ ] Waypoint table: lat/lon/alt/speed/loiter; reorder; delete; per-item type
+- [x] Waypoint authoring on the Cesium globe: click-to-add, drag-to-move.
+- [x] Waypoint table: lat/lon/alt/speed/loiter; reorder; delete; per-item type
       (takeoff, waypoint, loiter time/turns/unlim, RTL, land) via
       `MISSION_ITEM_INT` frame/command fields.
-- [ ] **Upload** — hand-rolled `MISSION_COUNT` → `MISSION_REQUEST_INT` →
+- [x] **Upload** — hand-rolled `MISSION_COUNT` → `MISSION_REQUEST_INT` →
       `MISSION_ITEM_INT` → `MISSION_ACK` handshake (out-of-order requests,
       re-request, timeout, NAK decode). The most error-prone protocol; heaviest
       test coverage, and it routes through SIL-rehearsal.
-- [ ] **Download / read back** current mission — `MISSION_REQUEST_LIST`.
-- [ ] Live progress: highlight current item, distance-to-next —
+- [x] **Download / read back** current mission — `MISSION_REQUEST_LIST`.
+- [x] Live progress: highlight current item, distance-to-next —
       `MISSION_CURRENT`, `MISSION_ITEM_REACHED`. (Setpoint trail already exists.)
-- [ ] Edit mid-flight & re-upload without full restart; set-current item.
-- [ ] Later: geofence + rally points (`MAV_MISSION_TYPE_FENCE` / `_RALLY`).
+- [x] Edit mid-flight & re-upload without full restart; set-current item.
+- [x] Later: geofence + rally points (`MAV_MISSION_TYPE_FENCE` / `_RALLY`).
 
 ## Phase 5 — Configurable display
 
 "Seeing data and adjusting what's shown." Pure viewer-side, no control stakes.
 The solar/power/MPPT dashboard already exists; this generalizes the rest.
 
-- [ ] Add/remove/reorder HUD panels & fields (extends `FlightHUD.tsx` + store).
-- [ ] Chart any telemetry field, not a fixed set — generalize the `series()`
+- [x] Add/remove/reorder HUD panels & fields (extends `FlightHUD.tsx` + store).
+- [x] Chart any telemetry field, not a fixed set — generalize the `series()`
       sparkline helper over the whole frame.
-- [ ] On-demand stream control: turn MAVLink messages on/off and set rate from
+- [x] On-demand stream control: turn MAVLink messages on/off and set rate from
       the UI — generalize the existing `SET_MESSAGE_INTERVAL` TX.
-- [ ] Multi-plot, time-window select, pause-and-scrub (extend history store).
-- [ ] Layout presets (flight-test / power-debug / mission view), persisted.
+- [~] ~~Multi-plot, time-window select, pause-and-scrub~~ — **dropped.** This is
+      Guppi's viewer rebuilt worse; see the scope boundary below. The cockpit
+      keeps a fixed set of flight instruments so it stays fully useful with
+      Guppi unreachable, and stops there.
+- [~] ~~Layout presets (flight-test / power-debug / mission view)~~ — **dropped**,
+      same reason. Show/hide/reorder and the per-field chart toggle stay; they
+      are persisted per viewer in localStorage.
 
 ---
+
+## Phase 6 — hosted viewer (commandant.guppidev.com)
+
+Public, read-only visibility into a live flight. Flight **history** is Guppi's,
+not Commandant's: Guppi is the data plane and already has the viewer for it, so
+this phase deliberately ships no replay, no flight index and no archive UI.
+
+- [x] `packages/relay` — outbound-only websocket relay; token to publish, open to
+      watch; retains current state for instant page loads; tells viewers when the
+      hub vanishes. Read-only by construction (viewer sockets are never read).
+- [x] `gs --relay` — outbound publisher, 5 Hz, latest-wins queue, jittered
+      reconnect. Cannot block the 25 Hz loop or grow unbounded.
+- [x] Console `NEXT_PUBLIC_MODE=view` — relay endpoint, no command bar, no
+      authoring, no param writes, and a transmit chokepoint that refuses to send.
+- [x] **Deployed.** Relay on Fly (`commandant-relay.fly.dev`, token as a secret,
+      one always-on machine); console on Vercel from the root `vercel.json`.
+      Verified end to end over the public internet, including that an anonymous
+      publish is refused and a viewer's `arm` reaches nothing. See
+      [`hosting.md`](hosting.md).
+- [ ] **DNS.** `commandant.guppidev.com` is attached to the Vercel project and
+      needs one A record (`commandant` → `76.76.21.21`) at Namecheap. Note
+      `guppi.com` is not ours — registered 1999, GoDaddy — hence `guppidev.com`.
+- [ ] Guppi egress from the hub, so flights land in Guppi's store and viewer.
+
+**Found while deploying** (would have bitten the hub too, not just the host):
+`cesium` had a caret range and had resolved to 1.146, whose wasm-bindgen glue the
+production minifier rewrites into a template literal with octal escapes. The
+bundle then fails to parse and the page never mounts. Dev builds are unminified,
+so only a real deployment surfaced it. Cesium is pinned to 1.128.0 and
+`@zip.js/zip.js` held on 2.7.73; every build now runs `node --check` over all
+emitted chunks. Do not widen either pin without loading a production build in a
+browser.
+
+## Scope boundary amendment — authority follows vehicle STATE
+
+The original rule ("does it change how it flies?") cannot answer where an MPPT
+toggle belongs. The rule is now:
+
+- **On the bench / HITL** the power system is a component under test. **Guppi has
+  full authority** over MPPTs, switches, loads and power-firmware params.
+- **In flight** every power action is a flight action (the power system feeds
+  propulsion and avionics), and there is no NATS link to an airborne aircraft at
+  all. **Commandant has sole authority**, and any in-flight power verb is a
+  MAVLink-side Commandant verb under the claim and the SIL-rehearsal gate.
+- Guppi is **the data plane**: all flight telemetry and history land there.
+  Commandant publishes outbound and subscribes to nothing.
+
+Consequence for Phase 5: generic charting (chart-any-field, multi-plot,
+time-window scrub, layout presets) is Guppi's viewer rebuilt worse. Commandant
+keeps a fixed set of flight instruments and stops there, so the cockpit stays
+fully useful with Guppi unreachable.
+
+Open: PX4 does not model the MPPTs, so an in-flight power verb needs either
+custom MAVLink through the autopilot or a companion relaying DroneCAN. Undecided.
+
+## Known issue — PX4 SITL stalls on long flights (open)
+
+Observed three times in one afternoon, at roughly 1 h, 2.5 h and 41 min. PX4
+logs `ERROR [simulator_mavlink] poll timeout` once and its simulated clock never
+advances again. Nothing crashes; both PX4 and the JSBSim bridge spin at full CPU,
+so process-level health checks report healthy while the aircraft is frozen.
+
+Mitigations applied (AircraftSim): the container CPU cap was raised from 2 to 4,
+and the bridge's `enable_lockstep` can now be turned off per rig so the bridge
+never blocks on PX4. **Neither is a cure** — the 41-minute freeze happened with
+lockstep already disabled, because `px4_sitl_default` is still compiled with
+`ENABLE_LOCKSTEP_SCHEDULER=yes` and PX4's clock still comes from sensor
+timestamps. A real fix means rebuilding PX4 without the lockstep scheduler.
+
+What Commandant contributes, and why this is in *this* roadmap: gs now reports
+the failure instead of hiding it. Link health is attributed per source, so the
+sim's JSON feed can no longer vouch for a dead autopilot, and every frame carries
+`dataAgeMs`. The console shows a red `stale Ns` badge past 3 s. Before that fix
+the console reported `alive` for an hour while redrawing one frozen position.
 
 ## Deferred (post-MVP)
 

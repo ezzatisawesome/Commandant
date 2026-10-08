@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "@nanostores/react";
 
-import { $params, $paramProgress } from "@/stores/params.store";
+import { $params, $paramProgress, $paramError, upsertParam } from "@/stores/params.store";
 import { $linkState } from "@/stores/link.store";
 import { telemetryClient } from "@/services/telemetry";
-import { loadParamMeta, lookupMeta, validateParam, type ParamMeta } from "@/lib/paramMeta";
+import { loadParamMeta, lookupMeta, parseParamInput, validateParam, type ParamMeta } from "@/lib/paramMeta";
 import { Button } from "@/components/ui/button";
 
 // Parse `param set-default NAME VALUE` out of the airframe init script so we can
@@ -35,6 +35,7 @@ export default function ParamEditor() {
 	const [open, setOpen] = useState(false);
 	const params = useStore($params);
 	const progress = useStore($paramProgress);
+	const paramError = useStore($paramError);
 	const linkState = useStore($linkState);
 	const live = linkState === "alive";
 
@@ -44,10 +45,13 @@ export default function ParamEditor() {
 	const [defaults, setDefaults] = useState<Record<string, number>>({});
 	const [meta, setMeta] = useState<Record<string, ParamMeta>>({});
 
-	// On first open, pull the full list, load the airframe defaults for diffing, and
-	// load the bundled PX4 param metadata (units / range / help).
+	// On FIRST open, pull the full list (a ~1000-param download over the radio —
+	// not something to repeat on every show/hide; the Refresh button is explicit),
+	// load the airframe defaults for diffing, and the bundled PX4 param metadata.
+	const fetchedOnce = useRef(false);
 	useEffect(() => {
-		if (!open) return;
+		if (!open || fetchedOnce.current) return;
+		fetchedOnce.current = true;
 		telemetryClient.refreshParams();
 		loadParamMeta().then(setMeta).catch(() => { /* metadata is optional */ });
 		fetch("/api/airframe")
@@ -67,15 +71,15 @@ export default function ParamEditor() {
 
 	async function commit(name: string, ptype: number) {
 		const raw = edits[name];
-		if (raw === undefined) return;
-		const value = Number(raw);
+		if (raw === undefined || !live) return;
+		const value = parseParamInput(raw);
 		if (!Number.isFinite(value)) {
-			setRowStatus((s) => ({ ...s, [name]: { ok: false, text: "NaN" } }));
+			setRowStatus((s) => ({ ...s, [name]: { ok: false, text: "not a number" } }));
 			return;
 		}
 		// Range/type-check against the bundled metadata before writing; a bad value
 		// never leaves the console.
-		const invalid = validateParam(lookupMeta(meta, name), value);
+		const invalid = validateParam(lookupMeta(meta, name), value, ptype);
 		if (invalid) {
 			setRowStatus((s) => ({ ...s, [name]: { ok: false, text: invalid } }));
 			return;
@@ -83,7 +87,12 @@ export default function ParamEditor() {
 		try {
 			const ack = await telemetryClient.setParam(name, value, ptype);
 			setRowStatus((s) => ({ ...s, [name]: { ok: ack.ok, text: ack.text || (ack.ok ? "set" : "rejected") } }));
-			if (ack.ok) setEdits((e) => { const n = { ...e }; delete n[name]; return n; });
+			if (ack.ok) {
+				setEdits((e) => { const n = { ...e }; delete n[name]; return n; });
+				// Reflect the confirmed value even if the echo broadcast was missed.
+				const cur = $params.get()[name];
+				if (cur) upsertParam({ ...cur, value: ack.value });
+			}
 		} catch (err) {
 			setRowStatus((s) => ({ ...s, [name]: { ok: false, text: err instanceof Error ? err.message : "failed" } }));
 		}
@@ -112,6 +121,11 @@ export default function ParamEditor() {
 						</div>
 					</div>
 
+					{paramError ? (
+						<div className="px-3 pt-2 text-[10px] text-amber-400">
+							refresh incomplete ({paramError}) — {total} of the list loaded; retry when the link is alive
+						</div>
+					) : null}
 					{/* Download progress while the list streams in. */}
 					{progress ? (
 						<div className="px-3 pt-2">
@@ -151,7 +165,7 @@ export default function ParamEditor() {
 								// Live range check on the in-progress edit, so an out-of-range
 								// value is flagged before Set is pressed.
 								const liveErr = editing
-									? validateParam(md, Number(edits[p.name])) : null;
+									? validateParam(md, parseParamInput(edits[p.name]), p.ptype) : null;
 								return (
 									<div key={p.name} className="flex items-center gap-2 border-b border-white/5 py-1">
 										<span className="flex-1 truncate text-sky-300" title={title}>

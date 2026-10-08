@@ -50,7 +50,32 @@ export interface TelemetryFrame {
     targetLon?: number,     // deg
     targetAlt?: number,     // m (frame-dependent; horizontal path is the useful part)
     connected: boolean,     // bridge <-> MAVLink link alive
-    linkState?: LinkState,  // richer link state (connected == linkState === "alive")
+    linkState?: LinkState,
+    // Age of the newest VEHICLE data in ms (null before any arrives). A live
+    // frame with a large dataAgeMs means gs is re-serving a stale fix, which is
+    // what a frozen simulator or a dead autopilot looks like from here.
+    dataAgeMs?: number | null,
+
+    // --- straight from the autopilot's estimator, not reconstructed here -----
+    // EKF velocity in NED (m/s), from GLOBAL_POSITION_INT vx/vy/vz. Doppler
+    // derived, so far more accurate than differencing positions.
+    vn?: number,
+    ve?: number,
+    vd?: number,
+    /** Course over ground, deg true — atan2(ve, vn) computed in gs. */
+    trackDeg?: number,
+    /** Climb rate, m/s positive up. */
+    climb?: number,
+    // PX4 EKF2's own wind estimate (WIND_COV). Absent until the estimator has
+    // one, which needs an airspeed sensor and some flight time.
+    /** Wind speed, m/s. */
+    windSpeed?: number,
+    /** Direction the wind blows FROM, deg true. */
+    windFromDeg?: number,
+    /** Vertical wind component, m/s. */
+    windDown?: number,
+    /** 1-sigma horizontal uncertainty of the wind estimate, m/s. */
+    windSigma?: number,  // richer link state (connected == linkState === "alive")
     // Health / status (see docs/ws-contract.md), merged into the frame by gs.
     ekfOk?: boolean,        // EKF_STATUS_REPORT flags nominal
     gpsFix?: number,        // GPS_RAW_INT.fix_type (0 none … 3 3D … 6 RTK-fixed)
@@ -149,6 +174,8 @@ export type ClientMessage =
 // gs -> console
 export interface TelemetryMessage extends TelemetryFrame { type: "telemetry" }
 export interface AckMessage {
+    // false = interim MAV_RESULT_IN_PROGRESS notice; the final ack follows (≤15 s).
+    final?: boolean,
     type: "ack",
     id: string,             // matches the CommandMessage.id
     ok: boolean,            // convenience: result === 0 (ACCEPTED) or a local accept
@@ -170,10 +197,17 @@ export interface ParamValueMessage {
     index: number,          // position in the full list
     count: number,          // total params (for progress)
 }
+// gs coalesces the PARAM_VALUE stream into batches (one WS message per ~50 ms).
+export interface ParamsBatchMessage {
+    type: "params",
+    items: ParamValueMessage[],
+}
 export interface ParamProgressMessage {
     type: "param_progress",
     received: number,
     count: number,
+    done?: boolean,         // refresh finished (all values received, or given up)
+    error?: string,         // set with `done` when gs gave up (e.g. "timeout")
 }
 export interface ParamAckMessage {
     type: "param_ack",
@@ -208,7 +242,7 @@ export interface RallyAckMessage { type: "rally_ack", id: string, ok: boolean, r
 
 export type ServerMessage =
     | TelemetryMessage | AckMessage | LinkMessage | StatusTextMessage
-    | ParamValueMessage | ParamProgressMessage | ParamAckMessage
+    | ParamValueMessage | ParamsBatchMessage | ParamProgressMessage | ParamAckMessage
     | MissionMessage | MissionProgressMessage | MissionAckMessage
     | MissionCurrentMessage | MissionReachedMessage
     | FenceMessage | RallyMessage | FenceAckMessage | RallyAckMessage;

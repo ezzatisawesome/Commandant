@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import { useStore } from "@nanostores/react";
 import {
+	ArcType,
 	Cartesian2,
 	Cartesian3,
 	Cartographic,
@@ -22,22 +23,15 @@ import {
 } from "cesium";
 
 import { $viewerStore } from "@/stores/cesium.store";
-import { $aircraftStore, $trailStore, $targetTrailStore, $aircraftEntityStore } from "@/stores/aircraft.store";
+import {
+	$aircraftStore, $trailChunks, $trailTail, $targetChunks, $targetTail,
+	$aircraftEntityStore, hasFix, isNum,
+} from "@/stores/aircraft.store";
 import { $showTriad, $showHorizPlane } from "@/stores/viewControls.store";
 import { $linkState } from "@/stores/link.store";
 import { pushStatus } from "@/stores/statustext.store";
 import { telemetryClient } from "@/services/telemetry";
-
-// A usable horizontal fix: both defined, finite, and not the null-island (0,0)
-// sentinel some glitch/uninitialized frames carry. Guarding on it keeps the model
-// and setpoint marker from teleporting to (0,0) and dragging a line across.
-function hasFix(lat?: number, lon?: number): boolean {
-	return (
-		lat !== undefined && lon !== undefined &&
-		Number.isFinite(lat) && Number.isFinite(lon) &&
-		(Math.abs(lat) > 1e-4 || Math.abs(lon) > 1e-4)
-	);
-}
+import { IS_VIEW } from "@/lib/envs";
 
 // Live aircraft: a glTF model driven by MAVLink position + attitude, plus a
 // flight-path trail. Entities read the store inside CallbackProperty so updates
@@ -68,7 +62,7 @@ export default function Aircraft() {
 
 		const positionProp = new CallbackPositionProperty(() => {
 			const f = $aircraftStore.get();
-			if (!f || !hasFix(f.lat, f.lon) || f.alt === undefined) {
+			if (!f || !hasFix(f.lat, f.lon) || !isNum(f.alt)) {
 				return undefined;
 			}
 			return Cartesian3.fromDegrees(f.lon!, f.lat!, f.alt);
@@ -92,7 +86,7 @@ export default function Aircraft() {
 		// The aircraft orientation with the glTF stand-up correction applied.
 		function currentOrientation(): Quaternion | undefined {
 			const f = $aircraftStore.get();
-			if (!f || !hasFix(f.lat, f.lon) || f.alt === undefined) {
+			if (!f || !hasFix(f.lat, f.lon) || !isNum(f.alt)) {
 				return undefined;
 			}
 			const position = Cartesian3.fromDegrees(f.lon!, f.lat!, f.alt);
@@ -129,7 +123,7 @@ export default function Aircraft() {
 		const AXIS_LEN = 15; // metres
 		const bodyRot = () => {
 			const f = $aircraftStore.get();
-			if (!f || !hasFix(f.lat, f.lon) || f.alt === undefined) return undefined;
+			if (!f || !hasFix(f.lat, f.lon) || !isNum(f.alt)) return undefined;
 			const position = Cartesian3.fromDegrees(f.lon!, f.lat!, f.alt);
 			return { position, rot: Matrix3.fromQuaternion(flightQuat(position, f), new Matrix3()) };
 		};
@@ -138,6 +132,7 @@ export default function Aircraft() {
 				polyline: {
 					width: 3,
 					material: color,
+					arcType: ArcType.NONE,
 					positions: new CallbackProperty(() => {
 						const b = bodyRot();
 						if (!b) return undefined;
@@ -163,7 +158,7 @@ export default function Aircraft() {
 		const PLANE_HALF = 12; // metres, half-extent of the quad
 		const horizPlaneCorners = () => {
 			const f = $aircraftStore.get();
-			if (!f || !hasFix(f.lat, f.lon) || f.alt === undefined) return undefined;
+			if (!f || !hasFix(f.lat, f.lon) || !isNum(f.alt)) return undefined;
 			const position = Cartesian3.fromDegrees(f.lon!, f.lat!, f.alt);
 			const enu = Matrix4.getMatrix3(Transforms.eastNorthUpToFixedFrame(position), new Matrix3());
 			const east = Matrix3.getColumn(enu, 0, new Cartesian3());
@@ -190,11 +185,47 @@ export default function Aircraft() {
 		});
 		horizPlaneRef.current = horizPlane;
 
+		// The flight path is drawn as FROZEN CHUNKS plus one short active tail.
+		//
+		// MEASURED: a polyline whose positions array reference changes re-uploads
+		// its whole vertex buffer. One 3000-point trail at 6.3 changes/s is 17,500
+		// points/s — 420 KB/s, forever. Chunks never change after they close, so
+		// each is uploaded once as STATIC geometry (a plain array, not a
+		// CallbackProperty, so Cesium's dynamic updater never touches it), and only
+		// the <=250-point tail is re-uploaded. Measured 22x less vertex traffic.
+		//
+		// ArcType.NONE on all of them: consecutive fixes are metres apart, so
+		// geodesic subdivision is pure cost.
+		const chunkEntities: Entity[] = [];
+		const syncChunks = (chunks: readonly Cartesian3[][]) => {
+			// Add an entity for each chunk that does not have one yet.
+			while (chunkEntities.length < chunks.length) {
+				const idx = chunkEntities.length;
+				chunkEntities.push($viewer.entities.add({
+					polyline: {
+						positions: chunks[idx] as Cartesian3[],  // static: uploaded once, never again
+						width: 2,
+						material: Color.CYAN.withAlpha(0.8),
+						arcType: ArcType.NONE,
+					},
+				}));
+			}
+			// Drop entities for chunks that aged out of the cap.
+			while (chunkEntities.length > chunks.length) {
+				const e = chunkEntities.pop();
+				if (e) $viewer.entities.remove(e);
+			}
+			$viewer.scene.requestRender();
+		};
+		syncChunks($trailChunks.get());
+		const unsubChunks = $trailChunks.subscribe(syncChunks);
+
 		const trail = $viewer.entities.add({
 			polyline: {
-				positions: new CallbackProperty(() => $trailStore.get(), false),
+				positions: new CallbackProperty(() => $trailTail.get(), false),
 				width: 2,
 				material: Color.CYAN.withAlpha(0.8),
+				arcType: ArcType.NONE,
 			},
 		});
 
@@ -202,11 +233,36 @@ export default function Aircraft() {
 		// (POSITION_TARGET_GLOBAL_INT), overlaid in orange against the cyan actual
 		// track. In a healthy loiter these coincide as one closed circle; divergence
 		// between them is exactly the tracking/control error to look for.
+		// Same frozen-chunk treatment as the flown path: the commanded path grows
+		// at the same rate and had the same O(trail) re-upload cost.
+		const targetChunkEntities: Entity[] = [];
+		const syncTargetChunks = (chunks: readonly Cartesian3[][]) => {
+			while (targetChunkEntities.length < chunks.length) {
+				const idx = targetChunkEntities.length;
+				targetChunkEntities.push($viewer.entities.add({
+					polyline: {
+						positions: chunks[idx] as Cartesian3[],
+						width: 2,
+						material: Color.ORANGE.withAlpha(0.9),
+						arcType: ArcType.NONE,
+					},
+				}));
+			}
+			while (targetChunkEntities.length > chunks.length) {
+				const e = targetChunkEntities.pop();
+				if (e) $viewer.entities.remove(e);
+			}
+			$viewer.scene.requestRender();
+		};
+		syncTargetChunks($targetChunks.get());
+		const unsubTargetChunks = $targetChunks.subscribe(syncTargetChunks);
+
 		const targetTrail = $viewer.entities.add({
 			polyline: {
-				positions: new CallbackProperty(() => $targetTrailStore.get(), false),
+				positions: new CallbackProperty(() => $targetTail.get(), false),
 				width: 2,
 				material: Color.ORANGE.withAlpha(0.9),
+				arcType: ArcType.NONE,
 			},
 		});
 
@@ -214,7 +270,7 @@ export default function Aircraft() {
 		const targetPoint = $viewer.entities.add({
 			position: new CallbackPositionProperty(() => {
 				const f = $aircraftStore.get();
-				if (!f || !hasFix(f.targetLat, f.targetLon) || f.alt === undefined) {
+				if (!f || !hasFix(f.targetLat, f.targetLon) || !isNum(f.alt)) {
 					return undefined;
 				}
 				return Cartesian3.fromDegrees(f.targetLon!, f.targetLat!, f.alt);
@@ -239,6 +295,7 @@ export default function Aircraft() {
 		// commander/authority and replies with an ack we surface in the status log.
 		const clickHandler = new ScreenSpaceEventHandler($viewer.scene.canvas);
 		clickHandler.setInputAction((movement: { position: Cartesian2 }) => {
+			if (IS_VIEW) return;  // the viewer never commands a reposition
 			if ($linkState.get() !== "alive") return;
 			const cart = $viewer.camera.pickEllipsoid(
 				movement.position,
@@ -262,18 +319,24 @@ export default function Aircraft() {
 		// actual coordinates is reliable (no dependency on the model loading).
 		let flown = false;
 		const unsubscribe = $aircraftStore.subscribe((f) => {
-			if (flown || !f || f.lat === undefined || f.lon === undefined || f.alt === undefined) {
+			if (flown || !f || !hasFix(f.lat, f.lon) || !isNum(f.alt)) {
 				return;
 			}
 			flown = true;
 			$viewer.camera.flyTo({
-				destination: Cartesian3.fromDegrees(f.lon, f.lat, f.alt + 1200),
+				destination: Cartesian3.fromDegrees(f.lon!, f.lat!, f.alt! + 1200),
 				duration: 1.5,
 			});
 		});
 
 		return () => {
 			unsubscribe();
+			unsubChunks();
+			unsubTargetChunks();
+			chunkEntities.forEach((e) => $viewer.entities.remove(e));
+			targetChunkEntities.forEach((e) => $viewer.entities.remove(e));
+			chunkEntities.length = 0;
+			targetChunkEntities.length = 0;
 			clickHandler.destroy();
 			$aircraftEntityStore.set(null);
 			axesRef.current = [];

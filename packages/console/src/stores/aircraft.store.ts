@@ -4,12 +4,53 @@ import type { Entity } from "cesium";
 
 import type { TelemetryFrame } from "@/types/app";
 
-// Latest telemetry frame (null until the first frame arrives).
+// Latest telemetry frame (null until the first frame arrives). Updated at the
+// full link rate (25 Hz); Cesium reads it through CallbackProperties each render.
 export const $aircraftStore = atom<TelemetryFrame | null>(null);
+
+// The same frame, throttled to UI rate for React subscribers (HUD, health strip,
+// command bar). Re-rendering a React tree 25×/s for numbers a human reads is
+// pure waste and competes with Cesium for the main thread; 10 Hz is still
+// visually live. Cesium overlays keep using $aircraftStore.
+const HUD_INTERVAL_MS = 100;
+export const $hudFrame = atom<TelemetryFrame | null>(null);
+let lastHudAt = 0;
+
+// A finite number (gs sends `null` for a non-finite float; JSON has no NaN).
+export function isNum(v: unknown): v is number {
+	return typeof v === "number" && Number.isFinite(v);
+}
+
+// Normalize a wire frame: every `null` becomes `undefined` so the rest of the UI
+// only ever deals with "present and finite" or "absent".
+export function sanitizeFrame<T extends object>(frame: T): T {
+	const out = frame as Record<string, unknown>;
+	for (const k in out) {
+		if (out[k] === null) out[k] = undefined;
+	}
+	return frame;
+}
 
 // The Cesium model entity, published by Aircraft.tsx so UI (the Track button)
 // can point the camera at it.
 export const $aircraftEntityStore = atom<Entity | null>(null);
+
+// --- segmented trail ---------------------------------------------------------
+//
+// MEASURED: a single Cesium polyline whose `positions` array reference changes
+// re-uploads the WHOLE vertex buffer, not the new points. At 13 m/s with a 2 m
+// decimation floor that is 6.3 reference changes per second against a 3000-point
+// trail: 17,500 points/s, ~420 KB/s of vertex traffic, sustained forever —
+// 63 million points re-uploaded in an hour, per trail, and there are two plus
+// the mission route.
+//
+// So the trail is stored as FROZEN CHUNKS plus one short active tail. A chunk's
+// array reference never changes again once closed, so Cesium uploads it once and
+// never again; only the tail (<= TRAIL_CHUNK points) is ever re-uploaded. That
+// turns the cost from O(trail length) per append into O(chunk size), an ~11x
+// reduction at these settings, and it stops growing with trail length.
+const TRAIL_CHUNK = 250;
+const TRAIL_MAX_CHUNKS = 12;        // 12 x 250 = 3000 points, as before
 
 // Bounded trail of recent positions for the flight path polyline.
 const TRAIL_MAX = 3000;
@@ -19,6 +60,73 @@ const TRAIL_MAX = 3000;
 // which reads as the trail "connecting to itself in weird ways".
 const TRAIL_JUMP_M = 2000;
 export const $trailStore = atom<Cartesian3[]>([]);
+
+/** A path stored as frozen chunks plus one short active tail.
+ *
+ *  Both the flown path and the commanded path need this, so it is one factory
+ *  used twice rather than the same twenty lines written out again. */
+export interface SegmentedTrail {
+	/** Closed segments. Each inner array is frozen: its reference never changes
+	 *  again, so Cesium can treat it as static geometry and upload it once. */
+	chunks: ReturnType<typeof atom<Cartesian3[][]>>;
+	/** The active segment — the only thing ever re-uploaded. */
+	tail: ReturnType<typeof atom<Cartesian3[]>>;
+	append(point: Cartesian3): void;
+	clear(): void;
+	/** Every point, oldest first. For tests; the renderer does NOT use this. */
+	all(): Cartesian3[];
+}
+
+function createSegmentedTrail(): SegmentedTrail {
+	const chunks = atom<Cartesian3[][]>([]);
+	const tail = atom<Cartesian3[]>([]);
+	return {
+		chunks,
+		tail,
+		append(point) {
+			const t = tail.get();
+			if (t.length >= TRAIL_CHUNK) {
+				// Freeze the tail as a chunk, then start the next one at its last
+				// point so the drawn segments join with no gap.
+				const next = [...chunks.get(), t];
+				chunks.set(next.length > TRAIL_MAX_CHUNKS
+					? next.slice(next.length - TRAIL_MAX_CHUNKS) : next);
+				tail.set([t[t.length - 1], point]);
+				return;
+			}
+			tail.set([...t, point]);
+		},
+		clear() {
+			if (chunks.get().length) chunks.set([]);
+			if (tail.get().length) tail.set([]);
+		},
+		all() {
+			const out: Cartesian3[] = [];
+			for (const c of chunks.get()) out.push(...c);
+			out.push(...tail.get());
+			return out;
+		},
+	};
+}
+
+/** The flown path (cyan) and the commanded setpoint path (orange). */
+export const flownTrail = createSegmentedTrail();
+export const targetTrail = createSegmentedTrail();
+
+// Named exports kept for the renderer and the render driver.
+export const $trailChunks = flownTrail.chunks;
+export const $trailTail = flownTrail.tail;
+export const $targetChunks = targetTrail.chunks;
+export const $targetTail = targetTrail.tail;
+
+function clearSegmented(): void {
+	flownTrail.clear();
+	targetTrail.clear();
+}
+
+export function trailAllPoints(): Cartesian3[] {
+	return flownTrail.all();
+}
 
 // Bounded trail of the autopilot's commanded position setpoint
 // (POSITION_TARGET_GLOBAL_INT) — "what the autopilot wants to do". Drawn as a
@@ -43,15 +151,28 @@ export const $historyStore = atom<TelemetryFrame[]>([]);
 // to where the previous run left off.
 let wasConnected = false;
 
+/** Set only if it would change anything. nanostores compares by reference, so
+ *  assigning a fresh `[]` to an already-empty store still notifies every
+ *  subscriber and still makes Cesium re-upload an empty vertex buffer. */
+function clearIfNeeded<T>(store: { get(): T[]; set(v: T[]): void }) {
+	if (store.get().length !== 0) store.set([]);
+}
+
 export function pushFrame(frame: TelemetryFrame) {
+	sanitizeFrame(frame);
 	if (frame.connected && !wasConnected) {
-		$trailStore.set([]);
-		$historyStore.set([]);
-		$targetTrailStore.set([]);
+		clearIfNeeded($trailStore);
+		clearIfNeeded($historyStore);
+		clearIfNeeded($targetTrailStore);
+		clearSegmented();
 	}
 	wasConnected = frame.connected;
 
 	$aircraftStore.set(frame);
+	if (frame.t - lastHudAt >= HUD_INTERVAL_MS || !frame.connected) {
+		lastHudAt = frame.t;
+		$hudFrame.set(frame);
+	}
 
 	// Append to the downsampled history if enough time has passed since the
 	// last stored sample (using the frame's own bridge timestamp `t`).
@@ -67,12 +188,19 @@ export function pushFrame(frame: TelemetryFrame) {
 	// segment instead of being chorded to the last. "No valid fix" also rejects the
 	// null-island (0,0) sentinel some glitch/uninitialized frames carry — otherwise
 	// the polyline shoots a long chord off to (0,0), which reads as a "cone".
-	if (!hasFix(frame.lat, frame.lon) || frame.alt === undefined) {
+	if (!hasFix(frame.lat, frame.lon) || !isNum(frame.alt)) {
 		return;
 	}
 
 	const point = Cartesian3.fromDegrees(frame.lon!, frame.lat!, frame.alt);
-	$trailStore.set(appendTrail($trailStore.get(), point));
+	const before = $trailStore.get();
+	const after = appendTrail(before, point);
+	if (after !== before) {
+		// appendTrail already applied decimation and outlier rejection, so the
+		// segmented copy only sees points that were actually accepted.
+		$trailStore.set(after);
+		flownTrail.append(point);
+	}
 
 	// Commanded-path trail: place the setpoint at the aircraft's current altitude
 	// so the two polylines are coplanar and the horizontal comparison (does the
@@ -81,12 +209,17 @@ export function pushFrame(frame: TelemetryFrame) {
 		return;
 	}
 	const target = Cartesian3.fromDegrees(frame.targetLon!, frame.targetLat!, frame.alt);
-	$targetTrailStore.set(appendTrail($targetTrailStore.get(), target));
+	const tBefore = $targetTrailStore.get();
+	const tAfter = appendTrail(tBefore, target);
+	if (tAfter !== tBefore) {
+		$targetTrailStore.set(tAfter);
+		targetTrail.append(target);
+	}
 }
 
 // A usable horizontal fix: both defined, finite, and not the null-island (0,0)
 // sentinel (|lat|,|lon| < ~0.0001 deg ≈ 11 m of the Gulf of Guinea origin).
-function hasFix(lat?: number, lon?: number): boolean {
+export function hasFix(lat?: number, lon?: number): boolean {
 	return (
 		lat !== undefined && lon !== undefined &&
 		Number.isFinite(lat) && Number.isFinite(lon) &&
@@ -94,13 +227,21 @@ function hasFix(lat?: number, lon?: number): boolean {
 	);
 }
 
+// Minimum spacing between trail points. At 25 Hz a 15 m/s aircraft moves 0.6 m
+// per frame; storing every frame burned the 3000-point cap in 2 minutes and
+// re-copied the array 25×/s. Decimating to ≥2 m stretches the trail to tens of
+// minutes and makes most frames a no-op (no new array, no Cesium re-upload).
+const TRAIL_MIN_STEP_M = 2;
+
 // Append a point to a bounded trail, DROPPING an outlier that jumps more than
 // TRAIL_JUMP_M from the last point (a single glitch frame) rather than chording
 // to it or reseeding the path on it — either of which draws the stray line.
-function appendTrail(trail: Cartesian3[], point: Cartesian3): Cartesian3[] {
+export function appendTrail(trail: Cartesian3[], point: Cartesian3): Cartesian3[] {
 	const last = trail[trail.length - 1];
-	if (last && Cartesian3.distance(last, point) > TRAIL_JUMP_M) {
-		return trail; // outlier — ignore it, keep the existing path intact
+	if (last) {
+		const d = Cartesian3.distance(last, point);
+		if (d > TRAIL_JUMP_M) return trail; // outlier — ignore it, keep the existing path intact
+		if (d < TRAIL_MIN_STEP_M) return trail; // hasn't moved enough to be worth a vertex
 	}
 	const next = trail.length >= TRAIL_MAX ? trail.slice(trail.length - TRAIL_MAX + 1) : trail.slice();
 	next.push(point);
@@ -110,4 +251,5 @@ function appendTrail(trail: Cartesian3[], point: Cartesian3): Cartesian3[] {
 export function clearTrail() {
 	$trailStore.set([]);
 	$targetTrailStore.set([]);
+	clearSegmented();
 }

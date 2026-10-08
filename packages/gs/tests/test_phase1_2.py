@@ -43,17 +43,18 @@ def test_open_connection_routes_transports(monkeypatch):
 
     monkeypatch.setattr(bridgemod.mavutil, "mavlink_connection", fake_conn)
 
+    gcs = {"source_system": bridgemod.GCS_SYSTEM, "source_component": bridgemod.GCS_COMPONENT}
     open_connection("serial:/dev/ttyUSB0:921600")
-    assert calls[-1] == ("/dev/ttyUSB0", {"baud": 921600})
+    assert calls[-1] == ("/dev/ttyUSB0", {"baud": 921600, **gcs})
 
     open_connection("serial:/dev/ttyUSB0", baud=57600)
-    assert calls[-1] == ("/dev/ttyUSB0", {"baud": 57600})
+    assert calls[-1] == ("/dev/ttyUSB0", {"baud": 57600, **gcs})
 
     open_connection("/dev/ttyACM0", baud=115200)
-    assert calls[-1] == ("/dev/ttyACM0", {"baud": 115200})
+    assert calls[-1] == ("/dev/ttyACM0", {"baud": 115200, **gcs})
 
     open_connection("udpin:0.0.0.0:14550")
-    assert calls[-1] == ("udpin:0.0.0.0:14550", {})
+    assert calls[-1] == ("udpin:0.0.0.0:14550", gcs)
 
 
 # --- command verbs -----------------------------------------------------------
@@ -90,16 +91,16 @@ def _fake_px4_health(port: int, stop: threading.Event) -> None:
         time.sleep(0.1)
 
 
-def test_health_fields_and_statustext():
-    bridge = Bridge(mavlink_endpoint="udpin:127.0.0.1:14980", json_port=14981, ws_port=8780)
+def test_health_fields_and_statustext(ports):
+    bridge = Bridge(mavlink_endpoint=f"udpin:127.0.0.1:{ports['mav']}", json_port=ports["json"], ws_port=ports["ws"])
     threading.Thread(target=bridge._mav_loop, daemon=True).start()
     stop = threading.Event()
-    threading.Thread(target=_fake_px4_health, args=(14980, stop), daemon=True).start()
+    threading.Thread(target=_fake_px4_health, args=(ports["mav"], stop), daemon=True).start()
 
     async def scenario():
         serve_task = asyncio.create_task(bridge._serve())
         await asyncio.sleep(0.3)
-        async with websockets.connect("ws://127.0.0.1:8780") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{ports['ws']}") as ws:
             tele = await _recv_until(ws, lambda m_: m_.get("type") == "telemetry"
                                      and m_.get("gpsSats") == 12 and m_.get("ekfOk") is True)
             assert tele is not None, "health fields never populated"
@@ -153,24 +154,31 @@ def _fake_px4_params(port: int, stop: threading.Event) -> None:
                 px4.mav.param_value_send(name.encode(), store[name], m.MAV_PARAM_TYPE_REAL32, len(names), i)
 
 
-def test_param_refresh_and_set():
-    bridge = Bridge(mavlink_endpoint="udpin:127.0.0.1:14982", json_port=14983, ws_port=8781)
+def test_param_refresh_and_set(ports):
+    bridge = Bridge(mavlink_endpoint=f"udpin:127.0.0.1:{ports['mav']}", json_port=ports["json"], ws_port=ports["ws"])
     threading.Thread(target=bridge._mav_loop, daemon=True).start()
     stop = threading.Event()
-    threading.Thread(target=_fake_px4_params, args=(14982, stop), daemon=True).start()
+    threading.Thread(target=_fake_px4_params, args=(ports["mav"], stop), daemon=True).start()
 
     async def scenario():
         serve_task = asyncio.create_task(bridge._serve())
         await asyncio.sleep(0.4)  # let gs learn PX4's address
-        async with websockets.connect("ws://127.0.0.1:8781") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{ports['ws']}") as ws:
             await ws.send(json.dumps({"type": "claim", "id": "c1"}))
             await _recv_until(ws, lambda x: x.get("type") == "ack" and x.get("id") == "c1")
 
             # Refresh -> we should see each param stream in.
             await ws.send(json.dumps({"type": "param_refresh"}))
-            trim = await _recv_until(ws, lambda x: x.get("type") == "param" and x.get("name") == "FW_AIRSPD_TRIM")
-            assert trim is not None and abs(trim["value"] - 15.0) < 1e-4
+            # PARAM_VALUEs arrive coalesced in `params` batches (see PARAM_BATCH_MS).
+            batch = await _recv_until(ws, lambda x: x.get("type") == "params"
+                                      and any(i["name"] == "FW_AIRSPD_TRIM" for i in x["items"]))
+            assert batch is not None
+            trim = next(i for i in batch["items"] if i["name"] == "FW_AIRSPD_TRIM")
+            assert abs(trim["value"] - 15.0) < 1e-4
             assert trim["count"] == len(_PARAMS)
+            # And the refresh completes with a done marker.
+            done = await _recv_until(ws, lambda x: x.get("type") == "param_progress" and x.get("done"))
+            assert done is not None and done["received"] == len(_PARAMS) and "error" not in done
 
             # Set it -> param_ack ok, echoed with the new value.
             await ws.send(json.dumps({"type": "param_set", "id": "p1",
@@ -187,14 +195,14 @@ def test_param_refresh_and_set():
         stop.set()
 
 
-def test_param_set_not_commander():
-    bridge = Bridge(mavlink_endpoint="udpin:127.0.0.1:14984", json_port=14985, ws_port=8782)
+def test_param_set_not_commander(ports):
+    bridge = Bridge(mavlink_endpoint=f"udpin:127.0.0.1:{ports['mav']}", json_port=ports["json"], ws_port=ports["ws"])
     threading.Thread(target=bridge._mav_loop, daemon=True).start()
 
     async def scenario():
         serve_task = asyncio.create_task(bridge._serve())
         await asyncio.sleep(0.3)
-        async with websockets.connect("ws://127.0.0.1:8782") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{ports['ws']}") as ws:
             await ws.send(json.dumps({"type": "param_set", "id": "p9",
                                       "name": "FW_AIRSPD_TRIM", "value": 1.0}))
             ack = await _recv_until(ws, lambda x: x.get("type") == "param_ack" and x.get("id") == "p9")

@@ -2,13 +2,17 @@
   "name": "commandant",
   "version": "0.1.0",
   "private": true,
-  "description": "Commandant — ground control station for the solar aircraft (monorepo)",
+  "description": "Commandant \u2014 ground control station for the solar aircraft (monorepo)",
   "workspaces": [
     "packages/console"
   ],
   "scripts": {
     "dev": "npm run dev --workspace console",
     "build": "npm run build --workspace console",
-    "console": "npm run dev --workspace console"
+    "console": "npm run dev --workspace console",
+    "view": "npm run dev --workspace console -- -p 4301"
+  },
+  "overrides": {
+    "@zip.js/zip.js": "2.7.73"
   }
 }

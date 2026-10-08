@@ -19,11 +19,11 @@ import type {
 	ServerMessage,
 	TelemetryFrame,
 } from "@/types/app";
-import { pushFrame, clearTrail } from "@/stores/aircraft.store";
+import { pushFrame } from "@/stores/aircraft.store";
 import { $viewerStore } from "@/stores/cesium.store";
 import { $linkState, $commander } from "@/stores/link.store";
 import { pushStatus } from "@/stores/statustext.store";
-import { upsertParam, setParamProgress, clearParams } from "@/stores/params.store";
+import { upsertParam, upsertParams, setParamProgress, clearParams } from "@/stores/params.store";
 import {
 	$missionCurrent,
 	$missionProgress,
@@ -31,11 +31,19 @@ import {
 	setMissionItems,
 } from "@/stores/mission.store";
 import { setFenceItems, setRallyItems } from "@/stores/geo.store";
-import envs from "@/lib/envs";
+import envs, { IS_VIEW } from "@/lib/envs";
 
 // How long a command waits for its ack before we give up (gs retries internally
-// a few times at ~1 s, so this is generous enough to cover that).
+// a few times at ~1 s, so this is generous enough to cover that). When gs relays
+// a MAV_RESULT_IN_PROGRESS (final:false), the wait re-arms to the longer value —
+// gs itself allows 15 s for the final result.
 const COMMAND_TIMEOUT_MS = 5000;
+const COMMAND_IN_PROGRESS_TIMEOUT_MS = 20000;
+
+// Reconnect backoff: fast first retry, then grow (with jitter so a room full of
+// tablets doesn't hammer the hub in lockstep), reset once a socket opens.
+const RECONNECT_MIN_MS = 1000;
+const RECONNECT_MAX_MS = 10000;
 
 // One in-flight command awaiting its ack (matched by id).
 interface Pending {
@@ -82,6 +90,8 @@ export class TelemetryClient {
 	private ws: WebSocket | null = null;
 	private closed = false;
 	private reconnectTimer: number | null = null;
+	private reconnectDelay = RECONNECT_MIN_MS;
+	private hadSession = false;
 	// Commands sent but not yet acked, keyed by command id.
 	private pending = new Map<string, Pending>();
 	// param_set requests awaiting their param_ack, keyed by id (separate channel
@@ -96,18 +106,38 @@ export class TelemetryClient {
 	constructor(private url: string = envs.MAVLINK_WS_ENDPOINT) {}
 
 	connect() {
+		if (this.ws && this.ws.readyState !== WebSocket.CLOSED) return; // idempotent (HMR / re-mount)
 		this.closed = false;
-		clearTrail(); // start each session with a clean flight path
 		$linkState.set("connecting");
 		this.open();
 	}
 
 	private open() {
 		if (this.closed) return;
-		const ws = new WebSocket(this.url);
+		$linkState.set("connecting");
+		let ws: WebSocket;
+		try {
+			ws = new WebSocket(this.url);
+		} catch (err) {
+			// A synchronous throw (bad URL, mixed-content block) must not end the
+			// retry loop for good.
+			console.warn("telemetry: cannot open socket", err);
+			this.scheduleReconnect();
+			return;
+		}
 		this.ws = ws;
 
 		ws.onopen = () => {
+			this.reconnectDelay = RECONNECT_MIN_MS;
+			if (IS_VIEW) $commander.set(false); // watching, never commanding
+			if (this.hadSession) {
+				// Live-execution state from the previous socket is unknown now; the
+				// plan/params the operator was editing are left alone.
+				$missionCurrent.set(null);
+				$missionReached.set(null);
+				$missionProgress.set(null);
+			}
+			this.hadSession = true;
 			// Bid to be the single active commander as soon as the socket is up, so
 			// our commands are accepted (gs rejects non-commanders). Still
 			// "connecting" until the first telemetry frame proves data is flowing.
@@ -115,12 +145,14 @@ export class TelemetryClient {
 		};
 
 		ws.onmessage = (event) => {
+			if (typeof event.data !== "string") return; // binary: not ours
 			let msg: ServerMessage;
 			try {
 				msg = JSON.parse(event.data) as ServerMessage;
 			} catch {
 				return; // ignore malformed frames
 			}
+			if (!msg || typeof msg !== "object") return;
 			// Discriminate on `type`. A message with no `type` is treated as a
 			// telemetry frame for back-compat with the pre-envelope bridge.
 			const type = (msg as { type?: string }).type;
@@ -131,13 +163,18 @@ export class TelemetryClient {
 			} else if (type === "statustext") {
 				const s = msg as { severity: number; text: string; t: number };
 				pushStatus(s.severity, s.text, s.t);
+			} else if (type === "params") {
+				// gs coalesces streamed PARAM_VALUEs into batches (one store write each).
+				const items = (msg as { items?: unknown }).items;
+				if (Array.isArray(items)) {
+					upsertParams((items as ParamValueMessage[]).map((p) => ({ name: p.name, value: p.value, ptype: p.ptype, index: p.index })));
+				}
 			} else if (type === "param") {
 				const p = msg as ParamValueMessage;
 				upsertParam({ name: p.name, value: p.value, ptype: p.ptype, index: p.index });
-				setParamProgress(p.index + 1, p.count);
 			} else if (type === "param_progress") {
-				const p = msg as { received: number; count: number };
-				setParamProgress(p.received, p.count);
+				const p = msg as { received: number; count: number; done?: boolean; error?: string };
+				setParamProgress(p.received, p.count, p.done, p.error);
 			} else if (type === "param_ack") {
 				this.resolveParamAck(msg as ParamAckMessage);
 			} else if (type === "mission") {
@@ -162,15 +199,23 @@ export class TelemetryClient {
 				this.resolveGeoAck(this.pendingFence, msg as FenceAckMessage);
 			} else if (type === "rally_ack") {
 				this.resolveGeoAck(this.pendingRally, msg as RallyAckMessage);
-			} else {
+			} else if (type === "telemetry" || type === undefined) {
 				this.onTelemetry(msg as TelemetryFrame & { type?: string });
+			} else {
+				// A message type this build doesn't know (newer gs). Dropping it is the
+				// only safe move: treating it as telemetry would blank the HUD and
+				// wipe the trail.
+				this.warnUnknown(type);
 			}
 		};
 
 		ws.onclose = () => {
+			if (this.ws !== ws) return; // a stale socket from before a reconnect
+			// Only the console<->gs leg is down; the vehicle may be flying along fine.
+			// Mark the link lost (HUD dot goes red) but keep the last frame, trail and
+			// history on screen — wiping them on every WiFi blip was disorienting.
 			$linkState.set("lost");
 			$commander.set(null); // authority is unknown again until we re-claim
-			pushFrame({ t: Date.now(), connected: false });
 			this.failAllPending("link closed");
 			this.scheduleReconnect();
 		};
@@ -178,6 +223,13 @@ export class TelemetryClient {
 		ws.onerror = () => {
 			ws.close();
 		};
+	}
+
+	private warned = new Set<string>();
+	private warnUnknown(type: string) {
+		if (this.warned.has(type)) return;
+		this.warned.add(type);
+		console.warn(`telemetry: ignoring unknown message type "${type}"`);
 	}
 
 	// A telemetry frame: strip the envelope `type`, update link state, push to the
@@ -233,6 +285,15 @@ export class TelemetryClient {
 		const p = this.pending.get(ack.id);
 		if (!p) return; // unknown/duplicate ack
 		clearTimeout(p.timer);
+		if (ack.final === false) {
+			// PX4 said IN_PROGRESS: the real verdict is still coming. Re-arm the
+			// timeout for the long haul instead of resolving with a non-answer.
+			p.timer = setTimeout(() => {
+				this.pending.delete(ack.id);
+				p.reject(new Error("timeout"));
+			}, COMMAND_IN_PROGRESS_TIMEOUT_MS);
+			return;
+		}
 		this.pending.delete(ack.id);
 		p.resolve(ack);
 	}
@@ -411,7 +472,17 @@ export class TelemetryClient {
 		}
 	}
 
+	// The single transmit chokepoint. In VIEW mode nothing leaves the browser,
+	// so a hosted build cannot command even if a UI guard were missed or a
+	// console user called a client method by hand. The relay also has no route
+	// back to the hub, so this is belt and braces on top of the topology.
 	private send(obj: unknown) {
+		if (IS_VIEW) {
+			if (process.env.NODE_ENV !== "production") {
+				console.warn("telemetry: suppressed outbound message in view mode", obj);
+			}
+			return;
+		}
 		this.ws?.send(JSON.stringify(obj));
 	}
 
@@ -419,10 +490,12 @@ export class TelemetryClient {
 
 	private scheduleReconnect() {
 		if (this.closed || this.reconnectTimer !== null) return;
+		const delay = this.reconnectDelay * (0.8 + Math.random() * 0.4);
+		this.reconnectDelay = Math.min(this.reconnectDelay * 2, RECONNECT_MAX_MS);
 		this.reconnectTimer = window.setTimeout(() => {
 			this.reconnectTimer = null;
 			this.open();
-		}, 1500);
+		}, delay);
 	}
 
 	disconnect() {
@@ -440,5 +513,8 @@ export class TelemetryClient {
 }
 
 // Shared singleton: Aircraft.tsx owns its connect/disconnect lifecycle, and the
-// command controls (CommandBar) send over the same socket.
-export const telemetryClient = new TelemetryClient();
+// command controls (CommandBar) send over the same socket. Pinned on globalThis
+// so a dev hot-reload of this module reuses the live socket instead of leaving
+// the panels holding a fresh, unconnected client.
+const g = globalThis as { __telemetryClient?: TelemetryClient };
+export const telemetryClient: TelemetryClient = g.__telemetryClient ?? (g.__telemetryClient = new TelemetryClient());

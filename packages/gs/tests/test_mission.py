@@ -89,12 +89,12 @@ def _fake_px4_download(port: int, items: list[dict], stop: threading.Event) -> N
                 0, 0, 0, 0, int(it["lat"] * 1e7), int(it["lon"] * 1e7), it["alt"], 0)
 
 
-def test_mission_upload_roundtrip():
+def test_mission_upload_roundtrip(ports):
     received: dict = {}
-    bridge = Bridge(mavlink_endpoint="udpin:127.0.0.1:15010", json_port=15011, ws_port=8770)
+    bridge = Bridge(mavlink_endpoint=f"udpin:127.0.0.1:{ports['mav']}", json_port=ports["json"], ws_port=ports["ws"])
     threading.Thread(target=bridge._mav_loop, daemon=True).start()
     stop = threading.Event()
-    threading.Thread(target=_fake_px4_upload, args=(15010, received, stop), daemon=True).start()
+    threading.Thread(target=_fake_px4_upload, args=(ports["mav"], received, stop), daemon=True).start()
 
     items = [
         {"kind": "takeoff", "alt": 30},
@@ -105,7 +105,7 @@ def test_mission_upload_roundtrip():
     async def scenario():
         serve_task = asyncio.create_task(bridge._serve())
         await asyncio.sleep(0.4)  # let gs learn PX4's address from heartbeats
-        async with websockets.connect("ws://127.0.0.1:8770") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{ports['ws']}") as ws:
             await ws.send(json.dumps({"type": "claim", "id": "c1"}))
             assert await _recv_until(ws, lambda x: x.get("type") == "ack" and x.get("id") == "c1")
             await ws.send(json.dumps({"type": "mission_push", "id": "m1", "items": items}))
@@ -128,20 +128,20 @@ def test_mission_upload_roundtrip():
     assert received[2]["cmd"] == m.MAV_CMD_NAV_LOITER_UNLIM
 
 
-def test_mission_download_roundtrip():
+def test_mission_download_roundtrip(ports):
     items = [
         {"cmd": m.MAV_CMD_NAV_WAYPOINT, "lat": 37.30, "lon": -122.10, "alt": 70},
         {"cmd": m.MAV_CMD_NAV_LOITER_UNLIM, "lat": 37.33, "lon": -122.13, "alt": 100},
     ]
-    bridge = Bridge(mavlink_endpoint="udpin:127.0.0.1:15012", json_port=15013, ws_port=8771)
+    bridge = Bridge(mavlink_endpoint=f"udpin:127.0.0.1:{ports['mav']}", json_port=ports["json"], ws_port=ports["ws"])
     threading.Thread(target=bridge._mav_loop, daemon=True).start()
     stop = threading.Event()
-    threading.Thread(target=_fake_px4_download, args=(15012, items, stop), daemon=True).start()
+    threading.Thread(target=_fake_px4_download, args=(ports["mav"], items, stop), daemon=True).start()
 
     async def scenario():
         serve_task = asyncio.create_task(bridge._serve())
         await asyncio.sleep(0.4)
-        async with websockets.connect("ws://127.0.0.1:8771") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{ports['ws']}") as ws:
             await ws.send(json.dumps({"type": "mission_pull"}))
             mission = await _recv_until(ws, lambda x: x.get("type") == "mission")
             assert mission is not None, "no mission downloaded"
@@ -158,14 +158,14 @@ def test_mission_download_roundtrip():
         stop.set()
 
 
-def test_mission_push_non_commander():
-    bridge = Bridge(mavlink_endpoint="udpin:127.0.0.1:15014", json_port=15015, ws_port=8772)
+def test_mission_push_non_commander(ports):
+    bridge = Bridge(mavlink_endpoint=f"udpin:127.0.0.1:{ports['mav']}", json_port=ports["json"], ws_port=ports["ws"])
     threading.Thread(target=bridge._mav_loop, daemon=True).start()
 
     async def scenario():
         serve_task = asyncio.create_task(bridge._serve())
         await asyncio.sleep(0.3)
-        async with websockets.connect("ws://127.0.0.1:8772") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{ports['ws']}") as ws:
             # No claim -> push must be rejected.
             await ws.send(json.dumps({"type": "mission_push", "id": "z1", "items": []}))
             ack = await _recv_until(ws, lambda x: x.get("type") == "mission_ack" and x.get("id") == "z1")

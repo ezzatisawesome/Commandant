@@ -29,21 +29,21 @@ def test_decode_mode():
     assert decode_mode((4 << 16) | (3 << 24)) == "AUTO.LOITER"
 
 
-def test_json_to_ws_roundtrip():
+def test_json_to_ws_roundtrip(ports):
     # Use ports unlikely to collide with a running instance.
-    bridge = Bridge(mavlink_endpoint="udpin:127.0.0.1:0", json_port=14999, ws_port=8799)
+    bridge = Bridge(mavlink_endpoint=f"udpin:127.0.0.1:{ports['mav']}", json_port=ports["json"], ws_port=ports["ws"])
     # Run only the JSON ingest + WS egress (skip MAVLink, which needs a real link).
     threading.Thread(target=bridge._json_loop, daemon=True).start()
 
     async def scenario():
         serve_task = asyncio.create_task(bridge._serve())
         await asyncio.sleep(0.3)  # let the WS server bind
-        async with websockets.connect("ws://127.0.0.1:8799") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{ports['ws']}") as ws:
             # Send a flightlink-style JSON telemetry datagram.
             frame = {"lat": 37.4, "lon": -122.1, "airspeed": 14.2, "mode": "AUTO.LOITER",
                      "genW": 120.0, "voltage": 24.3}
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.sendto(json.dumps(frame).encode(), ("127.0.0.1", 14999))
+            s.sendto(json.dumps(frame).encode(), ("127.0.0.1", ports["json"]))
 
             # Read frames until the JSON values land (first tick may predate ingest).
             got = None

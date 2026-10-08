@@ -19,6 +19,24 @@ from the Phase 0 frame remain unchanged (`lat`, `lon`, `alt`, `roll`, `pitch`,
 
 - `linkState`: `"connecting" | "alive" | "stale" | "lost"`.
 - `connected` (bool) is kept for back-compat; `connected == (linkState === "alive")`.
+- `dataAgeMs` (int | null): age of the newest **vehicle** data. `null` before any
+  arrives.
+
+**Link health is attributed per source, and this matters.** gs takes two feeds:
+MAVLink from the autopilot, and the sim's flightlink JSON. Only MAVLink speaks
+for the vehicle. A single shared "last message" timestamp once let a live JSON
+power feed report `linkState:"alive"` for an hour while PX4's MAVLink was dead
+and gs re-broadcast one frozen fix — 839 consecutive frames with identical
+lat/lon/alt/roll, only the frame timestamp advancing. So:
+
+- once any MAVLink vehicle has been seen, **only** MAVLink freshness sets
+  `linkState` and `dataAgeMs`;
+- on a pure flightlink run (no PX4), the JSON feed is genuinely the only source
+  and drives both.
+
+A client should treat a large `dataAgeMs` as "these numbers describe the past"
+even while `linkState` is still `alive`; the console shows a red `stale Ns` badge
+past 3 s.
 
 ### `link` (on state change; optional, telemetry also carries `linkState`)
 ```json
@@ -33,6 +51,8 @@ from the Phase 0 frame remain unchanged (`lat`, `lon`, `alt`, `roll`, `pitch`,
 - `result`: MAV_RESULT code when from a `COMMAND_ACK` (0 = ACCEPTED), else -1.
 - `ok`: convenience bool (`result === 0`, or a local accept/reject).
 - `text`: human-readable (e.g. `"not commander"`, `"timeout"`, `"accepted"`).
+- `final` (optional, default true): `false` marks an interim notice relayed from a
+  `MAV_RESULT_IN_PROGRESS` ack; the real verdict follows under the same `id`.
 
 ## console → gs
 
@@ -63,7 +83,13 @@ messages only from the current commander; others get `ack` with
 
 - **ACK tracking:** after TX, await the matching `COMMAND_ACK` (by command id),
   retry up to 3× at ~1 s, then `ack` with `ok:false, text:"timeout"`. Never
-  fire-and-forget.
+  fire-and-forget. A `MAV_RESULT_IN_PROGRESS` (5) ack stops the retries and
+  extends the wait (15 s) for the final result.
+- **JSON safety:** gs never emits `NaN`/`Infinity` (the browser's `JSON.parse`
+  rejects them); a non-finite float is sent as `null`.
+- **Transport:** if the MAVLink link fails to open (radio not plugged in, TCP
+  peer down) or errors repeatedly, gs reopens it with backoff instead of dying;
+  the link state goes `lost` meanwhile.
 - **Link manager:** track last-message time; `alive` while fresh (<2 s), `stale`
   past that, `lost` after a longer gap / socket loss, `connecting` before first
   message. Emit `linkState` on every telemetry frame and a `link` message on
@@ -107,12 +133,19 @@ console → gs:
 ```
 gs → console:
 ```json
-{ "type": "param", "name": "FW_AIRSPD_TRIM", "value": 15.0, "ptype": 9, "index": 42, "count": 900 }
+{ "type": "params", "items": [ { "name": "FW_AIRSPD_TRIM", "value": 15.0, "ptype": 9, "index": 42, "count": 900 }, "..." ] }
 { "type": "param_progress", "received": 850, "count": 900 }
+{ "type": "param_progress", "received": 900, "count": 900, "done": true }
+{ "type": "param_progress", "received": 612, "count": 900, "done": true, "error": "timeout" }
 { "type": "param_ack", "id": "<uuid>", "name": "FW_AIRSPD_TRIM", "value": 15.0, "ok": true, "text": "set" }
 ```
-- `param_refresh` → `PARAM_REQUEST_LIST`; stream each `PARAM_VALUE` as `param`,
-  track index/count, re-request any gaps (hand-rolled, with timeout).
+- `param_refresh` → `PARAM_REQUEST_LIST`; `PARAM_VALUE`s are **coalesced into
+  `params` batches** (≤64 items or ~50 ms, whichever first) so a ~1000-param list
+  is a few dozen WS messages, not a thousand. Index/count are tracked and gaps are
+  re-requested after the stream goes quiet; after 10 fruitless sweeps gs gives up
+  and sends `param_progress {done:true, error:"timeout"}`. Every `params` batch
+  precedes the `done` marker. (A single `param` message is still accepted by the
+  console for back-compat.)
 - `param_set` → `PARAM_SET`; confirm against the echoed `PARAM_VALUE`
   (value match) → `param_ack`; mismatch/timeout → `ok:false`.
 
@@ -189,6 +222,33 @@ are consecutive, per the MAVLink fence convention.)
 PX4's `parameters.json` (name/shortDesc/longDesc/min/max/units/type/default) is
 bundled with the console and matched to live `param` values by name — units,
 range validation, and help text. Not on the MAVLink wire.
+
+## The relay leg (hosted viewer)
+
+`packages/relay` serves the hosted viewer (`commandant.guppidev.com` on
+Vercel, streaming from `wss://commandant-relay.fly.dev/`). The hub publishes the SAME
+messages defined above, outbound, to `wss://…/publish` with a bearer token;
+browsers subscribe at `wss://…/` and receive them verbatim.
+
+```
+ hub (gs --relay) ──wss /publish──► relay ──wss / ──► browsers (NEXT_PUBLIC_MODE=view)
+```
+
+- **Telemetry is republished at 5 Hz**, not 25: an internet viewer cannot perceive
+  more and a field hotspot should not pay for it. `--relay-hz` tunes it.
+- **Latest-wins for telemetry, ordered for events.** A telemetry frame queued
+  while the uplink is down is replaced by the next; statustext and readbacks keep
+  their order up to a bounded queue.
+- **`flight`** is the one message only the relay leg carries:
+  `{ "type": "flight", "id": "flight-20261006-1812", "startedAt": 1730000000000 }`.
+- **Late joiners** get the retained `telemetry`, `link`, `mission`, `fence`,
+  `rally` and `flight` immediately on connect, so a page load draws at once.
+- **A missing hub** is reported to viewers as `link {state:"lost"}` rather than
+  freezing the last frame, which would read as a live aircraft.
+
+Direction is absolute: **no message travels from a viewer toward the hub.** Viewer
+sockets are never read, the publisher socket is never written, and the view build
+refuses to transmit. See `packages/relay/README.md`.
 
 ## Authority confirm (polish)
 `claim` may carry an `id`; gs replies with an `ack {id, ok, text:"commander"|"not

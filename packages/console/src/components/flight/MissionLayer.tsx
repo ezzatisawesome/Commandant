@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import { useStore } from "@nanostores/react";
 import {
+	ArcType,
 	Cartesian2,
 	Cartesian3,
 	Cartographic,
@@ -18,6 +19,7 @@ import {
 } from "cesium";
 
 import { $viewerStore } from "@/stores/cesium.store";
+import { IS_VIEW } from "@/lib/envs";
 import {
 	$missionItems,
 	$missionCurrent,
@@ -58,14 +60,22 @@ export default function MissionLayer() {
 				}, false),
 				width: 2,
 				material: Color.WHITE.withAlpha(0.7),
+				arcType: ArcType.NONE,
 			},
 		});
 
-		// One marker entity per positioned item. Rebuilt whenever the item list
-		// changes structurally (add/remove/reorder); colors update live via the
-		// current/reached stores without a rebuild.
+		// One marker entity per positioned item. Rebuilt only when the item list
+		// changes STRUCTURALLY (add/remove/reorder/kind); a drag updates lat/lon
+		// through the CallbackPositionProperty below, so re-creating every marker
+		// on each mouse-move (as a plain store subscription would) is avoided.
 		let markers: Entity[] = [];
+		let structure = "";
 		const rebuildMarkers = () => {
+			const sig = $missionItems.get()
+				.map((it) => `${it.seq}:${it.kind}:${kindHasPosition(it.kind) && it.lat !== undefined ? 1 : 0}`)
+				.join(",");
+			if (sig === structure) return;
+			structure = sig;
 			markers.forEach((m) => $viewer.entities.remove(m));
 			markers = [];
 			for (const it of $missionItems.get()) {
@@ -116,7 +126,7 @@ export default function MissionLayer() {
 		let didDrag = false;
 
 		handler.setInputAction((m: { position: Cartesian2 }) => {
-			if (!$missionEdit.get() || didDrag) return;
+			if (IS_VIEW || !$missionEdit.get() || didDrag) return;
 			const cart = $viewer.camera.pickEllipsoid(m.position, $viewer.scene.globe.ellipsoid);
 			if (!cart) return;
 			const geo = Cartographic.fromCartesian(cart);
@@ -130,6 +140,7 @@ export default function MissionLayer() {
 		// Drag a marker: pick on LEFT_DOWN, move on MOUSE_MOVE, release on LEFT_UP.
 		// Disable the camera controls while dragging so the globe doesn't pan.
 		handler.setInputAction((m: { position: Cartesian2 }) => {
+			if (IS_VIEW) return;  // read-only: markers are not draggable
 			const picked = $viewer.scene.pick(m.position);
 			const id: unknown = picked?.id?.id;
 			if (typeof id === "string" && id.startsWith("mission-wp-")) {

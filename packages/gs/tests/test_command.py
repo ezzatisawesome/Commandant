@@ -48,16 +48,16 @@ def _fake_px4(port: int, ack_result: int, stop: threading.Event) -> None:
             px4.mav.command_ack_send(msg.command, ack_result)
 
 
-def test_arm_command_acked():
-    bridge = Bridge(mavlink_endpoint="udpin:127.0.0.1:14990", json_port=14991, ws_port=8797)
+def test_arm_command_acked(ports):
+    bridge = Bridge(mavlink_endpoint=f"udpin:127.0.0.1:{ports['mav']}", json_port=ports["json"], ws_port=ports["ws"])
     threading.Thread(target=bridge._mav_loop, daemon=True).start()
     stop = threading.Event()
-    threading.Thread(target=_fake_px4, args=(14990, mavutil.mavlink.MAV_RESULT_ACCEPTED, stop), daemon=True).start()
+    threading.Thread(target=_fake_px4, args=(ports["mav"], mavutil.mavlink.MAV_RESULT_ACCEPTED, stop), daemon=True).start()
 
     async def scenario():
         serve_task = asyncio.create_task(bridge._serve())
         await asyncio.sleep(0.4)  # let gs learn PX4's address from heartbeats
-        async with websockets.connect("ws://127.0.0.1:8797") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{ports['ws']}") as ws:
             await ws.send(json.dumps({"type": "claim", "id": "c1"}))
             claim = await _recv_until(ws, lambda m: m.get("type") == "ack" and m.get("id") == "c1")
             assert claim and claim["ok"] is True
@@ -75,14 +75,14 @@ def test_arm_command_acked():
         stop.set()
 
 
-def test_non_commander_rejected():
-    bridge = Bridge(mavlink_endpoint="udpin:127.0.0.1:14994", json_port=14995, ws_port=8795)
+def test_non_commander_rejected(ports):
+    bridge = Bridge(mavlink_endpoint=f"udpin:127.0.0.1:{ports['mav']}", json_port=ports["json"], ws_port=ports["ws"])
     threading.Thread(target=bridge._mav_loop, daemon=True).start()
 
     async def scenario():
         serve_task = asyncio.create_task(bridge._serve())
         await asyncio.sleep(0.3)
-        async with websockets.connect("ws://127.0.0.1:8795") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{ports['ws']}") as ws:
             # No claim -> command must be rejected.
             await ws.send(json.dumps({"type": "command", "id": "x1", "name": "arm", "args": {}}))
             ack = await _recv_until(ws, lambda m: m.get("type") == "ack" and m.get("id") == "x1")
@@ -94,26 +94,62 @@ def test_non_commander_rejected():
     asyncio.run(scenario())
 
 
-def test_link_state_transition(monkeypatch):
+def test_link_state_transition(monkeypatch, ports):
     # Shrink thresholds so the test is fast.
     monkeypatch.setattr(bridgemod, "STALE_MS", 200)
     monkeypatch.setattr(bridgemod, "LOST_MS", 600)
 
-    bridge = Bridge(mavlink_endpoint="udpin:127.0.0.1:14992", json_port=14993, ws_port=8796)
+    bridge = Bridge(mavlink_endpoint=f"udpin:127.0.0.1:{ports['mav']}", json_port=ports["json"], ws_port=ports["ws"])
     threading.Thread(target=bridge._json_loop, daemon=True).start()
 
     async def scenario():
         serve_task = asyncio.create_task(bridge._serve())
         await asyncio.sleep(0.2)
-        async with websockets.connect("ws://127.0.0.1:8796") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{ports['ws']}") as ws:
             # Feed one JSON frame -> traffic -> alive.
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.sendto(json.dumps({"lat": 1.0}).encode(), ("127.0.0.1", 14993))
+            s.sendto(json.dumps({"lat": 1.0}).encode(), ("127.0.0.1", ports["json"]))
             alive = await _recv_until(ws, lambda m: m.get("linkState") == "alive")
             assert alive is not None, "never reached alive"
             # Stop feeding; after STALE_MS it must go stale.
             stale = await _recv_until(ws, lambda m: m.get("linkState") == "stale", tries=50)
             assert stale is not None, "never went stale"
         serve_task.cancel()
+
+    asyncio.run(scenario())
+
+
+def test_malformed_messages_keep_socket_and_authority(ports):
+    """A bad `command` (args as a list, main=null) must be acked ok:false, not
+    close the socket and silently drop our commander claim."""
+    bridge = Bridge(mavlink_endpoint=f"udpin:127.0.0.1:{ports['mav']}", json_port=ports["json"], ws_port=ports["ws"])
+    threading.Thread(target=bridge._mav_loop, daemon=True).start()
+
+    async def scenario():
+        serve_task = asyncio.create_task(bridge._serve())
+        await asyncio.sleep(0.3)
+        async with websockets.connect(f"ws://127.0.0.1:{ports['ws']}") as ws:
+            await ws.send(json.dumps({"type": "claim", "id": "c1"}))
+            assert (await _recv_until(ws, lambda m: m.get("id") == "c1"))["ok"] is True
+            await ws.send(json.dumps({"type": "command", "id": "b1", "name": "set_mode", "args": []}))
+            await ws.send(json.dumps({"type": "command", "id": "b2", "name": "set_mode", "args": {"main": None}}))
+            await ws.send(json.dumps({"type": "command", "name": "arm"}))            # no id
+            await ws.send(json.dumps({"type": "param_set", "id": "p1", "name": "X", "value": "nope"}))
+            await ws.send(json.dumps({"type": "stream", "msgId": "x", "hz": "y"}))
+            await ws.send(b"\x00\xff")                                              # binary junk
+            await ws.send("[1,2,3]")
+            await ws.send(json.dumps({"type": "mission_push", "id": "m1", "items": [{"kind": "waypoint", "lat": "x"}]}))
+            b2 = await _recv_until(ws, lambda m: m.get("id") == "b2")
+            assert b2 and b2["ok"] is False
+            p1 = await _recv_until(ws, lambda m: m.get("type") == "param_ack" and m.get("id") == "p1")
+            assert p1 and p1["ok"] is False
+            m1 = await _recv_until(ws, lambda m: m.get("type") == "mission_ack" and m.get("id") == "m1")
+            assert m1 and m1["ok"] is False
+            # Still open, still commander: a well-formed command is accepted for TX.
+            await ws.send(json.dumps({"type": "command", "id": "ok1", "name": "arm", "args": {}}))
+            ack = await _recv_until(ws, lambda m: m.get("id") == "ok1", tries=400)
+            assert ack is not None and ack["text"] != "not commander"
+        serve_task.cancel()
+        assert bridge.handler_errors == 0, "a malformed message reached the mav thread as an exception"
 
     asyncio.run(scenario())

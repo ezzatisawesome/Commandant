@@ -36,3 +36,10 @@ venv/
 .pytest_cache/
 .ruff_cache/
 *.egg-info/
+
+# python venvs / caches in the daemon + relay packages
+.venv/
+__pycache__/
+.pytest_cache/
+.vercel
+.env*
