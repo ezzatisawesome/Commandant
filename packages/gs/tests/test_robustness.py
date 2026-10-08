@@ -40,6 +40,26 @@ async def _recv_until(ws, predicate, tries=200, timeout=0.5):
 
 # --- JSON safety ------------------------------------------------------------
 
+def feed_json(bridge, port, payload, key, tries=60, interval=0.05):
+    """Push a JSON frame into the bridge's UDP feed until it lands.
+
+    UDP has no connect handshake, so a datagram sent before `_json_loop` has
+    bound its socket is silently dropped and never retried. A single send
+    followed by a poll therefore fails whenever the thread is slow to start,
+    which is a race on a loaded machine, not a broken bridge. Resending each
+    poll removes the race without hiding a real failure: if the bridge never
+    ingests it, this still times out.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    blob = json.dumps(payload).encode()
+    for _ in range(tries):
+        sock.sendto(blob, ("127.0.0.1", port))
+        if key in bridge.latest:
+            return
+        time.sleep(interval)
+    raise AssertionError(f"bridge never ingested {key!r} from the JSON feed")
+
+
 def test_dumps_never_emits_nan():
     out = dumps({"alt": float("nan"), "v": float("inf"), "ok": 1.5, "nest": [float("-inf"), 2]})
     assert "NaN" not in out and "Infinity" not in out
@@ -767,13 +787,7 @@ def test_sim_modelled_wind_is_never_confused_with_the_estimated_wind(ports):
     conn = FakeConn()
 
     # The sim asserts a strong wind over the JSON feed...
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.sendto(json.dumps({"windN": -0.11, "windE": 6.21, "windD": 0.0}).encode(),
-                ("127.0.0.1", ports["json"]))
-    for _ in range(50):
-        if "windE" in b.latest:
-            break
-        time.sleep(0.05)
+    feed_json(b, ports["json"], {"windN": -0.11, "windE": 6.21, "windD": 0.0}, "windE")
     assert b.latest.get("windE") == 6.21
 
     # ...while the autopilot reports still air. Both are retained, unmixed.
