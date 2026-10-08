@@ -747,3 +747,84 @@ def test_wind_triangle_identity_matches_the_estimator(monkeypatch):
     gx, gy = ax + wx, ay + wy
     assert abs(_m.hypot(gx, gy) - 8.0) < 1e-9
     assert abs((_m.degrees(_m.atan2(gy, gx)) + 360) % 360 - 0.0) < 1e-6
+
+
+def test_sim_modelled_wind_is_never_confused_with_the_estimated_wind(ports):
+    """The frame can carry TWO winds, and only one is real.
+
+    `windN/windE/windD` come from the sim's flightlink JSON and are the
+    environment model's intent. `windSpeed/windFromDeg` come from PX4's EKF2 via
+    WIND_COV and are what the airframe actually experienced. In the
+    px4_autopilot rig these differ, because the sim's wind never reaches JSBSim:
+    measured live, the JSON said 6.21 m/s while WIND_COV said 0.14 m/s.
+
+    They must stay in separate fields so a consumer cannot accidentally display
+    the phantom. This pins that separation.
+    """
+    b = Bridge(mavlink_endpoint=f"udpin:127.0.0.1:{ports['mav']}",
+               json_port=ports["json"], ws_port=ports["ws"])
+    threading.Thread(target=b._json_loop, daemon=True).start()
+    conn = FakeConn()
+
+    # The sim asserts a strong wind over the JSON feed...
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.sendto(json.dumps({"windN": -0.11, "windE": 6.21, "windD": 0.0}).encode(),
+                ("127.0.0.1", ports["json"]))
+    for _ in range(50):
+        if "windE" in b.latest:
+            break
+        time.sleep(0.05)
+    assert b.latest.get("windE") == 6.21
+
+    # ...while the autopilot reports still air. Both are retained, unmixed.
+    b._on_mav(conn, _msg("WIND_COV", time_usec=1, wind_x=0.1, wind_y=0.1,
+                         wind_z=0.0, var_horiz=0.0784, var_vert=0.1,
+                         wind_alt=233.0, horiz_accuracy=0.5, vert_accuracy=0.5))
+    assert abs(b.latest["windSpeed"] - math.hypot(0.1, 0.1)) < 1e-9
+    assert b.latest["windE"] == 6.21, "the JSON feed must not be overwritten"
+    assert abs(b.latest["windSpeed"]) < 1.0, "the estimate must not absorb the model"
+
+    # The two names never collide: no key carries both meanings.
+    assert "windSpeed" in b.latest and "windE" in b.latest
+    assert b.latest["windSpeed"] != b.latest["windE"]
+
+
+def test_an_accepted_ack_is_not_proof_the_vehicle_obeyed(monkeypatch):
+    """MAV_RESULT_ACCEPTED means PX4 RECEIVED the command, not that it applied it.
+
+    MEASURED on a live flight: set_mode AUTO.MISSION returned ack "accepted"
+    (result 0) while PX4 stayed in AUTO.LOITER, twice, with no STATUSTEXT to
+    explain it. The console showed a green tick. An operator would believe the
+    mode had changed.
+
+    gs is right to report the ack it received — inventing a failure would be
+    worse. But a consumer must treat an ack as RECEIPT and confirm the effect
+    against observed state. This test pins that the two are distinct signals so
+    nobody conflates them in future.
+    """
+    b, emitted = _bridge_with_loop(monkeypatch)
+    conn = FakeConn()
+
+    # Command out, and PX4 acks it ACCEPTED.
+    b._cmd_queue.put({"id": "m1", "mav_cmd": m.MAV_CMD_DO_SET_MODE,
+                      "params": [float(m.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED), 4, 4, 0, 0, 0, 0]})
+    b._service_commands(conn)
+    b._on_mav(conn, _msg("COMMAND_ACK", command=m.MAV_CMD_DO_SET_MODE,
+                         result=m.MAV_RESULT_ACCEPTED))
+    acks = [a[0] for name, a in emitted if name == "_emit_ack"]
+    assert acks and acks[-1]["ok"] is True and acks[-1]["result"] == 0
+
+    # ...but the vehicle keeps reporting the OLD mode. Both facts coexist, and
+    # the frame is the authority on what the aircraft is actually doing.
+    def hb(custom_mode):
+        ns = _msg("HEARTBEAT", type=m.MAV_TYPE_FIXED_WING,
+                  autopilot=m.MAV_AUTOPILOT_PX4, base_mode=128,
+                  custom_mode=custom_mode, system_status=m.MAV_STATE_ACTIVE)
+        return ns
+
+    b._on_mav(conn, hb((4 << 16) | (3 << 24)))      # AUTO.LOITER
+    assert b.latest["mode"] == "AUTO.LOITER", "state must reflect the vehicle, not the ack"
+
+    # And when it DOES apply, the frame is what says so.
+    b._on_mav(conn, hb((4 << 16) | (4 << 24)))      # AUTO.MISSION
+    assert b.latest["mode"] == "AUTO.MISSION"

@@ -341,9 +341,21 @@ JSON_KEYS = {
     # than differencing position fixes (that path is what fabricated 8.6 m/s of
     # wind out of GPS noise), so the console prefers it when present.
     "trackDeg",
-    # The sim's TRUTH wind (NED m/s, direction the air moves toward). Sim-only —
-    # it has no MAVLink carrier — and it exists so the console's own wind estimate
-    # can be CHECKED against the field the aircraft was actually flown in.
+    # The sim's MODELLED wind (NED m/s, direction the air moves toward). Sim-only;
+    # no MAVLink carrier.
+    #
+    # DO NOT DISPLAY THIS AS THE WIND. It is the environment model's intent, not
+    # what the airframe experienced. In the px4_autopilot rig they are different
+    # things: environment.py models wind with shear and turbulence, but nothing
+    # sets JSBSim's atmosphere/wind-* properties, so the aerodynamics never see
+    # it. MEASURED on a live flight — this feed said 6.21 m/s while PX4's EKF2,
+    # which only knows what the airframe actually flew in, said 0.14 m/s with a
+    # 0.28 sigma. A 6 m/s phantom.
+    #
+    # The wind the operator is shown comes from WIND_COV and nowhere else. These
+    # are kept only so the two can be COMPARED — a nonzero gap means the sim's
+    # wind is not reaching the FDM, which is a sim-configuration bug worth
+    # seeing, not a reading to put on the HUD.
     "windN", "windE", "windD",
 }
 
