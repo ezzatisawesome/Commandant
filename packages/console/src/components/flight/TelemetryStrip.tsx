@@ -207,10 +207,10 @@ export function TelemetryStrip() {
 	const groups = ["Telemetry", "Derived"];
 
 	return (
-		<div className="pointer-events-none fixed inset-x-0 bottom-0 z-40 flex flex-col items-center">
+		<div className="pointer-events-none fixed inset-x-0 bottom-0 z-40 flex flex-col items-stretch">
 			{/* Field picker, opened by clicking a cell in edit mode. */}
 			{picking ? (
-				<div className="pointer-events-auto mb-1 max-h-72 w-80 overflow-auto rounded-md
+				<div className="pointer-events-auto mb-1 max-h-72 w-80 self-center overflow-auto rounded-md
 					border border-white/15 bg-black/90 p-2 text-[11px] backdrop-blur">
 					<div className="mb-1 flex items-center justify-between">
 						<span className="uppercase tracking-wide text-white/50">
@@ -284,8 +284,11 @@ export function TelemetryStrip() {
 				</div>
 			) : null}
 
-			<div className="pointer-events-auto flex max-w-[calc(100vw-1rem)] flex-col
-				rounded-t-md border-x border-t border-white/10 bg-black/70 backdrop-blur">
+			{/* Full-bleed: the strip spans the whole viewport width, so the grid
+			    reads as an instrument row along the bottom edge rather than a
+			    floating card. Only the top edge is drawn — the sides are screen. */}
+			<div className="pointer-events-auto flex w-full flex-col
+				border-t border-white/10 bg-black/70 backdrop-blur">
 				{rows.map((row, r) => (
 					<div key={r}
 						className={`flex items-stretch overflow-x-auto py-1.5
