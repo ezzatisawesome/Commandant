@@ -10,11 +10,17 @@ import {
 	CallbackProperty,
 	CallbackPositionProperty,
 	Color,
+	Ellipsoid,
+	EllipsoidGeodesic,
 	Entity,
+	HeightReference,
 	LabelStyle,
 	Math as CesiumMath,
+	Matrix4,
+	SceneTransforms,
 	ScreenSpaceEventHandler,
 	ScreenSpaceEventType,
+	Transforms,
 	VerticalOrigin,
 } from "cesium";
 
@@ -28,34 +34,92 @@ import {
 	addWaypoint,
 	kindHasPosition,
 	moveItemPosition,
+	updateItem,
 } from "@/stores/mission.store";
+import {
+	ALT_SAMPLE_M,
+	clampAlt,
+	clampRadius,
+	defaultRadius,
+	radiusParamKey,
+	snap,
+	altDeltaFromDrag,
+} from "@/lib/grabbers";
+import { firstTaggedId, tagSeq } from "@/lib/pickTag";
+import { ALT_HANDLE_MISSION, ALT_HANDLE_OFFSET_PX, ALT_HANDLE_PX } from "@/lib/altHandle";
 import { $aircraftStore } from "@/stores/aircraft.store";
+import type { MissionItem } from "@/types/app";
 
 // Mission authoring + rendering on the globe. Draws the planned route as a white
 // polyline through the positioned items with a numbered marker per item; the
-// active item (MISSION_CURRENT) turns yellow and reached items dim green. In edit
-// mode a left-click appends a waypoint at the clicked point, and any marker can be
-// dragged to move its item. Kept separate from Aircraft.tsx so the plane overlay
-// and the mission overlay own their own entities/handlers independently.
+// active item (MISSION_CURRENT) turns yellow and reached items dim green.
 //
-// Markers are drawn at the aircraft's current altitude (the plan's horizontal
-// path is the intent; alt per item is edited in the table), matching how the
-// setpoint overlay is placed in Aircraft.tsx.
+// Each waypoint is drawn AT ITS OWN ALTITUDE, standing on a vertical stem down
+// to the terrain. Markers used to sit at the aircraft's current altitude, which
+// made the plan look flat and left the one number that matters most — how high
+// the aircraft will be at that point — editable only as a figure in a table. A
+// stem makes the altitude a thing on screen, and a thing on screen can be
+// grabbed.
+//
+// In edit mode each positioned item grows two grabbers:
+//
+//   ▲ vertical (above the marker)  drag up/down to set altitude. The drag is
+//     resolved along the local vertical AS IT PROJECTS ON SCREEN, so it tracks
+//     the handle at any camera tilt instead of assuming up-is-up.
+//   ◆ radial (on the ring)         drag in/out to set the item's horizontal
+//     dimension — a loiter's orbit radius, or a waypoint's accept radius. The
+//     ring is drawn at the item's altitude, so what you see is the number.
+//
+// Kept separate from Aircraft.tsx so the plane overlay and the mission overlay
+// own their own entities/handlers independently.
 export default function MissionLayer() {
 	const $viewer = useStore($viewerStore);
 
 	useEffect(() => {
 		if (!$viewer) return;
 
-		const markerAlt = () => $aircraftStore.get()?.alt ?? 0;
+		const itemOf = (seq: number): MissionItem | undefined =>
+			$missionItems.get().find((x) => x.seq === seq);
+		const altOf = (it: MissionItem | undefined) =>
+			it && Number.isFinite(it.alt) ? (it.alt as number) : 0;
+		// Grabbers are an authoring affordance: hidden outside edit mode so a
+		// monitoring console is not peppered with handles, and never shown in the
+		// read-only build.
+		const editing = () => !IS_VIEW && $missionEdit.get();
 
-		// Route polyline through positioned items, live from the store.
+		const radiusOf = (it: MissionItem | undefined): number | null => {
+			if (!it) return null;
+			const key = radiusParamKey(it.kind);
+			if (!key) return null;
+			const v = it.params?.[key];
+			return Number.isFinite(v) ? clampRadius(v as number) : null;
+		};
+
+		// World position of an item, at its own altitude.
+		const posOf = (seq: number): Cartesian3 | undefined => {
+			const it = itemOf(seq);
+			if (!it || it.lat === undefined || it.lon === undefined) return undefined;
+			return Cartesian3.fromDegrees(it.lon, it.lat, altOf(it));
+		};
+
+		// A point `metres` due east of an item, at its own altitude — where the
+		// radius grabber rides. East is arbitrary but stable, which is what makes
+		// the handle findable; local ENU keeps it exact at any latitude.
+		const eastOf = (seq: number, metres: number): Cartesian3 | undefined => {
+			const centre = posOf(seq);
+			if (!centre) return undefined;
+			const frame = Transforms.eastNorthUpToFixedFrame(centre);
+			return Matrix4.multiplyByPoint(frame, new Cartesian3(metres, 0, 0), new Cartesian3());
+		};
+
+		// Route polyline through positioned items, live from the store, now at the
+		// planned altitudes so the route climbs and descends as authored.
 		const route = $viewer.entities.add({
 			polyline: {
 				positions: new CallbackProperty(() => {
 					const pts = $missionItems.get()
 						.filter((it) => kindHasPosition(it.kind) && it.lat !== undefined && it.lon !== undefined)
-						.map((it) => Cartesian3.fromDegrees(it.lon!, it.lat!, markerAlt()));
+						.map((it) => Cartesian3.fromDegrees(it.lon!, it.lat!, altOf(it)));
 					return pts.length >= 2 ? pts : undefined;
 				}, false),
 				width: 2,
@@ -64,16 +128,17 @@ export default function MissionLayer() {
 			},
 		});
 
-		// One marker entity per positioned item. Rebuilt only when the item list
-		// changes STRUCTURALLY (add/remove/reorder/kind); a drag updates lat/lon
-		// through the CallbackPositionProperty below, so re-creating every marker
-		// on each mouse-move (as a plain store subscription would) is avoided.
+		// One marker (plus stem and, in edit mode, grabbers) per positioned item.
+		// Rebuilt only when the item list changes STRUCTURALLY (add/remove/reorder/
+		// kind) or when edit mode toggles; a drag updates lat/lon/alt/radius through
+		// the callback properties below, so re-creating every entity on each
+		// mouse-move (as a plain store subscription would) is avoided.
 		let markers: Entity[] = [];
 		let structure = "";
 		const rebuildMarkers = () => {
 			const sig = $missionItems.get()
 				.map((it) => `${it.seq}:${it.kind}:${kindHasPosition(it.kind) && it.lat !== undefined ? 1 : 0}`)
-				.join(",");
+				.join(",") + `|${editing() ? 1 : 0}`;
 			if (sig === structure) return;
 			structure = sig;
 			markers.forEach((m) => $viewer.entities.remove(m));
@@ -81,24 +146,59 @@ export default function MissionLayer() {
 			for (const it of $missionItems.get()) {
 				if (!kindHasPosition(it.kind) || it.lat === undefined || it.lon === undefined) continue;
 				const seq = it.seq;
-				const m = $viewer.entities.add({
-					// id tags the marker so the drag handler can map a pick back to a seq.
-					id: `mission-wp-${seq}`,
+				const colour = () => {
+					if ($missionCurrent.get() === seq) return Color.YELLOW;
+					const reached = $missionReached.get();
+					if (reached !== null && seq <= reached) return Color.LIME.withAlpha(0.7);
+					return Color.WHITE;
+				};
+
+				// The stem: terrain up to the planned altitude. This is what turns an
+				// altitude into something you can see (and aim a grabber at).
+				markers.push($viewer.entities.add({
+					polyline: {
+						positions: new CallbackProperty(() => {
+							const cur = itemOf(seq);
+							if (!cur || cur.lat === undefined || cur.lon === undefined) return undefined;
+							return [
+								Cartesian3.fromDegrees(cur.lon, cur.lat, 0),
+								Cartesian3.fromDegrees(cur.lon, cur.lat, altOf(cur)),
+							];
+						}, false),
+						width: 1,
+						material: Color.WHITE.withAlpha(0.35),
+						arcType: ArcType.NONE,
+					},
+				}));
+
+				// Ground tick, so the plan's footprint stays readable from straight
+				// down where the stems foreshorten to nothing.
+				markers.push($viewer.entities.add({
 					position: new CallbackPositionProperty(() => {
-						const cur = $missionItems.get().find((x) => x.seq === seq);
+						const cur = itemOf(seq);
 						if (!cur || cur.lat === undefined || cur.lon === undefined) return undefined;
-						return Cartesian3.fromDegrees(cur.lon, cur.lat, markerAlt());
+						return Cartesian3.fromDegrees(cur.lon, cur.lat, 0);
 					}, false),
 					point: {
+						pixelSize: 4,
+						color: Color.WHITE.withAlpha(0.4),
+						heightReference: HeightReference.NONE,
+					},
+				}));
+
+				// The marker itself, at the item's own altitude.
+				markers.push($viewer.entities.add({
+					// id tags the marker so the drag handler can map a pick back to a seq.
+					id: `mission-wp-${seq}`,
+					position: new CallbackPositionProperty(() => posOf(seq), false),
+					point: {
 						pixelSize: 12,
-						color: new CallbackProperty(() => {
-							if ($missionCurrent.get() === seq) return Color.YELLOW;
-							const reached = $missionReached.get();
-							if (reached !== null && seq <= reached) return Color.LIME.withAlpha(0.7);
-							return Color.WHITE;
-						}, false),
+						color: new CallbackProperty(colour, false),
 						outlineColor: Color.BLACK,
 						outlineWidth: 1,
+						// Grabbable even when a fence wall or the terrain is between it
+						// and the camera; a marker you cannot click cannot be moved.
+						disableDepthTestDistance: Number.POSITIVE_INFINITY,
 					},
 					label: {
 						text: `${seq}`,
@@ -108,21 +208,101 @@ export default function MissionLayer() {
 						verticalOrigin: VerticalOrigin.CENTER,
 						pixelOffset: new Cartesian2(0, 0),
 					},
-				});
-				markers.push(m);
+				}));
+
+				// Altitude readout, beside the marker, so a drag has a number.
+				markers.push($viewer.entities.add({
+					position: new CallbackPositionProperty(() => posOf(seq), false),
+					label: {
+						text: new CallbackProperty(() => `${Math.round(altOf(itemOf(seq)))} m`, false),
+						font: "10px monospace",
+						fillColor: Color.WHITE.withAlpha(0.75),
+						style: LabelStyle.FILL,
+						verticalOrigin: VerticalOrigin.CENTER,
+						pixelOffset: new Cartesian2(14, 10),
+					},
+				}));
+
+				if (!editing()) continue;
+
+				// --- the vertical grabber -------------------------------------
+				// A chevron sitting just above the marker. Offset in PIXELS, not
+				// metres, so it stays the same reachable distance from the marker at
+				// every zoom level — and clear of it, so the two never contend for
+				// the same pick.
+				markers.push($viewer.entities.add({
+					id: `mission-alt-${seq}`,
+					position: new CallbackPositionProperty(() => posOf(seq), false),
+					billboard: {
+						image: ALT_HANDLE_MISSION,
+						width: ALT_HANDLE_PX,
+						height: ALT_HANDLE_PX,
+						verticalOrigin: VerticalOrigin.CENTER,
+						pixelOffset: new Cartesian2(0, ALT_HANDLE_OFFSET_PX),
+						// Reachable even when the handle is behind terrain or inside a
+						// fence volume; a grabber you cannot click is not a grabber.
+						disableDepthTestDistance: Number.POSITIVE_INFINITY,
+					},
+				}));
+
+				// --- the radial grabber ---------------------------------------
+				const key = radiusParamKey(it.kind);
+				if (key) {
+					const ringRadius = () => radiusOf(itemOf(seq)) ?? defaultRadius(it.kind);
+					// The ring: the dimension, drawn at the item's altitude.
+					markers.push($viewer.entities.add({
+						position: new CallbackPositionProperty(() => posOf(seq), false),
+						ellipse: {
+							semiMajorAxis: new CallbackProperty(ringRadius, false) as unknown as number,
+							semiMinorAxis: new CallbackProperty(ringRadius, false) as unknown as number,
+							height: new CallbackProperty(() => altOf(itemOf(seq)), false) as unknown as number,
+							material: Color.AQUA.withAlpha(0.06),
+							outline: true,
+							outlineColor: Color.AQUA.withAlpha(0.55),
+						},
+					}));
+					// The handle on the rim.
+					markers.push($viewer.entities.add({
+						id: `mission-rad-${seq}`,
+						position: new CallbackPositionProperty(
+							() => eastOf(seq, ringRadius()), false,
+						),
+						point: {
+							pixelSize: 9,
+							color: Color.AQUA,
+							outlineColor: Color.BLACK,
+							outlineWidth: 1,
+							disableDepthTestDistance: Number.POSITIVE_INFINITY,
+						},
+						label: {
+							text: new CallbackProperty(() => `${Math.round(ringRadius())} m`, false),
+							font: "10px monospace",
+							fillColor: Color.AQUA,
+							style: LabelStyle.FILL,
+							verticalOrigin: VerticalOrigin.BOTTOM,
+							pixelOffset: new Cartesian2(0, -10),
+						},
+					}));
+				}
 			}
 			$viewer.scene.requestRender();
 		};
 		rebuildMarkers();
 		const unsubItems = $missionItems.subscribe(rebuildMarkers);
+		// Toggling edit mode adds/removes the grabbers, so it is a structural change.
+		const unsubEdit = $missionEdit.subscribe(rebuildMarkers);
 
-		// --- authoring: click to add, drag to move ---------------------------
+		// --- authoring: click to add, drag to move/raise/resize ---------------
 		const handler = new ScreenSpaceEventHandler($viewer.scene.canvas);
 
 		// Left-click appends a waypoint, but only in edit mode (otherwise it would
 		// fight camera interaction). A drag-release also fires LEFT_CLICK, so skip
 		// the add if we were dragging.
-		let dragSeq: number | null = null;
+		type Drag =
+			| { what: "move"; seq: number }
+			| { what: "alt"; seq: number; startAlt: number; from: Cartesian2 }
+			| { what: "radius"; seq: number };
+		let drag: Drag | null = null;
 		let didDrag = false;
 
 		handler.setInputAction((m: { position: Cartesian2 }) => {
@@ -130,42 +310,106 @@ export default function MissionLayer() {
 			const cart = $viewer.camera.pickEllipsoid(m.position, $viewer.scene.globe.ellipsoid);
 			if (!cart) return;
 			const geo = Cartographic.fromCartesian(cart);
+			// A new waypoint takes the aircraft's current altitude as its starting
+			// height — the only sane default — and the operator drags it from there.
 			addWaypoint(
 				CesiumMath.toDegrees(geo.latitude),
 				CesiumMath.toDegrees(geo.longitude),
-				markerAlt(),
+				clampAlt($aircraftStore.get()?.alt ?? 0),
 			);
 		}, ScreenSpaceEventType.LEFT_CLICK);
 
-		// Drag a marker: pick on LEFT_DOWN, move on MOUSE_MOVE, release on LEFT_UP.
+		// Arm a drag: pick on LEFT_DOWN, move on MOUSE_MOVE, release on LEFT_UP.
 		// Disable the camera controls while dragging so the globe doesn't pan.
 		handler.setInputAction((m: { position: Cartesian2 }) => {
-			if (IS_VIEW) return;  // read-only: markers are not draggable
-			const picked = $viewer.scene.pick(m.position);
-			const id: unknown = picked?.id?.id;
-			if (typeof id === "string" && id.startsWith("mission-wp-")) {
-				dragSeq = Number(id.slice("mission-wp-".length));
-				didDrag = false;
-				$viewer.scene.screenSpaceCameraController.enableInputs = false;
+			if (IS_VIEW) return;  // read-only: nothing is draggable
+			// drillPick, not pick: a marker can sit behind a fence wall or inside
+			// its own ring, and the topmost primitive is often not the handle.
+			// The nearest TAGGED hit wins; the grabbers are offset clear of the
+			// marker so the three never contend for the same pixel.
+			const id = firstTaggedId(
+				$viewer.scene.drillPick(m.position, 8),
+				["mission-alt-", "mission-rad-", "mission-wp-"],
+			);
+			if (id === null) return;
+
+			const altSeq = tagSeq(id, "mission-alt-");
+			const radSeq = tagSeq(id, "mission-rad-");
+			const wpSeq = tagSeq(id, "mission-wp-");
+
+			if (altSeq !== null) {
+				drag = { what: "alt", seq: altSeq, startAlt: altOf(itemOf(altSeq)), from: m.position.clone() };
+			} else if (radSeq !== null) {
+				drag = { what: "radius", seq: radSeq };
+			} else if (wpSeq !== null) {
+				drag = { what: "move", seq: wpSeq };
+			} else {
+				return;
 			}
+			didDrag = false;
+			$viewer.scene.screenSpaceCameraController.enableInputs = false;
 		}, ScreenSpaceEventType.LEFT_DOWN);
 
 		handler.setInputAction((m: { endPosition: Cartesian2 }) => {
-			if (dragSeq === null) return;
+			if (!drag) return;
+
+			if (drag.what === "alt") {
+				// Resolve the drag along the local vertical as it projects on screen,
+				// so the handle tracks the mouse at any camera tilt. Two samples
+				// 100 m apart give that direction and its pixel length.
+				const base = posOf(drag.seq);
+				if (!base) return;
+				const it = itemOf(drag.seq);
+				if (!it || it.lat === undefined || it.lon === undefined) return;
+				const higher = Cartesian3.fromDegrees(it.lon, it.lat, altOf(it) + ALT_SAMPLE_M);
+				const s0 = SceneTransforms.worldToWindowCoordinates($viewer.scene, base);
+				const s1 = SceneTransforms.worldToWindowCoordinates($viewer.scene, higher);
+				if (!s0 || !s1) return;
+				const delta = altDeltaFromDrag(
+					{ x: m.endPosition.x - drag.from.x, y: m.endPosition.y - drag.from.y },
+					{ x: s1.x - s0.x, y: s1.y - s0.y },
+				);
+				didDrag = true;
+				updateItem(drag.seq, { alt: snap(clampAlt(drag.startAlt + delta)) });
+				$viewer.scene.requestRender();
+				return;
+			}
+
+			if (drag.what === "radius") {
+				// Radius is the ground distance from the item to the cursor, which
+				// reads exactly as "drag the ring to the size you want".
+				const it = itemOf(drag.seq);
+				if (!it || it.lat === undefined || it.lon === undefined) return;
+				const key = radiusParamKey(it.kind);
+				if (!key) return;
+				const cart = $viewer.camera.pickEllipsoid(m.endPosition, $viewer.scene.globe.ellipsoid);
+				if (!cart) return;
+				const cursor = Cartographic.fromCartesian(cart);
+				const centre = Cartographic.fromDegrees(it.lon, it.lat);
+				const geodesic = new EllipsoidGeodesic(centre, cursor, Ellipsoid.WGS84);
+				didDrag = true;
+				updateItem(drag.seq, {
+					params: { ...it.params, [key]: snap(clampRadius(geodesic.surfaceDistance)) },
+				});
+				$viewer.scene.requestRender();
+				return;
+			}
+
+			// Plain lateral move.
 			const cart = $viewer.camera.pickEllipsoid(m.endPosition, $viewer.scene.globe.ellipsoid);
 			if (!cart) return;
 			const geo = Cartographic.fromCartesian(cart);
 			didDrag = true;
 			moveItemPosition(
-				dragSeq,
+				drag.seq,
 				CesiumMath.toDegrees(geo.latitude),
 				CesiumMath.toDegrees(geo.longitude),
 			);
 		}, ScreenSpaceEventType.MOUSE_MOVE);
 
 		handler.setInputAction(() => {
-			if (dragSeq !== null) {
-				dragSeq = null;
+			if (drag !== null) {
+				drag = null;
 				$viewer.scene.screenSpaceCameraController.enableInputs = true;
 				// Clear the drag flag on the next tick so the trailing LEFT_CLICK is
 				// still suppressed, but a later plain click adds normally.
@@ -175,6 +419,7 @@ export default function MissionLayer() {
 
 		return () => {
 			unsubItems();
+			unsubEdit();
 			handler.destroy();
 			markers.forEach((m) => $viewer.entities.remove(m));
 			markers = [];

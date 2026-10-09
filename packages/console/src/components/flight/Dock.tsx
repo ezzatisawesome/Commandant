@@ -1,6 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useStore } from "@nanostores/react";
+
+import { $globeAuthoring, shouldDismissOnOutsideClick } from "@/stores/authoring.store";
 
 // The dock: a slim column of icons on the right edge, with at most one panel
 // open at a time.
@@ -9,7 +12,9 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 // of the screen. That rail cost roughly a quarter of the viewport permanently,
 // and the viewport is the instrument — the 3D world is what the operator is
 // actually reading. Everything that is not needed continuously is now one click
-// away and closes on the next click, on Escape, or when another is opened.
+// away and closes on the next click, on Escape, or when another is opened — the
+// exception being the two authoring panels while their map-edit mode is on,
+// since there every globe click is work being done through the open panel.
 //
 // Rules this enforces structurally rather than by convention:
 //
@@ -37,14 +42,19 @@ export function nextOpen(current: string | null, clicked: string): string | null
 export function Dock({ items }: { items: DockItem[] }) {
 	const [open, setOpen] = useState<string | null>(null);
 	const wrap = useRef<HTMLDivElement>(null);
+	// While the operator is authoring on the globe, a click on the globe is work,
+	// not a dismissal — see the store.
+	const authoring = useStore($globeAuthoring);
 
-	// Escape closes, and a click on the globe closes. A panel that needs an
-	// explicit close button is a panel that stays open by accident.
+	// Escape closes, and so does a click outside — except while the operator is
+	// authoring on the globe, when that click IS the panel being used. A panel
+	// that needs an explicit close button is a panel that stays open by accident.
 	useEffect(() => {
 		if (!open) return;
 		const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(null); };
 		const onDown = (e: PointerEvent) => {
-			if (!wrap.current?.contains(e.target as Node)) setOpen(null);
+			if (wrap.current?.contains(e.target as Node)) return;
+			if (shouldDismissOnOutsideClick(authoring)) setOpen(null);
 		};
 		window.addEventListener("keydown", onKey);
 		// `true`: Cesium stops propagation on the canvas, so listen on the way down.
@@ -53,7 +63,7 @@ export function Dock({ items }: { items: DockItem[] }) {
 			window.removeEventListener("keydown", onKey);
 			window.removeEventListener("pointerdown", onDown, true);
 		};
-	}, [open]);
+	}, [open, authoring]);
 
 	const active = items.find((i) => i.key === open) ?? null;
 
