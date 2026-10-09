@@ -12,36 +12,56 @@ export type FieldKind = "num" | "text" | "control";
 export interface FieldDef {
 	key: keyof TelemetryFrame;
 	label: string;
+	/**
+	 * Dotted channel id, `<subsystem>.<signal>` — `bus.voltage`, `nav.alt`.
+	 * The storage key stays the MAVLink-ish field name so saved layouts keep
+	 * working; this is the name the operator picks by, because "Voltage" alone
+	 * does not say whether it is the bus, a cell, or the motor controller.
+	 */
+	channel: string;
 	unit?: string;
 	digits?: number;
 	kind: FieldKind;
 	sparkClassName?: string;
 }
 
+/** Subsystem prefixes, in picker order, with the heading each one reads as. */
+export const CHANNEL_GROUPS: Array<{ ns: string; title: string }> = [
+	{ ns: "fc", title: "Flight control" },
+	{ ns: "nav", title: "Navigation" },
+	{ ns: "air", title: "Air data" },
+	{ ns: "att", title: "Attitude" },
+	{ ns: "ctl", title: "Control surfaces" },
+	{ ns: "bus", title: "Power bus" },
+	{ ns: "power", title: "Power flow" },
+	{ ns: "solar", title: "Solar" },
+	{ ns: "derived", title: "Derived" },
+];
+
 // Every telemetry field a viewer can choose to show / chart. Numeric fields are
 // chartable; text (mode/armed) and control bars are not.
 export const FIELD_CATALOG: FieldDef[] = [
-	{ key: "mode", label: "Mode", kind: "text" },
-	{ key: "armed", label: "Armed", kind: "text" },
-	{ key: "airspeed", label: "Airspeed", unit: "m/s", digits: 1, kind: "num", sparkClassName: "text-emerald-400/80" },
-	{ key: "groundspeed", label: "Groundspeed", unit: "m/s", digits: 1, kind: "num", sparkClassName: "text-emerald-400/60" },
-	{ key: "alt", label: "Altitude", unit: "m", digits: 0, kind: "num", sparkClassName: "text-sky-400/80" },
-	{ key: "heading", label: "Heading", unit: "°", digits: 0, kind: "num" },
-	{ key: "throttle", label: "Throttle", unit: "%", digits: 0, kind: "num", sparkClassName: "text-amber-400/80" },
-	{ key: "roll", label: "Roll", unit: "rad", digits: 2, kind: "num" },
-	{ key: "pitch", label: "Pitch", unit: "rad", digits: 2, kind: "num" },
-	{ key: "yaw", label: "Yaw", unit: "rad", digits: 2, kind: "num" },
-	{ key: "elevator", label: "Elevator", unit: "%", digits: 0, kind: "control" },
-	{ key: "aileron", label: "Aileron", unit: "%", digits: 0, kind: "control" },
-	{ key: "rudder", label: "Rudder", unit: "%", digits: 0, kind: "control" },
-	{ key: "batteryRemaining", label: "Battery", unit: "%", digits: 0, kind: "num", sparkClassName: "text-emerald-400/80" },
-	{ key: "voltage", label: "Voltage", unit: "V", digits: 2, kind: "num", sparkClassName: "text-violet-400/80" },
-	{ key: "current", label: "Net Current", unit: "A", digits: 1, kind: "num", sparkClassName: "text-rose-400/80" },
-	{ key: "genW", label: "Solar Gen", unit: "W", digits: 0, kind: "num", sparkClassName: "text-yellow-400/80" },
-	{ key: "loadW", label: "Load", unit: "W", digits: 0, kind: "num", sparkClassName: "text-orange-400/80" },
-	{ key: "propW", label: "Propulsion", unit: "W", digits: 0, kind: "num", sparkClassName: "text-orange-300/80" },
-	{ key: "motorCurrent", label: "Motor", unit: "A", digits: 1, kind: "num", sparkClassName: "text-rose-400/80" },
-	{ key: "irradiance", label: "Irradiance", unit: "W/m²", digits: 0, kind: "num", sparkClassName: "text-yellow-300/80" },
+	{ key: "mode", label: "Mode", channel: "fc.mode", kind: "text" },
+	{ key: "armed", label: "Armed", channel: "fc.armed", kind: "text" },
+	{ key: "airspeed", label: "Airspeed", channel: "air.airspeed", unit: "m/s", digits: 1, kind: "num", sparkClassName: "text-emerald-400/80" },
+	{ key: "groundspeed", label: "Groundspeed", channel: "nav.groundspeed", unit: "m/s", digits: 1, kind: "num", sparkClassName: "text-emerald-400/60" },
+	{ key: "alt", label: "Altitude", channel: "nav.alt", unit: "m", digits: 0, kind: "num", sparkClassName: "text-sky-400/80" },
+	{ key: "heading", label: "Heading", channel: "nav.heading", unit: "°", digits: 0, kind: "num" },
+	{ key: "throttle", label: "Throttle", channel: "ctl.throttle", unit: "%", digits: 0, kind: "num", sparkClassName: "text-amber-400/80" },
+	{ key: "roll", label: "Roll", channel: "att.roll", unit: "rad", digits: 2, kind: "num" },
+	{ key: "pitch", label: "Pitch", channel: "att.pitch", unit: "rad", digits: 2, kind: "num" },
+	{ key: "yaw", label: "Yaw", channel: "att.yaw", unit: "rad", digits: 2, kind: "num" },
+	{ key: "elevator", label: "Elevator", channel: "ctl.elevator", unit: "%", digits: 0, kind: "control" },
+	{ key: "aileron", label: "Aileron", channel: "ctl.aileron", unit: "%", digits: 0, kind: "control" },
+	{ key: "rudder", label: "Rudder", channel: "ctl.rudder", unit: "%", digits: 0, kind: "control" },
+	{ key: "batteryRemaining", label: "Battery", channel: "bus.battery", unit: "%", digits: 0, kind: "num", sparkClassName: "text-emerald-400/80" },
+	{ key: "voltage", label: "Voltage", channel: "bus.voltage", unit: "V", digits: 2, kind: "num", sparkClassName: "text-violet-400/80" },
+	{ key: "current", label: "Net Current", channel: "bus.current", unit: "A", digits: 1, kind: "num", sparkClassName: "text-rose-400/80" },
+	{ key: "genW", label: "Solar Gen", channel: "power.gen", unit: "W", digits: 0, kind: "num", sparkClassName: "text-yellow-400/80" },
+	{ key: "loadW", label: "Load", channel: "power.load", unit: "W", digits: 0, kind: "num", sparkClassName: "text-orange-400/80" },
+	{ key: "propW", label: "Propulsion", channel: "power.prop", unit: "W", digits: 0, kind: "num", sparkClassName: "text-orange-300/80" },
+	{ key: "motorCurrent", label: "Motor", channel: "power.motor", unit: "A", digits: 1, kind: "num", sparkClassName: "text-rose-400/80" },
+	{ key: "irradiance", label: "Irradiance", channel: "solar.irradiance", unit: "W/m²", digits: 0, kind: "num", sparkClassName: "text-yellow-300/80" },
 ];
 
 // Derived fields are not on the MAVLink wire; they are computed in
@@ -51,31 +71,53 @@ export const FIELD_CATALOG: FieldDef[] = [
 export const DERIVED_KEYS = ["aglFt", "wind", "drift", "sunEl", "fenceDist", "targetDist"] as const;
 export type DerivedKey = (typeof DERIVED_KEYS)[number];
 
-export const DERIVED_CATALOG: Array<{ key: DerivedKey; label: string; unit?: string }> = [
-	{ key: "aglFt", label: "AGL", unit: "ft" },
-	{ key: "wind", label: "Wind", unit: "m/s" },
-	{ key: "drift", label: "Drift", unit: "°" },
-	{ key: "sunEl", label: "Sun", unit: "°" },
-	{ key: "fenceDist", label: "Fence", unit: "m" },
-	{ key: "targetDist", label: "To setpoint", unit: "m" },
+export const DERIVED_CATALOG: Array<{
+	key: DerivedKey; label: string; channel: string; unit?: string;
+}> = [
+	{ key: "aglFt", label: "AGL", channel: "derived.agl", unit: "ft" },
+	{ key: "wind", label: "Wind", channel: "derived.wind", unit: "m/s" },
+	{ key: "drift", label: "Drift", channel: "derived.drift", unit: "°" },
+	{ key: "sunEl", label: "Sun", channel: "derived.sun_el", unit: "°" },
+	{ key: "fenceDist", label: "Fence", channel: "derived.fence_dist", unit: "m" },
+	{ key: "targetDist", label: "To setpoint", channel: "derived.target_dist", unit: "m" },
 ];
 
 export const DERIVED_BY_KEY = Object.fromEntries(
 	DERIVED_CATALOG.map((d) => [d.key as string, d]),
-) as Record<string, { key: DerivedKey; label: string; unit?: string }>;
+) as Record<string, { key: DerivedKey; label: string; channel: string; unit?: string }>;
 
 export function isDerivedKey(key: string): key is DerivedKey {
 	return (DERIVED_KEYS as readonly string[]).includes(key);
 }
 
-/** Every selectable cell, telemetry and derived alike. */
-export function allFieldOptions(): Array<{ key: string; label: string; group: string }> {
-	return [
+export interface FieldOption {
+	key: string;
+	label: string;
+	/** `<subsystem>.<signal>`, e.g. `bus.voltage`. */
+	channel: string;
+	/** The channel's subsystem prefix — what the picker groups by. */
+	group: string;
+	unit?: string;
+	/** Computed on the ground rather than read off the wire. */
+	derived: boolean;
+}
+
+/** Every selectable channel, telemetry and derived alike, in subsystem order. */
+export function allFieldOptions(): FieldOption[] {
+	const all: FieldOption[] = [
 		...FIELD_CATALOG.map((d) => ({
-			key: d.key as string, label: d.label, group: "Telemetry",
+			key: d.key as string, label: d.label, channel: d.channel,
+			group: d.channel.split(".")[0], unit: d.unit, derived: false,
 		})),
-		...DERIVED_CATALOG.map((d) => ({ key: d.key, label: d.label, group: "Derived" })),
+		...DERIVED_CATALOG.map((d) => ({
+			key: d.key as string, label: d.label, channel: d.channel,
+			group: d.channel.split(".")[0], unit: d.unit, derived: true,
+		})),
 	];
+	const order = new Map(CHANNEL_GROUPS.map((g, i) => [g.ns, i]));
+	return all.sort((a, b) =>
+		(order.get(a.group) ?? 99) - (order.get(b.group) ?? 99)
+		|| a.channel.localeCompare(b.channel));
 }
 
 export const FIELD_BY_KEY: Record<string, FieldDef> = Object.fromEntries(
@@ -199,23 +241,12 @@ export function moveCell(row: number, index: number, dir: -1 | 1) {
 	$extraRows.set(rows);
 }
 
-export function toggleVisible(key: string) {
-	const cur = $visibleFields.get();
-	$visibleFields.set(cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key]);
-}
 
 export function toggleCharted(key: string) {
 	const cur = $chartedFields.get();
 	$chartedFields.set(cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key]);
 }
 
-// Move a visible field up/down in render order.
-export function moveField(key: string, dir: -1 | 1) {
-	const cur = $visibleFields.get();
-	const i = cur.indexOf(key);
-	const j = i + dir;
-	if (i < 0 || j < 0 || j >= cur.length) return;
-	const next = cur.slice();
-	[next[i], next[j]] = [next[j], next[i]];
-	$visibleFields.set(next);
-}
+// toggleVisible / moveField used to drive the Instruments panel's field list.
+// That list is gone — the strip is edited in place through setCell/moveCell —
+// and a second path into the same state is how two editors drift apart.

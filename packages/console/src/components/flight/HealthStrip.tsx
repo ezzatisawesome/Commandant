@@ -24,6 +24,11 @@ function Chip({ label, ok, warn, text }: { label: string; ok?: boolean; warn?: b
 // Compact vehicle-health row: EKF, GPS (fix + sats), failsafe, and any battery
 // warning — the at-a-glance "is it safe to fly" strip. Fields come from gs
 // (SYS_STATUS / GPS_RAW_INT / EKF_STATUS_REPORT), merged into the telemetry frame.
+//
+// It lives pinned to the telemetry strip rather than inside a dock panel: "is it
+// safe to fly" is the one readout that must never need a click, and a click is
+// exactly what a dock panel costs. Layout-neutral on purpose — no margins or
+// rules of its own — so the host decides where the chips sit.
 export function HealthStrip() {
 	const f = useStore($hudFrame);
 
@@ -34,7 +39,7 @@ export function HealthStrip() {
 	const batt = f?.batteryWarning ?? null;
 
 	return (
-		<div className="mt-2 flex flex-wrap gap-1 border-t border-white/10 pt-2">
+		<div className="flex flex-wrap items-center gap-1">
 			<Chip
 				label="EKF"
 				ok={f?.ekfOk === true}

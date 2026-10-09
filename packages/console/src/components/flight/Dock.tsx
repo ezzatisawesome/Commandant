@@ -57,16 +57,25 @@ export function Dock({ items }: { items: DockItem[] }) {
 
 	const active = items.find((i) => i.key === open) ?? null;
 
+	// The rail is the only thing in flow, and it is what gets centred. The panel
+	// is taken OUT of flow (absolute, hung off the rail's inboard edge), because
+	// while it shared the flex row the group's height changed when a panel
+	// opened — and `-translate-y-1/2` centres whatever height the group happens
+	// to have, so every click jumped the icons vertically. A control that moves
+	// when you press it is a control you cannot press twice, which is exactly
+	// what closing a panel requires. Now the icon stays under the cursor.
 	return (
-		<div ref={wrap} className="fixed right-3 top-1/2 z-50 flex -translate-y-1/2 items-start gap-2">
-			{/* The panel opens inboard of the dock, so the icons never move. */}
+		<div ref={wrap} className="fixed right-3 top-1/2 z-50 -translate-y-1/2">
 			{active ? (
 				<div
 					role="dialog"
 					aria-label={active.label}
-					// Capped so an open panel cannot reach the telemetry strip along
+					// Opens inboard, centred on the rail independently of its own
+					// height, and capped so it cannot reach the telemetry strip along
 					// the bottom edge or the heading tape across the top.
-					className="max-h-[calc(100vh-13rem)] overflow-y-auto rounded-md border border-white/10 bg-black/70 p-3 backdrop-blur"
+					className="absolute right-full top-1/2 mr-2 max-h-[calc(100vh-13rem)]
+						w-max max-w-[calc(100vw-5rem)] -translate-y-1/2 overflow-y-auto rounded-md
+						border border-white/10 bg-black/70 p-3 backdrop-blur"
 				>
 					{active.panel}
 				</div>
