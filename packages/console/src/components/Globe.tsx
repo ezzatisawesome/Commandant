@@ -7,6 +7,7 @@ import { Viewer, Ion, createWorldTerrainAsync, ArcGisMapServerImageryProvider } 
 import envs from "@/lib/envs";
 import { $viewerStore } from "@/stores/cesium.store";
 import { driveRendering } from "@/lib/driveRendering";
+import { applyQuality } from "@/lib/renderQuality";
 import { $timeStore } from "@/stores/states.store";
 
 // Generic Cesium globe. Owns only the Viewer + container; domain layers
@@ -94,6 +95,11 @@ export default function Globe() {
 			viewer.imageryLayers.removeAll();
 			viewer.imageryLayers.addImageryProvider(esri);
 		});
+
+		// Quality settings, chosen rather than inherited. See lib/renderQuality.ts
+		// for what each one costs; measured, this removes two full-screen
+		// antialiasing passes per frame and roughly halves first-load tile traffic.
+		applyQuality(viewer);
 
 		// Ask for a frame whenever the aircraft state changes. This is what makes
 		// requestRenderMode safe with CallbackProperty-driven entities.

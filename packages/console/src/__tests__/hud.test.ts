@@ -1,17 +1,17 @@
 import { describe, it, expect } from "vitest";
 
 import {
-	wrap180, wrap360, headingTicks, ladderRungs, horizonOffsetPx,
-	tapeTicks, flightPathOffset, BANK_TICKS, bankMajor,
-	type HudGeometry,
+	wrap180, wrap360, headingTicks, tapeTicks,
+	ballPitchMarks, BALL_BANK_TICKS, bankMajor, rollLabel, pitchLabel,
 } from "@/lib/hud";
 
-// A HUD that is wrong is worse than no HUD: the operator reads it instead of
-// thinking. So the symbology is pinned numerically — sign conventions above all,
-// because an inverted horizon or a backwards ladder looks plausible in a
-// screenshot and is lethal in use.
+// An instrument that is wrong is worse than no instrument: the operator reads it
+// instead of thinking. So the symbology is pinned numerically — sign conventions
+// above all, because an inverted horizon looks plausible in a screenshot and is
+// lethal in use.
 
-const GEO: HudGeometry = { w: 600, h: 400, pxPerDeg: 8 };
+const BALL_R = 46;
+const BALL_PX = 1.2;
 
 describe("angle wrapping", () => {
 	it("wraps differences into (-180, 180]", () => {
@@ -71,77 +71,101 @@ describe("heading tape", () => {
 	});
 });
 
-describe("horizon and pitch ladder", () => {
-	it("pushes the horizon DOWN the screen when climbing", () => {
-		// This is the sign convention that matters most. Nose up, horizon drops.
-		expect(horizonOffsetPx(10, GEO)).toBe(80);
-		expect(horizonOffsetPx(-10, GEO)).toBe(-80);
-		expect(horizonOffsetPx(0, GEO)).toBe(0);
+describe("attitude ball", () => {
+	it("puts the horizon at the aircraft reference in level flight", () => {
+		// Pitch 0 -> the horizon sits at offset 0, which is where the fixed
+		// aircraft reference is drawn. Anything else reads as a standing climb.
+		const marks = ballPitchMarks(0, BALL_R, BALL_PX);
+		expect(marks.some((m) => m.deg === 0)).toBe(false);   // horizon is its own line
+		// The +10 mark is one scale step ABOVE the reference...
+		expect(marks.find((m) => m.deg === 10)!.offsetPx).toBe(-10 * BALL_PX);
+		// ...and -10 one step below.
+		expect(marks.find((m) => m.deg === -10)!.offsetPx).toBe(10 * BALL_PX);
 	});
 
-	it("puts the rung matching current pitch at the centre of the screen", () => {
-		// At 10 degrees nose up, the +10 rung is the one you are flying at, so it
-		// sits on the aircraft reference, not off near the horizon.
-		const rung = ladderRungs(10, GEO).find((r) => r.deg === 10);
-		expect(rung?.offsetPx).toBe(0);
+	it("moves the scale DOWN as the nose comes up", () => {
+		// The sign convention that matters most. At 10 degrees nose up, the mark
+		// for 10 degrees is at the aircraft reference, not off near the rim.
+		expect(ballPitchMarks(10, BALL_R, BALL_PX).find((m) => m.deg === 10)!.offsetPx)
+			.toBe(0);
+		// And the horizon-adjacent marks have all shifted downward.
+		const level = ballPitchMarks(0, BALL_R, BALL_PX).find((m) => m.deg === -10)!;
+		const climbing = ballPitchMarks(10, BALL_R, BALL_PX).find((m) => m.deg === -10)!;
+		expect(climbing.offsetPx).toBeGreaterThan(level.offsetPx);
 	});
 
-	it("places climb rungs above the horizon and dive rungs below", () => {
-		const rungs = ladderRungs(0, GEO);
-		const up = rungs.find((r) => r.deg === 20);
-		const down = rungs.find((r) => r.deg === -20);
-		expect(up!.offsetPx).toBeGreaterThan(0);
-		expect(down!.offsetPx).toBeLessThan(0);
-	});
-
-	it("dashes the dive rungs and leaves climb rungs solid", () => {
-		for (const r of ladderRungs(0, GEO)) {
-			expect(r.dashed).toBe(r.deg < 0);
+	it("keeps every mark inside the disc", () => {
+		for (const pitch of [-40, -10, 0, 10, 40, 85]) {
+			for (const m of ballPitchMarks(pitch, BALL_R, BALL_PX)) {
+				expect(Math.abs(m.offsetPx), `pitch ${pitch} deg ${m.deg}`)
+					.toBeLessThanOrEqual(BALL_R);
+			}
 		}
 	});
 
-	it("never emits a rung for zero, which is the horizon's own line", () => {
-		expect(ladderRungs(0, GEO).some((r) => r.deg === 0)).toBe(false);
+	it("lengthens every second mark, so the scale is countable", () => {
+		const marks = ballPitchMarks(0, BALL_R, BALL_PX);
+		for (const m of marks) expect(m.major).toBe(Math.abs(m.deg) % 20 === 0);
+		expect(marks.find((m) => m.deg === 20)!.armPx)
+			.toBeGreaterThan(marks.find((m) => m.deg === 10)!.armPx);
 	});
 
-	it("culls rungs that have left the screen", () => {
-		// Steep climb: the dive rungs are far below the bottom edge.
-		const rungs = ladderRungs(60, GEO);
-		for (const r of rungs) expect(Math.abs(r.offsetPx)).toBeLessThanOrEqual(GEO.h);
-		expect(rungs.some((r) => r.deg === -60)).toBe(false);
-	});
-
-	it("shortens the steep rungs so the centre stays readable", () => {
-		const rungs = ladderRungs(0, GEO);
-		const shallow = rungs.find((r) => r.deg === 10)!;
-		const steep = rungs.find((r) => r.deg === 40)!;
-		expect(steep.armPx).toBeLessThan(shallow.armPx);
+	it("actually fits three marks either side at level flight", () => {
+		// The scale and the cull margin have to be chosen together. At 1.7 px/deg
+		// the 20 degree marks fell outside the disc, so the ball showed a horizon
+		// and two anonymous ticks and no countable scale at all. This is that bug.
+		const degs = ballPitchMarks(0, BALL_R, BALL_PX).map((m) => m.deg).sort((a, b) => a - b);
+		expect(degs).toEqual([-30, -20, -10, 10, 20, 30]);
+		expect(ballPitchMarks(0, BALL_R, BALL_PX).filter((m) => m.major)).toHaveLength(2);
 	});
 
 	it("returns nothing for a missing pitch rather than drawing level flight", () => {
-		expect(ladderRungs(NaN, GEO)).toEqual([]);
+		expect(ballPitchMarks(NaN, BALL_R, BALL_PX)).toEqual([]);
 	});
 });
 
 describe("bank scale", () => {
 	it("is symmetric about level", () => {
-		const positive = BANK_TICKS.filter((d) => d > 0);
-		for (const d of positive) expect(BANK_TICKS).toContain(-d as never);
+		for (const d of BALL_BANK_TICKS.filter((x) => x > 0)) {
+			expect(BALL_BANK_TICKS).toContain(-d as never);
+		}
 	});
 
 	it("is denser near level, where small corrections matter", () => {
 		const gaps: number[] = [];
-		for (let i = 1; i < BANK_TICKS.length; i++) gaps.push(BANK_TICKS[i] - BANK_TICKS[i - 1]);
-		// The gap next to level is no wider than the gap out at the extremes.
+		for (let i = 1; i < BALL_BANK_TICKS.length; i++) {
+			gaps.push(BALL_BANK_TICKS[i] - BALL_BANK_TICKS[i - 1]);
+		}
 		expect(Math.min(...gaps)).toBe(10);
 		expect(Math.max(...gaps)).toBe(15);
 	});
 
-	it("labels level, 30 and 60", () => {
+	it("marks level, 30 and 60 as major", () => {
 		expect(bankMajor(0)).toBe(true);
 		expect(bankMajor(30)).toBe(true);
 		expect(bankMajor(-60)).toBe(true);
 		expect(bankMajor(10)).toBe(false);
+	});
+});
+
+describe("attitude in words", () => {
+	it("says which way the aircraft is banked, the way it is read aloud", () => {
+		expect(rollLabel(4)).toBe("4\u00b0 R");
+		expect(rollLabel(-12)).toBe("12\u00b0 L");
+		expect(rollLabel(0)).toBe("level");
+	});
+
+	it("signs the pitch explicitly, so -4 and 4 cannot be confused", () => {
+		expect(pitchLabel(4)).toBe("+4\u00b0");
+		expect(pitchLabel(-4)).toBe("-4\u00b0");
+		expect(pitchLabel(0)).toBe("0\u00b0");
+	});
+
+	it("shows a dash rather than a zero when attitude is unknown", () => {
+		expect(rollLabel(null)).toBe("--");
+		expect(pitchLabel(null)).toBe("--");
+		expect(rollLabel(NaN)).toBe("--");
+		expect(pitchLabel(NaN)).toBe("--");
 	});
 });
 
@@ -189,51 +213,5 @@ describe("vertical tapes", () => {
 		expect(tapeTicks(NaN, 2, 10, 4, 60)).toEqual([]);
 		expect(tapeTicks(10, 0, 10, 4, 60)).toEqual([]);
 		expect(tapeTicks(10, 2, 10, 0, 60)).toEqual([]);
-	});
-});
-
-describe("flight path marker", () => {
-	it("sits on the aircraft reference in still-air level flight", () => {
-		const o = flightPathOffset(90, 90, 0, 13, GEO)!;
-		expect(o.x).toBe(0);
-		expect(o.y).toBe(0);
-	});
-
-	it("rises above centre in a climb", () => {
-		// 13 m/s forward, 1.3 m/s up -> about 5.7 degrees, upward is negative y.
-		const o = flightPathOffset(90, 90, 1.3, 13, GEO)!;
-		expect(o.y).toBeLessThan(0);
-		expect(Math.abs(-o.y / GEO.pxPerDeg - 5.71)).toBeLessThan(0.1);
-	});
-
-	it("drops below centre in a descent", () => {
-		expect(flightPathOffset(90, 90, -1.3, 13, GEO)!.y).toBeGreaterThan(0);
-	});
-
-	it("moves to the side the aircraft is actually drifting toward", () => {
-		// Nose 090, going 100: the track is right of the nose, so the marker is
-		// right of centre. Getting this backwards would have the operator correct
-		// the wrong way in a crosswind.
-		const right = flightPathOffset(100, 90, 0, 13, GEO)!;
-		expect(right.x).toBeGreaterThan(0);
-		expect(right.x).toBe(10 * GEO.pxPerDeg);
-		const left = flightPathOffset(80, 90, 0, 13, GEO)!;
-		expect(left.x).toBeLessThan(0);
-	});
-
-	it("handles drift across north without flinging the marker off screen", () => {
-		const o = flightPathOffset(5, 355, 0, 13, GEO)!;
-		expect(o.x).toBe(10 * GEO.pxPerDeg);
-	});
-
-	it("hides itself below taxi speed, where the angle is meaningless", () => {
-		expect(flightPathOffset(90, 90, 0.2, 0.5, GEO)).toBeNull();
-	});
-
-	it("hides itself when any input is missing", () => {
-		expect(flightPathOffset(null, 90, 0, 13, GEO)).toBeNull();
-		expect(flightPathOffset(90, null, 0, 13, GEO)).toBeNull();
-		expect(flightPathOffset(90, 90, null, 13, GEO)).toBeNull();
-		expect(flightPathOffset(90, 90, 0, null, GEO)).toBeNull();
 	});
 });

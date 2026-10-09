@@ -1,29 +1,24 @@
-// Head-up display geometry.
+// Flight instrument geometry: the heading tape, the two vertical tapes, and the
+// compact attitude ball.
 //
 // Everything here is a pure function of the flight state, so the symbology is
-// testable without a browser: a pitch ladder that reads 10 degrees high, or a
+// testable without a browser: an attitude ball that banks the wrong way, or a
 // heading tape that wraps wrongly through north, is a numeric bug and should be
-// caught as one. The component does nothing but turn these into SVG.
+// caught as one. The components do nothing but turn these into SVG.
 //
 // Conventions, which are the aviation ones rather than invented:
 //
-//  * The symbology is fixed to the screen and the world moves behind it, the way
-//    a real HUD works. So the horizon ROTATES by minus the bank angle and
-//    TRANSLATES by the pitch — climbing pushes the horizon down the screen.
-//  * Pitch and bank scales are in degrees, converted to pixels by one factor
-//    (`pxPerDeg`). Everything shares it, so the ladder and the horizon cannot
-//    drift apart.
+//  * The aircraft reference never moves; the horizon moves against it. So the
+//    horizon ROTATES by minus the bank angle and TRANSLATES by the pitch —
+//    climbing pushes the horizon down.
 //  * Tapes scroll against a fixed pointer. The number under the pointer is the
 //    current value; it is also boxed, because reading a tape to the nearest
 //    unit is slower than reading a digit.
-
-export interface HudGeometry {
-	/** Half-width/height of the drawing area, px. */
-	w: number;
-	h: number;
-	/** Pixels per degree for the pitch ladder and horizon translation. */
-	pxPerDeg: number;
-}
+//
+// A screen-height pitch ladder, a full-width horizon and a flight path marker
+// used to live here too, for a cockpit HUD through the centre of the globe. They
+// were removed with it: see Hud.tsx for why that metaphor was wrong here. Git
+// has them if a cockpit view ever earns its place.
 
 /** Wrap to (-180, 180]. Used wherever a difference of bearings is taken, so a
  *  heading tape crossing north scrolls instead of jumping 360 degrees. */
@@ -90,66 +85,6 @@ export function headingTicks(
 	return out;
 }
 
-// --- pitch ladder -------------------------------------------------------------
-
-export interface LadderRung {
-	deg: number;
-	/** Offset from the horizon in px: positive is UP the screen. */
-	offsetPx: number;
-	/** Climb rungs are solid, dive rungs dashed — the standard cue for which
-	 *  side of the horizon you are reading without checking the sign. */
-	dashed: boolean;
-	/** Half-length of each rung arm, px. Shallower rungs are shorter so the
-	 *  centre of the display stays clear. */
-	armPx: number;
-}
-
-/**
- * Pitch ladder rungs visible for the current pitch.
- *
- * Only rungs inside the display are returned, so the component never draws
- * hundreds of off-screen lines: at 10 degrees of pitch the ladder has moved and
- * the far rungs have left the screen.
- */
-export function ladderRungs(
-	pitchDeg: number, geo: HudGeometry, step = 10, limit = 90,
-): LadderRung[] {
-	if (!Number.isFinite(pitchDeg)) return [];
-	const out: LadderRung[] = [];
-	for (let deg = -limit; deg <= limit; deg += step) {
-		if (deg === 0) continue;                     // the horizon is its own line
-		// Screen offset above the horizon. The horizon itself sits `pitch` below
-		// centre, so a rung at `deg` sits (deg - pitch) above centre.
-		const offsetPx = (deg - pitchDeg) * geo.pxPerDeg;
-		if (Math.abs(offsetPx) > geo.h) continue;    // off screen
-		out.push({
-			deg,
-			offsetPx,
-			dashed: deg < 0,
-			armPx: Math.abs(deg) >= 30 ? geo.w * 0.14 : geo.w * 0.2,
-		});
-	}
-	return out;
-}
-
-/** Vertical offset of the horizon line from screen centre, px, positive DOWN.
- *
- *  Climbing moves the horizon down the screen, so this is +pitch * pxPerDeg. */
-export function horizonOffsetPx(pitchDeg: number, geo: HudGeometry): number {
-	return (Number.isFinite(pitchDeg) ? pitchDeg : 0) * geo.pxPerDeg;
-}
-
-// --- bank scale ---------------------------------------------------------------
-
-/** Bank tick angles, degrees. Dense near level where small corrections matter,
- *  sparse past 30 where the exact number does not. */
-export const BANK_TICKS = [-60, -45, -30, -20, -10, 0, 10, 20, 30, 45, 60] as const;
-
-/** Is this bank tick a major (labelled, longer) one? */
-export function bankMajor(deg: number): boolean {
-	return deg === 0 || Math.abs(deg) === 30 || Math.abs(deg) === 60;
-}
-
 // --- vertical tapes -----------------------------------------------------------
 
 export interface TapeTick {
@@ -189,32 +124,76 @@ export function tapeTicks(
 	return out;
 }
 
-// --- flight path marker -------------------------------------------------------
+// --- compact attitude ball ----------------------------------------------------
+
+export interface BallMark {
+	deg: number;
+	/** Offset from the ball centre, px, positive DOWN the screen. */
+	offsetPx: number;
+	/** Half-length of the mark, px. */
+	armPx: number;
+	/** Every second mark is longer, so the scale can be counted at a glance.
+	 *  The exact angles are in the readout under the ball; a 92 px disc is too
+	 *  small to carry legible numbers of its own. */
+	major: boolean;
+}
 
 /**
- * Where the flight path marker sits relative to the horizon: the direction the
- * aircraft is actually going, as opposed to where its nose points.
+ * Pitch marks for the small attitude ball.
  *
- * Returns screen offsets in px from the CENTRE, positive x right and positive y
- * down. Horizontally it is the drift (track minus heading); vertically it is the
- * climb angle, which is the arcsine of climb rate over groundspeed-with-climb.
+ * Separate from `ladderRungs` because the constraints are different: the ball is
+ * a ~92 px disc, so it carries a 10 degree scale clipped to the disc rather than
+ * a full screen-height ladder, and marks are culled against the radius instead
+ * of the viewport.
  *
- * Returns null when the aircraft is too slow for the angle to mean anything,
- * rather than drawing a marker that swings wildly at taxi speed.
+ * As with the big ladder, climbing moves the horizon DOWN, so a mark at `deg`
+ * sits (pitch - deg) * pxPerDeg below centre.
  */
-export function flightPathOffset(
-	trackDeg: number | null, headingDeg: number | null,
-	climbMps: number | null, groundspeedMps: number | null,
-	geo: HudGeometry,
-): { x: number; y: number } | null {
-	if (trackDeg === null || headingDeg === null) return null;
-	if (climbMps === null || groundspeedMps === null) return null;
-	if (!Number.isFinite(groundspeedMps) || groundspeedMps < 2) return null;
-	const driftDeg = wrap180(trackDeg - headingDeg);
-	const climbDeg = Math.atan2(climbMps, groundspeedMps) * 180 / Math.PI;
-	return {
-		x: z(driftDeg * geo.pxPerDeg),
-		// Climbing puts the marker ABOVE centre, so negative y.
-		y: z(-climbDeg * geo.pxPerDeg),
-	};
+export function ballPitchMarks(
+	pitchDeg: number, radiusPx: number, pxPerDeg: number, step = 10,
+): BallMark[] {
+	if (!Number.isFinite(pitchDeg)) return [];
+	const out: BallMark[] = [];
+	const limit = 90;
+	for (let deg = -limit; deg <= limit; deg += step) {
+		if (deg === 0) continue;                      // the horizon line itself
+		const offsetPx = (pitchDeg - deg) * pxPerDeg;
+		// Keep marks inside the disc, with margin so a mark never kisses the rim.
+		// The margin and `pxPerDeg` have to be chosen together: too fine a scale
+		// and this culls the long marks, leaving a disc with a horizon and two
+		// anonymous ticks. At 1.2 px/deg and this margin, +-10, +-20 and +-30 all
+		// fit at level flight.
+		if (Math.abs(offsetPx) > radiusPx * 0.8) continue;
+		out.push({
+			deg,
+			offsetPx,
+			armPx: Math.abs(deg) % 20 === 0 ? radiusPx * 0.3 : radiusPx * 0.17,
+			major: Math.abs(deg) % 20 === 0,
+		});
+	}
+	return out;
+}
+
+/** Is this bank tick a major (longer) one? Dense near level, where small
+ *  corrections matter; sparse past 30, where the exact number does not. */
+export function bankMajor(deg: number): boolean {
+	return deg === 0 || Math.abs(deg) === 30 || Math.abs(deg) === 60;
+}
+
+/** Bank ticks around the rim of the ball, in degrees from vertical. */
+export const BALL_BANK_TICKS = [-60, -45, -30, -20, -10, 0, 10, 20, 30, 45, 60] as const;
+
+/** Roll as an operator reads it aloud: "4 R", "12 L", "level". */
+export function rollLabel(rollDeg: number | null): string {
+	if (rollDeg === null || !Number.isFinite(rollDeg)) return "--";
+	const r = Math.round(rollDeg);
+	if (r === 0) return "level";
+	return `${Math.abs(r)}\u00b0 ${r > 0 ? "R" : "L"}`;
+}
+
+/** Pitch as a signed number of degrees with an explicit sign. */
+export function pitchLabel(pitchDeg: number | null): string {
+	if (pitchDeg === null || !Number.isFinite(pitchDeg)) return "--";
+	const p = Math.round(pitchDeg);
+	return `${p > 0 ? "+" : ""}${p}\u00b0`;
 }

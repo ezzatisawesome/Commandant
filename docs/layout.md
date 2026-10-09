@@ -14,58 +14,66 @@ change that test deliberately rather than deleting the assertion.
 │ ⬡ COMMANDANT        ⚠ alerts (warning+)              [◫]  │
 │       ╷    ╷    ╷    N    ╷    ╷    ╷                      │
 │      340  350   ▼  000   010  020                          │
-│             ·    ·   ─┴─   ·    ·                          │
 │  ╷ 16                                       218 ╷   ┌──┐   │
-│  ╷ 15     20 ─────             ───── 20     216 ╷   │◫ │   │
-│  ╷ 14                 ┌───┐                 214 ╷   │◉ │   │
-│ ▐│ 13├── ─────────────┤ + ├───────────── ──┤ 212 │▌ │▤ │   │
-│  ╷ 12                 └───┘                 210 ╷   │↗ │   │
-│  ╷ 11    -20 ─────             ───── -20    208 ╷   │⬡ │   │
+│  ╷ 15                                       216 ╷   │◫ │   │
+│  ╷ 14                                       214 ╷   │◉ │   │
+│ ▐│ 13├─              (globe)                ┤ 212 │▌ │▤ │   │
+│  ╷ 12                                       210 ╷   │↗ │   │
+│  ╷ 11                                       208 ╷   │⬡ │   │
 │  ╷ 10                                       206 ╷   └──┘   │
 │   m/s IAS                              m MSL / AGL         │
+│   ╭───╮                                                    │
+│   │─┼─│  4° R  -4°                                         │
+│   ╰───╯                                                    │
 │ ● LINK alive │ MODE AUTO.LOITER │ WIND 0.1 │ SOC 82%       │
 └────────────────────────────────────────────────────────────┘
 ```
 
 | Region | What lives there | Area cost |
 |---|---|---|
-| Everywhere | The HUD, drawn as strokes | None; it is transparent to the mouse |
+| Everywhere | Instruments drawn as strokes: two tapes, the heading tape, the attitude ball | None; all of it is transparent to the mouse |
 | Top left | Wordmark, and the `watching` badge on the hosted viewer | One line |
 | Top centre | Transient alerts, warning severity and worse | Only while alerting |
 | Top right | Cesium's scene-mode toggle | One button |
 | Right edge | The dock, 36 px, one panel at a time | A gutter |
+| Bottom left | The 92 px attitude ball, above the strip | One small disc |
 | Bottom edge | The editable telemetry strip | One or more rows, operator's choice |
 
 Nothing is pinned to the left edge. No instrument sits in a box.
 
-## The HUD
+## The instruments
 
 `components/flight/Hud.tsx`, with all geometry in `lib/hud.ts` and tested in
-`__tests__/hud.test.ts`. It is fixed to the screen centre: the symbology stays
-still and the world moves behind it, which is how a real HUD works and what keeps
-it readable at any camera angle or zoom.
+`__tests__/hud.test.ts`.
 
-It replaced a boxed attitude indicator and compass in the corner. Those were a
-picture *of* the aircraft; this is the view *from* it, and it costs no area.
+A full cockpit HUD lived here briefly: a screen-height pitch ladder, horizon and
+flight path marker through the centre of the globe. It was removed because the
+metaphor is wrong for this application. A cockpit HUD exists because the pilot
+cannot see their own aircraft. Here the operator is watching the aircraft from
+outside, on a globe, and the 3D model already banks and pitches in front of them,
+so the ladder spent the most valuable part of the screen restating what the scene
+was already showing.
 
-- **Horizon and pitch ladder** rotate by minus the bank angle and translate by
-  the pitch, so a climb pushes the horizon down the screen. Dive rungs are
-  dashed, climb rungs solid.
-- **Bank scale** is a fixed arc with a moving pointer, denser near level.
-- **Aircraft reference** never moves. Everything else is read against it.
-- **Flight path marker** shows where the aircraft is actually going: drift
-  horizontally, climb angle vertically. It hides below 2 m/s, where the angle is
-  noise.
-- **Heading tape** across the top, cardinals as letters, with the exact bearing
-  under the pointer.
-- **Speed tape** left, airspeed when the vehicle reports it and groundspeed
-  otherwise, labelled so the two can never be confused.
-- **Altitude tape** right, MSL, with AGL beneath it coloured by clearance band.
+What is left is what the globe genuinely cannot say.
+
+- **Speed tape** left: airspeed when the vehicle reports it, groundspeed
+  otherwise, labelled so the two can never be confused. On a solar aircraft in
+  wind they differ a lot.
+- **Altitude tape** right: MSL, with AGL beneath it coloured by clearance band.
   MSL alone does not answer whether the aircraft clears the hill.
+- **Heading tape** across the top: cardinals as letters, exact bearing under the
+  pointer.
+- **Attitude ball** bottom left, 92 px: horizon, a countable pitch scale, bank
+  ticks on the rim and a fixed aircraft reference, with roll and pitch in degrees
+  written underneath. Same conventions as a cockpit instrument, so the horizon
+  rotates by minus the bank angle and moves down as the nose comes up.
 
-When attitude is missing or the link is down the HUD says so where the horizon
-would be. It does not draw a level horizon, because a frozen HUD is read as
-truth.
+When attitude is missing or the link is down the ball says so rather than
+drawing a level horizon, because a frozen instrument is read as truth.
+
+The ball's scale and its cull margin have to be chosen together. At the first
+scale tried, the labelled marks fell outside the disc and the ball showed a
+horizon and two anonymous ticks. There is a test for that.
 
 ## Alerts
 
@@ -91,3 +99,30 @@ Escape, on a second click of its icon, and on a click on the globe. That last on
 listens in the capture phase: Cesium stops propagation on its canvas, so a
 bubbling listener never sees the click and the panel would stay open exactly
 where it is most in the way.
+
+
+## Render quality
+
+`lib/renderQuality.ts`. Cesium's defaults are tuned for a demo on an idle
+machine: 4x MSAA, an FXAA pass on top of it, and terrain refined to a 2 px
+screen-space error. None of those were chosen; they were never set.
+
+This console runs beside a SITL simulator that takes three of eight cores, in a
+browser also holding a 25 Hz websocket. Measured in a headless Chromium with the
+frame rate cap removed, so frame time is actually scene-bound, three trials each:
+
+| | Cesium defaults | chosen |
+|---|---|---|
+| Frames per second | 60.5 | 122.0 |
+| Frame gap, 95th percentile | 34.6 ms | 13.9 ms |
+| Frame gap, worst | 52.4 ms | 30.4 ms |
+| First-load transfer | 4508 KB | 2857 KB |
+| First-load requests | 364 | 212 |
+
+Twice the frame headroom and 37 per cent less traffic. Fog stays on: it is how
+the globe reads as having depth, and the day/night lighting depends on the same
+haze.
+
+With the cap in place both arms sit at 60 fps, which is why the first attempt at
+this measurement showed no difference at all. A vsync-capped frame rate measures
+nothing about headroom.

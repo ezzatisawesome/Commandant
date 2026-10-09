@@ -8,21 +8,29 @@ import { $derived } from "@/stores/derived.store";
 import { $linkState } from "@/stores/link.store";
 import { isNum } from "@/lib/flightGeometry";
 import {
-	headingTicks, ladderRungs, horizonOffsetPx, tapeTicks, flightPathOffset,
-	wrap360, BANK_TICKS, bankMajor, type HudGeometry,
+	headingTicks, tapeTicks, wrap360, ballPitchMarks, BALL_BANK_TICKS,
+	bankMajor, rollLabel, pitchLabel,
 } from "@/lib/hud";
 
-// A head-up display drawn over the globe: horizon, pitch ladder, bank scale,
-// flight path marker, heading tape along the top, airspeed and altitude tapes
-// down the sides.
+// Flight instruments drawn over the globe: airspeed and altitude tapes down the
+// sides, a heading tape across the top, and a compact attitude ball in the
+// bottom-left corner.
 //
-// Fixed to the screen, not to the aircraft. The symbology stays still and the
-// world moves behind it, which is how a real HUD works and what makes it
-// readable at any camera angle or zoom. The boxed attitude and compass widgets
-// this replaces were a picture of the aircraft; this is the view from it.
+// There WAS a full cockpit HUD here — a screen-height pitch ladder, horizon and
+// flight path marker through the centre. It went because the metaphor was wrong
+// for this application. A cockpit HUD exists because the pilot cannot see their
+// own aircraft; here the operator is looking at the aircraft from outside, on a
+// globe, and the 3D model already banks and pitches in front of them. So the
+// ladder was spending the most valuable part of the screen to restate what the
+// scene showed, which is exactly the trade this layout is supposed to refuse.
+//
+// What survived is what the globe genuinely cannot say: how fast, how high, how
+// much air is underneath, which way round, and precise attitude in degrees. The
+// tapes live at the edges and the ball is 92 px in a corner the globe was not
+// using.
 //
 // All geometry comes from lib/hud.ts, which is pure and tested. Nothing here
-// computes an angle, because a sign error in a HUD is read as truth.
+// computes an angle, because a sign error in an instrument is read as truth.
 //
 // One SVG, pointer-events-none, so the whole thing is transparent to the mouse
 // and the globe still drags and zooms underneath.
@@ -31,9 +39,12 @@ const STROKE = "rgba(126,255,166,0.92)";      // HUD green, the aviation default
 const STROKE_DIM = "rgba(126,255,166,0.45)";
 const FONT = "600 12px ui-monospace, SFMono-Regular, Menlo, monospace";
 
-/** Degrees of pitch per pixel. 8 px/deg puts the 10 degree rung a comfortable
- *  80 px from the horizon on a laptop screen. */
-const PX_PER_DEG = 8;
+/** Attitude ball: radius, and degrees of pitch per pixel inside it. 1.7 px/deg
+ *  fits +-30 degrees of pitch either side of the horizon inside the disc. */
+const BALL_R = 46;
+const BALL_PX_PER_DEG = 1.2;
+/** Gap from the bottom edge, clearing the telemetry strip. */
+const BALL_BOTTOM_GAP = 118;
 
 /** The tapes: step between ticks, labelled every, and pixels per unit. */
 const SPEED_TAPE = { step: 1, labelEvery: 5, pxPerUnit: 9, halfPx: 92 };
@@ -72,7 +83,6 @@ export default function Hud() {
 
 	const cx = w / 2;
 	const cy = h / 2;
-	const geo: HudGeometry = { w: cx, h: cy, pxPerDeg: PX_PER_DEG };
 
 	const dead = linkState !== "alive" || !f?.connected;
 	const rollDeg = isNum(f?.roll) ? (f!.roll * 180) / Math.PI : null;
@@ -82,17 +92,6 @@ export default function Hud() {
 		: (isNum(f?.heading) ? wrap360(f!.heading) : null);
 
 	const attitudeKnown = rollDeg !== null && pitchDeg !== null && !dead;
-	const horizonY = attitudeKnown ? horizonOffsetPx(pitchDeg!, geo) : 0;
-	const rungs = attitudeKnown ? ladderRungs(pitchDeg!, geo) : [];
-
-	const fpm = attitudeKnown
-		? flightPathOffset(
-			d.trackDeg, headingDeg,
-			isNum(f?.climb) ? f!.climb : null,
-			isNum(f?.groundspeed) ? f!.groundspeed : null,
-			geo,
-		)
-		: null;
 
 	// Airspeed where the vehicle reports it, groundspeed otherwise. Labelled so
 	// the two are never confused: on a solar aircraft in wind they differ a lot.
@@ -104,97 +103,6 @@ export default function Hud() {
 	return (
 		<div ref={host} className="pointer-events-none fixed inset-0 z-30">
 			<svg width={w} height={h} className="block">
-				{/* ---- centre group: horizon, ladder, and the bank scale ---- */}
-				{attitudeKnown ? (
-					<g transform={`translate(${cx} ${cy})`}>
-						{/* Horizon and ladder bank with the aircraft. The ladder is
-						    inside the rotation because a pitch reference that did not
-						    rotate would read wrong in any turn. */}
-						<g transform={`rotate(${-rollDeg!}) translate(0 ${horizonY})`}>
-							{/* Horizon, with a gap at the centre for the aircraft symbol. */}
-							<line x1={-cx * 0.92} y1={0} x2={-cx * 0.1} y2={0}
-								stroke={STROKE} strokeWidth={1.5} />
-							<line x1={cx * 0.1} y1={0} x2={cx * 0.92} y2={0}
-								stroke={STROKE} strokeWidth={1.5} />
-
-							{rungs.map((r) => (
-								<g key={r.deg} transform={`translate(0 ${-r.offsetPx})`}>
-									<line x1={-r.armPx} y1={0} x2={-r.armPx * 0.45} y2={0}
-										stroke={STROKE} strokeWidth={1.2}
-										strokeDasharray={r.dashed ? "6 4" : undefined} />
-									<line x1={r.armPx * 0.45} y1={0} x2={r.armPx} y2={0}
-										stroke={STROKE} strokeWidth={1.2}
-										strokeDasharray={r.dashed ? "6 4" : undefined} />
-									{/* Tick ends point toward the horizon, the standard cue
-									    for which way is up when the ladder fills the screen. */}
-									<line x1={-r.armPx} y1={0} x2={-r.armPx}
-										y2={r.deg > 0 ? 6 : -6} stroke={STROKE} strokeWidth={1.2} />
-									<line x1={r.armPx} y1={0} x2={r.armPx}
-										y2={r.deg > 0 ? 6 : -6} stroke={STROKE} strokeWidth={1.2} />
-									<text x={-r.armPx - 6} y={4} textAnchor="end"
-										style={{ font: FONT }} fill={STROKE}>
-										{Math.abs(r.deg)}
-									</text>
-									<text x={r.armPx + 6} y={4} style={{ font: FONT }} fill={STROKE}>
-										{Math.abs(r.deg)}
-									</text>
-								</g>
-							))}
-						</g>
-
-						{/* Bank scale: fixed arc, moving pointer. */}
-						<g>
-							{BANK_TICKS.map((deg) => {
-								const rad = ((deg - 90) * Math.PI) / 180;
-								const r0 = cy * 0.52;
-								const r1 = r0 + (bankMajor(deg) ? 11 : 6);
-								return (
-									<line key={deg}
-										x1={Math.cos(rad) * r0} y1={Math.sin(rad) * r0}
-										x2={Math.cos(rad) * r1} y2={Math.sin(rad) * r1}
-										stroke={bankMajor(deg) ? STROKE : STROKE_DIM}
-										strokeWidth={bankMajor(deg) ? 1.6 : 1.1} />
-								);
-							})}
-							{/* The pointer sits at the current bank, so level flight puts
-							    it on the apex tick. */}
-							<g transform={`rotate(${-rollDeg!})`}>
-								<polygon
-									points={`0,${-cy * 0.52 + 2} -6,${-cy * 0.52 + 13} 6,${-cy * 0.52 + 13}`}
-									fill={STROKE} />
-							</g>
-						</g>
-
-						{/* Aircraft reference: fixed wings and centre dot. Never moves —
-						    it IS the aircraft, and everything else is read against it. */}
-						<g stroke={STROKE} strokeWidth={2.2} fill="none">
-							<line x1={-54} y1={0} x2={-20} y2={0} />
-							<line x1={-20} y1={0} x2={-12} y2={7} />
-							<line x1={54} y1={0} x2={20} y2={0} />
-							<line x1={20} y1={0} x2={12} y2={7} />
-						</g>
-						<circle cx={0} cy={0} r={2} fill={STROKE} />
-
-						{/* Flight path marker: where the aircraft is actually going. */}
-						{fpm ? (
-							<g transform={`translate(${fpm.x} ${fpm.y})`}
-								stroke={STROKE} strokeWidth={1.6} fill="none">
-								<circle cx={0} cy={0} r={7} />
-								<line x1={-7} y1={0} x2={-15} y2={0} />
-								<line x1={7} y1={0} x2={15} y2={0} />
-								<line x1={0} y1={-7} x2={0} y2={-13} />
-							</g>
-						) : null}
-					</g>
-				) : (
-					// No attitude: say so where the horizon would be, rather than
-					// drawing a level horizon the operator would believe.
-					<text x={cx} y={cy} textAnchor="middle" style={{ font: FONT }}
-						fill="rgba(255,120,120,0.9)">
-						{dead ? "NO LINK — ATTITUDE UNAVAILABLE" : "ATTITUDE UNAVAILABLE"}
-					</text>
-				)}
-
 				{/* ---- heading tape, top centre ---- */}
 				{headingDeg !== null && !dead ? (
 					<g transform={`translate(${cx} 34)`}>
@@ -246,8 +154,98 @@ export default function Hud() {
 					subTone={d.clearance === "critical" ? "rgba(255,110,110,0.95)"
 						: d.clearance === "low" ? "rgba(255,190,110,0.95)" : STROKE_DIM}
 				/>
+				{/* ---- attitude ball, bottom left ---- */}
+				<AttitudeBall
+					cx={BALL_R + 22} cy={h - BALL_BOTTOM_GAP}
+					rollDeg={attitudeKnown ? rollDeg : null}
+					pitchDeg={attitudeKnown ? pitchDeg : null}
+				/>
 			</svg>
 		</div>
+	);
+}
+
+/**
+ * A 92 px attitude indicator: horizon, pitch scale, bank ticks and a fixed
+ * aircraft reference, clipped to a disc.
+ *
+ * Same conventions as the tapes, so nothing has to be relearned between them:
+ * the horizon rotates by minus the bank angle and moves DOWN as the nose comes
+ * up, and the aircraft reference never moves.
+ */
+function AttitudeBall({
+	cx, cy, rollDeg, pitchDeg,
+}: { cx: number; cy: number; rollDeg: number | null; pitchDeg: number | null }) {
+	const known = rollDeg !== null && pitchDeg !== null;
+	const marks = known ? ballPitchMarks(pitchDeg!, BALL_R, BALL_PX_PER_DEG) : [];
+	const clipId = "hud-ball-clip";
+	return (
+		<g transform={`translate(${cx} ${cy})`}>
+			<defs>
+				<clipPath id={clipId}>
+					<circle cx={0} cy={0} r={BALL_R} />
+				</clipPath>
+			</defs>
+
+			{/* A dark disc so the horizon reads against the globe rather than
+			    disappearing into terrain of a similar colour. */}
+			<circle cx={0} cy={0} r={BALL_R} fill="rgba(0,0,0,0.42)"
+				stroke={STROKE_DIM} strokeWidth={1} />
+
+			{known ? (
+				// Horizon and pitch scale bank together. Both are positioned from
+				// the ball centre with pitch already folded in by lib/hud.ts, so
+				// this group only rotates.
+				<g clipPath={`url(#${clipId})`} transform={`rotate(${-rollDeg!})`}>
+					<line
+						x1={-BALL_R} x2={BALL_R}
+						y1={pitchDeg! * BALL_PX_PER_DEG} y2={pitchDeg! * BALL_PX_PER_DEG}
+						stroke={STROKE} strokeWidth={1.6} />
+					{marks.map((m) => (
+						<line key={m.deg}
+							x1={-m.armPx} x2={m.armPx}
+							y1={m.offsetPx} y2={m.offsetPx}
+							stroke={m.major ? STROKE : STROKE_DIM}
+							strokeWidth={m.major ? 1.2 : 1}
+							strokeDasharray={m.deg < 0 ? "3 3" : undefined} />
+					))}
+				</g>
+			) : null}
+
+			{/* Bank ticks on the rim: fixed scale, and the disc's contents rotate
+			    against them. */}
+			{BALL_BANK_TICKS.map((deg) => {
+				const rad = ((deg - 90) * Math.PI) / 180;
+				const r1 = BALL_R;
+				const r0 = r1 - (bankMajor(deg) ? 7 : 4);
+				return (
+					<line key={deg}
+						x1={Math.cos(rad) * r0} y1={Math.sin(rad) * r0}
+						x2={Math.cos(rad) * r1} y2={Math.sin(rad) * r1}
+						stroke={bankMajor(deg) ? STROKE : STROKE_DIM}
+						strokeWidth={bankMajor(deg) ? 1.5 : 1} />
+				);
+			})}
+			{known ? (
+				<g transform={`rotate(${-rollDeg!})`}>
+					<polygon points={`0,${-BALL_R + 2} -4,${-BALL_R + 10} 4,${-BALL_R + 10}`}
+						fill={STROKE} />
+				</g>
+			) : null}
+
+			{/* Aircraft reference. */}
+			<g stroke={STROKE} strokeWidth={2} fill="none">
+				<line x1={-17} y1={0} x2={-6} y2={0} />
+				<line x1={17} y1={0} x2={6} y2={0} />
+			</g>
+			<circle cx={0} cy={0} r={1.6} fill={STROKE} />
+
+			{/* The numbers, because reading a 92 px disc to the degree is guesswork. */}
+			<text x={0} y={BALL_R + 15} textAnchor="middle" style={{ font: FONT }}
+				fill={known ? STROKE : "rgba(255,120,120,0.9)"}>
+				{known ? `${rollLabel(rollDeg)}  ${pitchLabel(pitchDeg)}` : "NO ATTITUDE"}
+			</text>
+		</g>
 	);
 }
 
