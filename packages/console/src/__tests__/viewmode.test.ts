@@ -57,16 +57,23 @@ describe("view mode is read-only by construction", () => {
 			client.pushMission([]),
 			client.pushFence([]),
 			client.pushRally([]),
+			client.takeCommand(),
 		];
 		client.refreshParams();
 		client.pullMission();
 		client.setCurrentMissionItem(2);
 		client.setStream(30, 10);
 		expect(ws().sent).toEqual([]);
-		// The promise-returning ones must settle, not hang forever.
-		vi.advanceTimersByTime(30_000);
+		// The promise-returning ones must settle IMMEDIATELY, not hang until a
+		// timeout. send() drops the frame in view mode, so a push that waits for
+		// an ack that can never come left the caller on a spinner for the full
+		// 20 s mission timeout and then reported "timeout" — which is not what
+		// happened, and is the wrong thing to show an operator.
 		const settled = await Promise.allSettled(attempts);
 		expect(settled.every((s) => s.status === "rejected")).toBe(true);
+		for (const s of settled) {
+			if (s.status === "rejected") expect(String(s.reason)).toContain("read-only view");
+		}
 	});
 
 	it("still receives and renders telemetry normally", () => {

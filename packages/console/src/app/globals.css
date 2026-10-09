@@ -73,10 +73,17 @@
 /* Cesium's own toolbar (just the scene-mode toggle; everything else is off).
    It used to be moved to the bottom-right to dodge a right-rail panel that no
    longer exists — where it then sat on top of the telemetry strip, which spans
-   the bottom edge. Park it at the top-right instead, clear of the wordmark on
-   the left, the dock at the vertical centre and the strip below. */
+   the bottom edge. Then it went to the top-right, which was clear until the
+   attitude ball moved into that corner and was drawn straight over it. (The
+   button still WORKED, since the HUD is pointer-events-none, which is the worst
+   kind of layout bug: it only looks broken.)
+
+   So: still the right edge, but below the ball. 142px clears the ball's box
+   (22 + 46 + 46 + 15 = 129px, readout included) with a gap, and stays well above
+   the dock, which is pinned to the vertical centre. See lib/hud.ts for the boxes
+   and hudLayout.test.ts, which pins this number against them. */
 .cesium-viewer-toolbar {
-  top: 14px !important;
+  top: 142px !important;
   bottom: auto !important;
   right: 14px !important;
 }

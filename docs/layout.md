@@ -36,7 +36,7 @@ change that test deliberately rather than deleting the assertion.
 | Top centre | Transient alerts, warning severity and worse | Only while alerting |
 | Top right | Cesium's scene-mode toggle | One button |
 | Right edge | The dock, 36 px, one panel at a time | A gutter |
-| Bottom left | The 92 px attitude ball, above the strip | One small disc |
+| Top right | The 92 px attitude ball | One small disc |
 | Bottom edge | The editable telemetry strip | One or more rows, operator's choice |
 
 Nothing is pinned to the left edge. No instrument sits in a box.
@@ -63,7 +63,7 @@ What is left is what the globe genuinely cannot say.
   MSL alone does not answer whether the aircraft clears the hill.
 - **Heading tape** across the top: cardinals as letters, exact bearing under the
   pointer.
-- **Attitude ball** bottom left, 92 px: horizon, a countable pitch scale, bank
+- **Attitude ball** top right, 92 px: horizon, a countable pitch scale, bank
   ticks on the rim and a fixed aircraft reference, with roll and pitch in degrees
   written underneath. Same conventions as a cockpit instrument, so the horizon
   rotates by minus the bank angle and moves down as the nose comes up.
@@ -99,6 +99,78 @@ Escape, on a second click of its icon, and on a click on the globe. That last on
 listens in the capture phase: Cesium stops propagation on its canvas, so a
 bubbling listener never sees the click and the panel would stay open exactly
 where it is most in the way.
+
+With one exception, in `stores/authoring.store.ts`: while mission or geofence
+map-edit mode is on, a click on the globe is the panel being *used*, not
+dismissed. Placing a waypoint means clicking the globe, so dismissing on it
+closed the panel holding Upload on every single point placed. Escape and the
+dock icon still close it, so nothing is trapped open.
+
+Panels draw their contents directly rather than carrying their own show/hide
+button. Several still had one — a leftover from the rail the dock replaced —
+which meant reaching the mission table took two clicks and the first one looked
+like it had done nothing.
+
+
+## Editing a plan on the globe
+
+`components/flight/MissionLayer.tsx`, `components/flight/GeoLayer.tsx`, with the
+drag arithmetic in `lib/grabbers.ts` and the hit-testing in `lib/pickTag.ts`.
+
+A waypoint is drawn at **its own altitude**, on a vertical stem down to the
+terrain. Markers used to sit at the aircraft's current altitude, which made every
+plan look flat and left the number that matters most — how high the aircraft will
+be at that point — reachable only as a figure in a table.
+
+In edit mode each item grows grabbers:
+
+| Handle | Gesture | Edits |
+|---|---|---|
+| ▲ above the marker | drag up/down | altitude |
+| ring handle | drag in/out | loiter radius, or a waypoint's accept radius |
+| fence corner | drag | that vertex |
+| faint edge midpoint | drag | splits the edge, bending the boundary |
+| circle rim handle | drag in/out | circle-fence radius |
+| rally ▲ | drag up/down | rally altitude |
+
+Two things make these work that are easy to get wrong:
+
+**Up is not screen-up.** A vertical drag is resolved along the local vertical *as
+it projects on screen*, sampled by projecting the item at its altitude and again
+100 m higher. Tilt the camera and height travels mostly sideways; look straight
+down and it collapses, where the code refuses to guess rather than turning a
+pixel of jitter into a kilometre of altitude.
+
+**Handles hide inside their own geometry.** Hit-testing uses `scene.drillPick`,
+not `scene.pick`. Fences are drawn as walls and cylinders over their own vertex
+markers, so the topmost primitive under the cursor is the volume, whose entity
+carries no tagged id — `pick` returned the wall, the drag never armed, and a
+boundary simply could not be adjusted. A circle's centre marker sits inside its
+cylinder and was unreachable at any camera angle. The handles also set
+`disableDepthTestDistance`, so one behind terrain stays clickable.
+
+Adding a fence vertex inserts it *into* the ring (`insertFencePointAfter`) rather
+than appending. Appending lands the new vertex at the end of the run, which on a
+closed ring draws a spur across the polygon instead of a bend in the edge the
+operator grabbed.
+
+
+## Command authority
+
+gs accepts a mission/fence/rally upload or a parameter write only from the single
+active commander, and grants that to the **first** claimer until its socket
+drops. A second console tab, or a reload that raced the old socket's close,
+therefore holds no authority — and every upload comes back `not commander`.
+
+The console claimed once, silently, on connect, with no way to ask again: the
+only cure was to find and close the other window, with nothing on screen saying
+so. Now `$commander` is mirrored from the claim reply *and* from every rejected
+upload (the ack is the only place a later loss shows up), the panels name the
+reason a greyed-out Upload cannot be pressed, and `takeCommand()` re-bids on
+demand behind a "Take command" button.
+
+A disabled control that explains nothing is indistinguishable from a broken one,
+which is exactly how this read.
 
 
 ## Performance

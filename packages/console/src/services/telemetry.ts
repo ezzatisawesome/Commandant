@@ -267,6 +267,14 @@ export class TelemetryClient {
 	 */
 	sendCommand(name: CommandName, args: Record<string, unknown> = {}): Promise<AckMessage> {
 		return new Promise((resolve, reject) => {
+			if (IS_VIEW) {
+				// send() drops outbound frames in the read-only build, so without
+				// this the promise would never settle: the caller would sit on a
+				// spinner for the full timeout and then report "timeout", which is
+				// not what happened.
+				reject(new Error("read-only view"));
+				return;
+			}
 			if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
 				reject(new Error("not connected"));
 				return;
@@ -305,15 +313,47 @@ export class TelemetryClient {
 	 * treats authority optimistically. Fire-and-forget from the caller's view.
 	 */
 	private claim() {
-		if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-		const id = uuidv4();
-		const timer = setTimeout(() => this.pending.delete(id), COMMAND_TIMEOUT_MS);
-		this.pending.set(id, {
-			resolve: (ack) => $commander.set(ack.ok),
-			reject: () => { /* no confirm — leave authority unknown */ },
-			timer,
+		void this.takeCommand().catch(() => { /* no confirm — authority stays unknown */ });
+	}
+
+	/**
+	 * Re-bid for command authority on demand, resolving true if this client now
+	 * holds it.
+	 *
+	 * The automatic claim on connect is not enough on its own. gs grants authority
+	 * to the FIRST claimer and holds it until that socket drops, so a second
+	 * console tab, or a reload that raced the old socket's close, leaves this
+	 * client permanently without it — and gs rejects every mission/fence upload
+	 * and param write from a non-commander. Without a way to ask again, the only
+	 * cure was to find and close the other tab, with nothing on screen saying so.
+	 */
+	takeCommand(): Promise<boolean> {
+		return new Promise((resolve, reject) => {
+			if (IS_VIEW) {
+				// The hosted view has no route back to the hub by design.
+				$commander.set(false);
+				reject(new Error("read-only view"));
+				return;
+			}
+			if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+				reject(new Error("not connected"));
+				return;
+			}
+			const id = uuidv4();
+			const timer = setTimeout(() => {
+				this.pending.delete(id);
+				reject(new Error("timeout"));
+			}, COMMAND_TIMEOUT_MS);
+			this.pending.set(id, {
+				resolve: (ack) => {
+					$commander.set(ack.ok);
+					resolve(ack.ok);
+				},
+				reject,
+				timer,
+			});
+			this.send({ type: "claim", id });
 		});
-		this.send({ type: "claim", id });
 	}
 
 	// --- parameters (Phase 2) ------------------------------------------------
@@ -331,6 +371,14 @@ export class TelemetryClient {
 	 */
 	setParam(name: string, value: number, ptype?: number): Promise<ParamAckMessage> {
 		return new Promise((resolve, reject) => {
+			if (IS_VIEW) {
+				// send() drops outbound frames in the read-only build, so without
+				// this the promise would never settle: the caller would sit on a
+				// spinner for the full timeout and then report "timeout", which is
+				// not what happened.
+				reject(new Error("read-only view"));
+				return;
+			}
 			if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
 				reject(new Error("not connected"));
 				return;
@@ -367,6 +415,14 @@ export class TelemetryClient {
 	 */
 	pushMission(items: MissionItem[]): Promise<MissionAckMessage> {
 		return new Promise((resolve, reject) => {
+			if (IS_VIEW) {
+				// send() drops outbound frames in the read-only build, so without
+				// this the promise would never settle: the caller would sit on a
+				// spinner for the full mission timeout and then report "timeout",
+				// which is not what happened.
+				reject(new Error("read-only view"));
+				return;
+			}
 			if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
 				reject(new Error("not connected"));
 				return;
@@ -391,7 +447,18 @@ export class TelemetryClient {
 		this.send({ type: "mission_set_current", seq });
 	}
 
+	// gs rejects a write from a non-commander by NAME, and that reply is the only
+	// place the loss of authority shows up — a claim granted at connect can be
+	// stale by now. Mirroring it into $commander means the panels can say why an
+	// upload failed and offer to take command, instead of reporting a bare
+	// "rejected".
+	private noteAuthority(ack: { ok: boolean; text?: string }) {
+		if (!ack.ok && ack.text === "not commander") $commander.set(false);
+		else if (ack.ok) $commander.set(true);
+	}
+
 	private resolveMissionAck(ack: MissionAckMessage) {
+		this.noteAuthority(ack);
 		const p = this.pendingMissions.get(ack.id);
 		if (!p) return; // pull-side acks carry no id / unknown — ignore
 		clearTimeout(p.timer);
@@ -425,6 +492,14 @@ export class TelemetryClient {
 		items: FenceItem[] | RallyItem[],
 	): Promise<FenceAckMessage | RallyAckMessage> {
 		return new Promise((resolve, reject) => {
+			if (IS_VIEW) {
+				// send() drops outbound frames in the read-only build, so without
+				// this the promise would never settle: the caller would sit on a
+				// spinner for the full mission timeout and then report "timeout",
+				// which is not what happened.
+				reject(new Error("read-only view"));
+				return;
+			}
 			if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
 				reject(new Error("not connected"));
 				return;
@@ -440,6 +515,7 @@ export class TelemetryClient {
 	}
 
 	private resolveGeoAck(pending: Map<string, PendingGeo>, ack: FenceAckMessage | RallyAckMessage) {
+		this.noteAuthority(ack);
 		const p = pending.get(ack.id);
 		if (!p) return; // pull-side / unknown
 		clearTimeout(p.timer);

@@ -48,6 +48,29 @@ export function moveFencePoint(seq: number, lat: number, lon: number) {
 export function removeFenceItem(seq: number) {
 	setFenceItems($fenceItems.get().filter((it) => it.seq !== seq));
 }
+
+/**
+ * Insert a new vertex immediately after `seq`, inheriting its kind.
+ *
+ * This is how a boundary is RESHAPED rather than merely nudged. A polygon fence
+ * is a contiguous run of same-kind items, and appending (the only way to add a
+ * point before this) always landed the new vertex at the END of the run — which
+ * on a closed ring means the edge you wanted to bend is still straight and the
+ * ring now has a spur across it. Inserting after the edge's first vertex keeps
+ * the winding order intact, so dragging the new point bends exactly the edge the
+ * operator grabbed. Resequencing keeps the run contiguous for fenceItemsForPush.
+ */
+export function insertFencePointAfter(seq: number, lat: number, lon: number) {
+	const items = $fenceItems.get();
+	const i = items.findIndex((it) => it.seq === seq);
+	if (i < 0) return;
+	const kind = items[i].kind;
+	// Only polygon runs have edges to subdivide; a circle has no vertex order.
+	if (!isPolygonKind(kind)) return;
+	const next = [...items];
+	next.splice(i + 1, 0, { seq: seq + 1, kind, lat, lon });
+	setFenceItems(next);
+}
 export function clearFence() {
 	$fenceItems.set([]);
 }
