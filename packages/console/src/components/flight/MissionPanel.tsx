@@ -18,6 +18,8 @@ import { $linkState, $commander } from "@/stores/link.store";
 import { telemetryClient } from "@/services/telemetry";
 import { Button } from "@/components/ui/button";
 import { radiusParamKey } from "@/lib/grabbers";
+import { $params } from "@/stores/params.store";
+import { TKO_LAND_REQ_PARAM, missionRejectionReason } from "@/lib/missionCheck";
 import type { MissionKind } from "@/types/app";
 
 const KINDS: MissionKind[] = [
@@ -72,10 +74,15 @@ export default function MissionPanel() {
 	const commander = useStore($commander);
 	const live = linkState === "alive";
 
+	const params = useStore($params);
 	const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
 	const [busy, setBusy] = useState(false);
 
 	const blocked = uploadBlockedReason({ live, commander, count: items.length });
+	// Will PX4 actually fly this once uploaded? It validates at the mode change,
+	// not the upload, so without this the operator gets a green tick here and a
+	// silent refusal later. Quiet until the param list has been downloaded.
+	const wontRun = missionRejectionReason(items, params[TKO_LAND_REQ_PARAM]?.value);
 
 	async function upload() {
 		setBusy(true);
@@ -140,6 +147,36 @@ export default function MissionPanel() {
 							Take command
 						</Button>
 					) : null}
+				</div>
+			) : null}
+
+			{/* PX4 will take this plan and then decline to fly it. Said here,
+			    before the upload, rather than left to a STATUSTEXT line that
+			    scrolls past at the moment the mode change is refused. */}
+			{wontRun ? (
+				<div className="pt-2 text-[10px] leading-relaxed text-amber-300/80">
+					⚠ {wontRun}
+				</div>
+			) : null}
+
+			{/* The check above can only speak once the parameter list has been
+			    read, and nothing otherwise gives the operator a reason to read it.
+			    So when a plan exists and PX4's requirement is still unknown, say
+			    so and offer the download, rather than staying silent and letting
+			    the mode change fail later for an unexplained reason. */}
+			{!wontRun && items.length > 0 && params[TKO_LAND_REQ_PARAM] === undefined ? (
+				<div className="flex items-center justify-between gap-2 pt-2 text-[9px] text-white/40">
+					<span>
+						Whether PX4 requires a takeoff or landing item in a plan is
+						unknown until its parameters are read.
+					</span>
+					<Button size="sm" variant="outline"
+						onClick={() => telemetryClient.refreshParams()}
+						disabled={!live}
+						className="h-5 shrink-0 px-2 text-[9px]"
+						title="Download PX4's parameters so the plan can be checked against them">
+						Check
+					</Button>
 				</div>
 			) : null}
 
