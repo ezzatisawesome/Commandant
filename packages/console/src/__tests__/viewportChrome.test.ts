@@ -69,6 +69,18 @@ describe("flight page screen budget", () => {
 		expect(DOCK).toContain("w-9");
 	});
 
+	it("holds the icon rail still when a panel opens", () => {
+		// The rail is centred with -translate-y-1/2. If the panel shares the rail's
+		// flex flow, opening one changes the group's height and the centring moves
+		// every icon — so you cannot click the same icon again to close it. The
+		// panel must therefore be positioned out of flow, off the rail's edge.
+		expect(DOCK).toContain("absolute right-full");
+		const wrapper = DOCK.match(/ref=\{wrap\} className="([^"]*)"/)?.[1] ?? "";
+		expect(wrapper).toContain("-translate-y-1/2");
+		expect(wrapper, "the rail wrapper must not lay the panel out in flow")
+			.not.toContain("flex");
+	});
+
 	it("dismisses an open panel on Escape and on a click outside it", () => {
 		expect(DOCK).toContain('e.key === "Escape"');
 		// Capture phase matters: Cesium stops propagation on the canvas, so a
