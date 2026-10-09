@@ -10,6 +10,7 @@ import {
 	CallbackProperty,
 	CallbackPositionProperty,
 	Color,
+	ColorMaterialProperty,
 	Ellipsoid,
 	EllipsoidGeodesic,
 	Entity,
@@ -46,6 +47,8 @@ import {
 	altDeltaFromDrag,
 } from "@/lib/grabbers";
 import { firstTaggedId, tagSeq } from "@/lib/pickTag";
+import { $params } from "@/stores/params.store";
+import { landingGeometry, landingSlopeLimit, lookupFrom, minLegalRunM } from "@/lib/missionCheck";
 import { ALT_HANDLE_MISSION, ALT_HANDLE_OFFSET_PX, ALT_HANDLE_PX } from "@/lib/altHandle";
 import { $aircraftStore } from "@/stores/aircraft.store";
 import type { MissionItem } from "@/types/app";
@@ -111,6 +114,76 @@ export default function MissionLayer() {
 			const frame = Transforms.eastNorthUpToFixedFrame(centre);
 			return Matrix4.multiplyByPoint(frame, new Cartesian3(metres, 0, 0), new Cartesian3());
 		};
+
+		// --- the landing approach, drawn so it can be dragged into compliance ---
+		//
+		// PX4 refuses a mission whose landing is steeper than FW_LND_ANG, and it
+		// says so only through STATUSTEXT at the moment the mode change is
+		// refused. Measured here: a 24.6 degree approach against a 5 degree
+		// limit, which looked like "setting mission doesn't work".
+		//
+		// A sentence in a panel makes the operator translate numbers back into
+		// which marker to move. So the constraint is drawn instead: the approach
+		// segment turns red when it is too steep and green when it is flyable,
+		// and a ring around the approach waypoint shows the distance the landing
+		// must sit OUTSIDE. Drag the landing past the ring and the line goes
+		// green. Both read live from the store, so it updates during the drag.
+		const approachGeom = () => landingGeometry($missionItems.get());
+		const approachOk = () => {
+			const g = approachGeom();
+			const limit = landingSlopeLimit(lookupFrom($params.get()));
+			if (!g || limit === undefined) return true;   // nothing known against it
+			return g.slopeDeg <= limit + 0.1;
+		};
+
+		const approach = $viewer.entities.add({
+			polyline: {
+				positions: new CallbackProperty(() => {
+					const g = approachGeom();
+					if (!g) return undefined;
+					const items = $missionItems.get();
+					const from = items.find((x) => x.seq === g.fromSeq);
+					const to = items.find((x) => x.seq === g.landSeq);
+					if (!from || !to || from.lat === undefined || to.lat === undefined) return undefined;
+					return [
+						Cartesian3.fromDegrees(from.lon!, from.lat, altOf(from)),
+						Cartesian3.fromDegrees(to.lon!, to.lat, altOf(to)),
+					];
+				}, false),
+				width: 3,
+				material: new ColorMaterialProperty(
+					new CallbackProperty(
+						() => (approachOk() ? Color.LIME.withAlpha(0.85) : Color.ORANGERED.withAlpha(0.9)),
+						false,
+					),
+				),
+				arcType: ArcType.NONE,
+			},
+		});
+
+		// The ring: put the landing beyond this and the slope is legal.
+		const legalRing = $viewer.entities.add({
+			position: new CallbackPositionProperty(() => {
+				const g = approachGeom();
+				if (!g || approachOk()) return undefined;   // only shown while it matters
+				const from = $missionItems.get().find((x) => x.seq === g.fromSeq);
+				return from && from.lat !== undefined
+					? Cartesian3.fromDegrees(from.lon!, from.lat, 0)
+					: undefined;
+			}, false),
+			ellipse: {
+				semiMajorAxis: new CallbackProperty(
+					() => minLegalRunM($missionItems.get(), lookupFrom($params.get())) ?? 0, false,
+				) as unknown as number,
+				semiMinorAxis: new CallbackProperty(
+					() => minLegalRunM($missionItems.get(), lookupFrom($params.get())) ?? 0, false,
+				) as unknown as number,
+				height: 0 as unknown as number,
+				material: Color.TRANSPARENT,
+				outline: true,
+				outlineColor: Color.ORANGERED.withAlpha(0.5),
+			},
+		});
 
 		// Route polyline through positioned items, live from the store, now at the
 		// planned altitudes so the route climbs and descends as authored.
@@ -211,15 +284,25 @@ export default function MissionLayer() {
 				}));
 
 				// Altitude readout, beside the marker, so a drag has a number.
+				//
+				// Drawn as solid white on a dark pill rather than translucent text.
+				// At 10 px and 75 % alpha this was illegible over bright terrain,
+				// which is the worst possible place to economise: the altitude is
+				// the number the ▲ handle exists to change, so it has to be
+				// readable WHILE being dragged, over whatever happens to be below.
 				markers.push($viewer.entities.add({
 					position: new CallbackPositionProperty(() => posOf(seq), false),
 					label: {
 						text: new CallbackProperty(() => `${Math.round(altOf(itemOf(seq)))} m`, false),
-						font: "10px monospace",
-						fillColor: Color.WHITE.withAlpha(0.75),
+						font: "bold 12px ui-monospace, Menlo, monospace",
+						fillColor: Color.WHITE,
 						style: LabelStyle.FILL,
+						showBackground: true,
+						backgroundColor: Color.BLACK.withAlpha(0.55),
+						backgroundPadding: new Cartesian2(5, 3),
 						verticalOrigin: VerticalOrigin.CENTER,
-						pixelOffset: new Cartesian2(14, 10),
+						pixelOffset: new Cartesian2(16, 12),
+						disableDepthTestDistance: Number.POSITIVE_INFINITY,
 					},
 				}));
 
@@ -276,11 +359,15 @@ export default function MissionLayer() {
 						},
 						label: {
 							text: new CallbackProperty(() => `${Math.round(ringRadius())} m`, false),
-							font: "10px monospace",
+							font: "bold 11px ui-monospace, Menlo, monospace",
 							fillColor: Color.AQUA,
 							style: LabelStyle.FILL,
+							showBackground: true,
+							backgroundColor: Color.BLACK.withAlpha(0.55),
+							backgroundPadding: new Cartesian2(4, 2),
 							verticalOrigin: VerticalOrigin.BOTTOM,
-							pixelOffset: new Cartesian2(0, -10),
+							pixelOffset: new Cartesian2(0, -12),
+							disableDepthTestDistance: Number.POSITIVE_INFINITY,
 						},
 					}));
 				}
@@ -466,6 +553,8 @@ export default function MissionLayer() {
 			markers.forEach((m) => $viewer.entities.remove(m));
 			markers = [];
 			$viewer.entities.remove(route);
+			$viewer.entities.remove(approach);
+			$viewer.entities.remove(legalRing);
 			$viewer.scene.screenSpaceCameraController.enableInputs = true;
 		};
 	}, [$viewer]);

@@ -39,7 +39,27 @@ BROADCAST_HZ = 25
 STALE_MS = 2000          # no traffic for this long => link no longer "alive" (-> stale)
 LOST_MS = 5000           # no traffic for this long => link "lost"
 REBOOT_GAP_MS = 5000     # a backward time_boot_ms jump bigger than this = PX4 reboot
-TARGET_SOURCE_TTL_MS = 2000   # JSON setpoint wins over PX4's for this long after it arrives
+# How long a MAVLink setpoint keeps ownership of the commanded-path overlay after
+# it last arrived. Within this window the sim's JSON target is ignored.
+#
+# This priority used to be the other way round, and it put the orange commanded
+# path 2310 m from the aircraft — measured, holding a CONSTANT offset while the
+# aircraft flew 302 m, which is the signature of two different origins rather
+# than of a distant destination.
+#
+# The cause is that in augment mode the sim projects the setpoint about ITS OWN
+# home (AircraftSim systems/flightlink.py: home_lat + target_n_m/R), while the
+# position on screen comes from PX4's estimator about PX4's origin. When the two
+# origins disagree the setpoint tracks the aircraft with a fixed bias, so the
+# overlay is wrong in a way that looks plausible and never converges.
+#
+# It is the same lesson this project already learned from wind, where the JSON
+# feed and PX4's EKF2 disagreed by 6 m/s and the console was right to read only
+# PX4: for anything describing what the AIRCRAFT is doing, the autopilot is the
+# authority and the sim's JSON is the scenario model's intent. JSON remains the
+# only source on a flightdyn-only run, where there is no PX4 at all, so it stays
+# as the fallback rather than being dropped.
+TARGET_SOURCE_TTL_MS = 2000
 BATTERY_SOURCE_TTL_MS = 3000  # JSON battery wins over PX4's dummy for this long
 TARGET_STALE_MS = 3000        # re-request msg 87 once the setpoint stream goes quiet
 
@@ -330,6 +350,11 @@ def pwm_pct(us: float) -> float:
     return max(-100.0, min(100.0, ((us - 1500.0) / 500.0) * 100.0))
 
 
+# The commanded-path overlay's fields, as one group: they are accepted or
+# refused together, because a target latitude from one source and a longitude
+# from another is a point that exists nowhere.
+_TARGET_KEYS = ("targetLat", "targetLon", "targetAlt")
+
 # Keys the flightlink JSON feed may set directly (already lat/lon-projected).
 JSON_KEYS = {
     "lat", "lon", "alt", "roll", "pitch", "yaw", "airspeed", "groundspeed",
@@ -423,6 +448,9 @@ class Bridge:
         # Source-arbitration / stream-health bookkeeping (mirrors the TS bridge).
         self._last_pos_boot_ms = -1
         self._json_target_at = 0
+        # When PX4's own POSITION_TARGET_GLOBAL_INT last arrived and was usable.
+        # While this is fresh, the JSON feed's target is ignored.
+        self._mav_target_at = 0
         self._json_battery_at = 0
         self._last_target_at = 0
         self._last_req_at: dict[int, int] = {}
@@ -930,9 +958,10 @@ class Bridge:
                 L["yaw"] = msg.yaw
 
             elif t == "POSITION_TARGET_GLOBAL_INT":
-                # Yield to flightlink's JSON setpoint when it's live (augment runs).
-                if now - self._json_target_at < TARGET_SOURCE_TTL_MS:
-                    return
+                # PX4's setpoint is the authority: this is the point the autopilot
+                # is actually tracking. It no longer yields to the sim's JSON
+                # target, which is projected about a different origin (see
+                # TARGET_SOURCE_TTL_MS).
                 self._last_target_at = now  # stream alive; hold off re-requesting
 
                 # Two checks that were missing, and whose absence put the commanded
@@ -957,6 +986,7 @@ class Bridge:
                     L.pop("targetAlt", None)
                     return
 
+                self._mav_target_at = now   # a usable setpoint: JSON stands down
                 L["targetLat"] = msg.lat_int / 1e7
                 L["targetLon"] = msg.lon_int / 1e7
                 L["targetAlt"] = msg.alt
@@ -1210,10 +1240,16 @@ class Bridge:
             now = _now_ms()
             with self._lock:
                 self.last_json_at = now
+                # PX4 owns the setpoint whenever it is streaming one; the sim's
+                # own target is projected about a different origin and would drag
+                # the commanded path off by that difference.
+                mav_owns_target = (now - self._mav_target_at) < TARGET_SOURCE_TTL_MS
                 for k, v in obj.items():
                     if k in JSON_KEYS and v is not None:
+                        if mav_owns_target and k in _TARGET_KEYS:
+                            continue
                         self.latest[k] = v
-                if obj.get("targetLat") is not None:
+                if obj.get("targetLat") is not None and not mav_owns_target:
                     self._json_target_at = now
                     self._last_target_at = now
                 if any(obj.get(k) is not None for k in ("voltage", "current", "batteryRemaining")):

@@ -11,7 +11,7 @@ import type { CommandName } from "@/types/app";
 import { Button } from "@/components/ui/button";
 import { $missionItems } from "@/stores/mission.store";
 import { $params } from "@/stores/params.store";
-import { TKO_LAND_REQ_PARAM, missionRejectionReason } from "@/lib/missionCheck";
+import { lookupFrom, missionBlockers } from "@/lib/missionCheck";
 
 // PX4 custom_mode main/sub pairs for the modes we expose. Mirrors the decode in
 // gs/bridge.py (and AircraftSim's mavlink_io). sub is only meaningful for AUTO(4).
@@ -46,9 +46,9 @@ export function CommandBar() {
 	const notCommander = commander === false;
 	// MISSION is the button that RUNS a plan, and PX4 refuses it for a plan that
 	// does not meet its requirements — accepting the command and staying in the
-	// mode it was in. Warn on the button rather than let that look like a dead
-	// control.
-	const missionWontRun = missionRejectionReason(missionItems, params[TKO_LAND_REQ_PARAM]?.value);
+	// mode it was in. The button itself carries the warning, so the one control
+	// that will not work is the one that looks different.
+	const missionBlocked = missionBlockers(missionItems, lookupFrom(params));
 	const live = linkState === "alive" && !notCommander;
 
 	// Re-bid for authority. gs grants it to the first claimer and holds it until
@@ -161,7 +161,9 @@ export function CommandBar() {
 				{MODES.map((m) => {
 					// Only MISSION depends on the plan being flyable; the others are
 					// unconditional mode changes.
-					const warn = m.label === "MISSION" ? missionWontRun : null;
+					const warn = m.label === "MISSION" && missionBlocked.length > 0
+						? missionBlocked.map((b) => b.detail).join("\n\n")
+						: null;
 					return (
 						<Button
 							key={m.label}
@@ -169,23 +171,14 @@ export function CommandBar() {
 							size="sm"
 							disabled={!live || busy}
 							onClick={() => run("set_mode", { main: m.main, sub: m.sub })}
-							className={`px-0 text-[10px] ${warn ? "border-amber-400/50 text-amber-300" : ""}`}
+							className={`px-0 text-[10px] ${warn ? "border-amber-400/60 text-amber-300" : ""}`}
 							title={warn ?? `Set mode ${m.label}`}
 						>
-							{m.label}
+							{m.label}{warn ? " ▲" : ""}
 						</Button>
 					);
 				})}
 			</div>
-
-			{/* Why MISSION will not take, in words, next to the button that does
-			    not take. PX4 announces this only via STATUSTEXT, at the moment of
-			    refusal, which is the easiest thing on screen to miss. */}
-			{missionWontRun ? (
-				<div className="mt-1 text-[9px] leading-relaxed text-amber-300/80">
-					⚠ {missionWontRun}
-				</div>
-			) : null}
 
 			<div className="mt-1 text-[9px] text-white/30">Double-click the globe to fly there</div>
 
