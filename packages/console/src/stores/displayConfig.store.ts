@@ -241,23 +241,12 @@ export function moveCell(row: number, index: number, dir: -1 | 1) {
 	$extraRows.set(rows);
 }
 
-export function toggleVisible(key: string) {
-	const cur = $visibleFields.get();
-	$visibleFields.set(cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key]);
-}
 
 export function toggleCharted(key: string) {
 	const cur = $chartedFields.get();
 	$chartedFields.set(cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key]);
 }
 
-// Move a visible field up/down in render order.
-export function moveField(key: string, dir: -1 | 1) {
-	const cur = $visibleFields.get();
-	const i = cur.indexOf(key);
-	const j = i + dir;
-	if (i < 0 || j < 0 || j >= cur.length) return;
-	const next = cur.slice();
-	[next[i], next[j]] = [next[j], next[i]];
-	$visibleFields.set(next);
-}
+// toggleVisible / moveField used to drive the Instruments panel's field list.
+// That list is gone — the strip is edited in place through setCell/moveCell —
+// and a second path into the same state is how two editors drift apart.

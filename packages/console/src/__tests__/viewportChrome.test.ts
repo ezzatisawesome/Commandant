@@ -17,8 +17,15 @@ const DOCK = readFileSync(
 
 const PANELS = [
 	"MissionPanel", "GeoPanel", "ParamEditor", "AirframeConfig",
-	"StatusLog", "ViewControls", "InstrumentPanel",
+	"StatusLog", "ViewControls", "CommandsPanel",
 ];
+
+const FEED = readFileSync(
+	join(__dirname, "..", "components", "flight", "LogFeed.tsx"), "utf8",
+);
+const STRIP = readFileSync(
+	join(__dirname, "..", "components", "flight", "TelemetryStrip.tsx"), "utf8",
+);
 
 describe("flight page screen budget", () => {
 	it("pins nothing to the left edge but the wordmark", () => {
@@ -61,6 +68,38 @@ describe("flight page screen budget", () => {
 			expect(at, `${name} must live in the dock item list`).toBeGreaterThan(itemsAt);
 			expect(at, `${name} must not be rendered in the page body`).toBeLessThan(returnAt);
 		}
+	});
+
+	it("keeps the top-left log feed a read-only tail, not a panel", () => {
+		// It is fixed to the left edge, which the budget otherwise forbids. The
+		// allowance is that it cannot be interacted with and cannot grow: no
+		// pointer events, a bounded tail, and a width cap short of the globe.
+		const own = FEED.match(/className="([^"]*\bfixed\b[^"]*)"/s)?.[1] ?? "";
+		expect(own).toContain("pointer-events-none");
+		expect(own).toContain("left-4");
+		expect(own).toMatch(/max-w-/);
+		expect(FEED).toMatch(/const TAIL = \d+;/);
+		// The dock keeps the full, scrollable, clearable record.
+		expect(PAGE).toContain("<StatusLog />");
+	});
+
+	it("keeps vehicle health out of the dock and on the strip", () => {
+		// "Is it safe to fly" must not cost a click, so the health chips are
+		// pinned to the telemetry strip rather than living behind a dock icon.
+		expect(STRIP).toContain("<HealthStrip />");
+		expect(PAGE).not.toContain("HealthStrip");
+	});
+
+	it("spends at most five icons on the dock", () => {
+		// The gutter is permanent screen real estate. Panels that do the same job
+		// share an icon with tabs instead of taking another slot.
+		// Only dock entries carry an icon; tabs inside a panel are labelled words.
+		const keys = [...PAGE.matchAll(/key: "([a-z]+)", label: "[^"]*", icon:/g)]
+			.map((m) => m[1]);
+		expect(keys.length).toBeGreaterThan(0);
+		expect(keys.length).toBeLessThanOrEqual(5);
+		expect(new Set(keys).size, "dock keys must be unique").toBe(keys.length);
+		expect(PAGE).toContain("<PanelTabs");
 	});
 
 	it("keeps the dock a gutter rather than a sidebar", () => {

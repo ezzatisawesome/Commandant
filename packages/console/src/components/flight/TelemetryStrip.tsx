@@ -15,6 +15,7 @@ import {
 import type { LinkState, TelemetryFrame } from "@/types/app";
 import type { ClearanceBand } from "@/lib/flightGeometry";
 import { Sparkline } from "./Sparkline";
+import { HealthStrip } from "./HealthStrip";
 import { ControlBar } from "./ControlBar";
 
 // The telemetry strip: an EDITABLE grid overlaid on the bottom edge of the globe.
@@ -72,15 +73,19 @@ const Cell = memo(function Cell({
 			onClick={editing ? onEdit : undefined}
 			disabled={!editing}
 			title={editing ? "Click to change or remove this field" : view.title}
-			className={`flex shrink-0 flex-col items-start justify-center px-2.5 text-left
+			// Cells share the row evenly: flex-1 over a zero basis, so every channel
+			// gets the same slice of the width however long its label is. Packed
+			// left with shrink-0, a full-bleed strip left a dead gap on the right
+			// and the columns drifted out of line between rows.
+			className={`flex min-w-0 flex-1 basis-0 flex-col items-start justify-center px-2.5 text-left
 				${editing ? "cursor-pointer rounded ring-1 ring-sky-400/40 hover:bg-sky-400/10" : "cursor-default"}`}
 		>
-			<span className="text-[9px] uppercase leading-none tracking-wide text-white/45">
+			<span className="w-full truncate text-[9px] uppercase leading-none tracking-wide text-white/45">
 				{view.label}
 			</span>
-			<div className="flex items-baseline gap-1 leading-none">
-				<span className={`font-mono text-[13px] ${view.tone}`}>{view.value}</span>
-				{view.unit ? <span className="text-[9px] text-white/40">{view.unit}</span> : null}
+			<div className="flex w-full items-baseline gap-1 leading-none">
+				<span className={`truncate font-mono text-[13px] ${view.tone}`}>{view.value}</span>
+				{view.unit ? <span className="shrink-0 text-[9px] text-white/40">{view.unit}</span> : null}
 				{view.control !== undefined ? <ControlBar value={view.control} /> : null}
 			</div>
 			{spark ? <Sparkline values={spark} width={44} height={10} /> : null}
@@ -339,15 +344,42 @@ export function TelemetryStrip() {
 			    floating card. Only the top edge is drawn — the sides are screen. */}
 			<div className="pointer-events-auto flex w-full flex-col
 				border-t border-white/10 bg-black/70 backdrop-blur">
+
+				{/* Pinned header line. Vehicle health sits here rather than behind a
+				    dock icon — "is it safe to fly" must never cost a click — and the
+				    edit affordance sits beside it, out of the channel rows, so neither
+				    is pushed off the end by whatever the operator puts in the grid. */}
+				<div className="flex items-center gap-2 px-3 py-1">
+					<HealthStrip />
+					<span className="flex-1" />
+					{editing ? (
+						<button
+							onClick={() => addRow()}
+							className="rounded border border-white/15 px-1.5 py-1 text-[10px] text-white/70 hover:bg-white/10"
+							title="Add a row"
+						>
+							<Rows3 className="h-3.5 w-3.5" />
+						</button>
+					) : null}
+					<button
+						onClick={() => { setEditing((e) => !e); setPicking(null); }}
+						className={`rounded border px-1.5 py-1 text-[10px]
+							${editing ? "border-sky-400/50 bg-sky-400/10 text-sky-300"
+								: "border-white/15 text-white/50 hover:bg-white/10"}`}
+						title={editing ? "Done editing" : "Edit the strip: click any field to change it"}
+					>
+						{editing ? "Done" : <Pencil className="h-3.5 w-3.5" />}
+					</button>
+				</div>
+
 				{rows.map((row, r) => (
 					<div key={r}
 						// Edit mode rings every cell, and rings that touch read as one
 						// block rather than separate targets — so the row only gains gaps
 						// (and side padding, so the end rings aren't flush against the
 						// screen) while editing. Normal flight keeps the cells tight.
-						className={`flex items-stretch overflow-x-auto py-1.5
-							${editing ? "gap-1.5 px-1" : ""}
-							${r > 0 ? "border-t border-white/10" : ""}`}>
+						className={`flex items-stretch border-t border-white/10 py-1.5
+							${editing ? "gap-1.5 px-1" : ""}`}>
 						{/* Link status leads the first row: the first thing to check. The
 						    gutter is a FIXED width and every later row reserves it, so
 						    channels on row 1+ start where row 0's channels do instead of
@@ -411,31 +443,8 @@ export function TelemetryStrip() {
 							</button>
 						) : null}
 
-						<span className="flex-1" />
-
-						{/* Edit affordance lives on the first row only. */}
-						{r === 0 ? (
-							<div className="flex shrink-0 items-center gap-1 px-2">
-								{editing ? (
-									<button
-										onClick={() => addRow()}
-										className="rounded border border-white/15 px-1.5 py-1 text-[10px] text-white/70 hover:bg-white/10"
-										title="Add a row"
-									>
-										<Rows3 className="h-3.5 w-3.5" />
-									</button>
-								) : null}
-								<button
-									onClick={() => { setEditing((e) => !e); setPicking(null); }}
-									className={`rounded border px-1.5 py-1 text-[10px]
-										${editing ? "border-sky-400/50 bg-sky-400/10 text-sky-300"
-											: "border-white/15 text-white/50 hover:bg-white/10"}`}
-									title={editing ? "Done editing" : "Edit the strip: click any field to change it"}
-								>
-									{editing ? "Done" : <Pencil className="h-3.5 w-3.5" />}
-								</button>
-							</div>
-						) : null}
+						{/* An empty row would collapse to nothing and become unclickable. */}
+						{row.length === 0 && !editing ? <span className="h-7 flex-1" /> : null}
 					</div>
 				))}
 			</div>
