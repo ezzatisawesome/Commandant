@@ -292,7 +292,7 @@ export default function MissionLayer() {
 		// Toggling edit mode adds/removes the grabbers, so it is a structural change.
 		const unsubEdit = $missionEdit.subscribe(rebuildMarkers);
 
-		// --- authoring: click to add, drag to move/raise/resize ---------------
+		// --- authoring: double-click to add, drag to move/raise/resize --------
 		const handler = new ScreenSpaceEventHandler($viewer.scene.canvas);
 
 		// Left-click appends a waypoint, but only in edit mode (otherwise it would
@@ -304,20 +304,62 @@ export default function MissionLayer() {
 			| { what: "radius"; seq: number };
 		let drag: Drag | null = null;
 		let didDrag = false;
+		// Set when a single click has just appended a waypoint, so the
+		// double-click that follows it does not append a second one on the same
+		// spot. Cesium delivers LEFT_CLICK then LEFT_DOUBLE_CLICK for the same
+		// gesture; only one waypoint should come out of it.
+		let justAdded = false;
 
-		handler.setInputAction((m: { position: Cartesian2 }) => {
-			if (IS_VIEW || !$missionEdit.get() || didDrag) return;
-			const cart = $viewer.camera.pickEllipsoid(m.position, $viewer.scene.globe.ellipsoid);
-			if (!cart) return;
+		// Drop a waypoint under the cursor, at the aircraft's current altitude —
+		// the only sane default — and let the operator drag it from there. Picks
+		// the terrain where tiles are loaded so the marker starts on the hill it
+		// looks like it is on, falling back to the ellipsoid while they stream.
+		const addAt = (px: Cartesian2) => {
+			const scene = $viewer.scene;
+			const ray = scene.camera.getPickRay(px);
+			const cart = (ray ? scene.globe.pick(ray, scene) : undefined)
+				?? scene.camera.pickEllipsoid(px, scene.globe.ellipsoid);
+			if (!cart) return false;
 			const geo = Cartographic.fromCartesian(cart);
-			// A new waypoint takes the aircraft's current altitude as its starting
-			// height — the only sane default — and the operator drags it from there.
 			addWaypoint(
 				CesiumMath.toDegrees(geo.latitude),
 				CesiumMath.toDegrees(geo.longitude),
 				clampAlt($aircraftStore.get()?.alt ?? 0),
 			);
+			return true;
+		};
+
+		handler.setInputAction((m: { position: Cartesian2 }) => {
+			if (IS_VIEW || !$missionEdit.get() || didDrag) return;
+			if (addAt(m.position)) {
+				justAdded = true;
+				setTimeout(() => { justAdded = false; }, 400);
+			}
 		}, ScreenSpaceEventType.LEFT_CLICK);
+
+		// Double-click drops a waypoint without first arming edit mode, and turns
+		// edit mode on so the thing you just made is visible and grabbable. This
+		// is the gesture that puts a waypoint on the globe in one move; the
+		// single-click add above still works once you are in edit mode.
+		//
+		// Cesium's own double-click handler tracks the picked entity, which would
+		// snap the camera onto the aircraft at the same moment — so that default
+		// is removed here, on the viewer's own handler.
+		$viewer.screenSpaceEventHandler.removeInputAction(ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+		handler.setInputAction((m: { position: Cartesian2 }) => {
+			if (IS_VIEW || didDrag) return;
+			// Never on top of an existing marker or grabber: a double-click there
+			// is aimed at that waypoint, not at the ground behind it.
+			const onHandle = firstTaggedId(
+				$viewer.scene.drillPick(m.position, 8),
+				["mission-alt-", "mission-rad-", "mission-wp-"],
+			) !== null;
+			if (onHandle) return;
+			if (!justAdded) addAt(m.position);
+			justAdded = false;
+			$missionEdit.set(true);
+			$viewer.scene.requestRender();
+		}, ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
 
 		// Arm a drag: pick on LEFT_DOWN, move on MOUSE_MOVE, release on LEFT_UP.
 		// Disable the camera controls while dragging so the globe doesn't pan.
