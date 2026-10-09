@@ -174,6 +174,75 @@ export function ballPitchMarks(
 	return out;
 }
 
+// --- where the instruments sit ------------------------------------------------
+//
+// Placement is geometry too, and it is the kind that breaks silently: a corner
+// that is clear at 1440 px is not clear at 900, and two instruments drawn over
+// the same pixels do not throw, they just become unreadable. So the boxes live
+// here as functions of the viewport and are checked against each other by test.
+
+export interface Box {
+	/** Left, top, right, bottom in SVG pixels; y grows DOWN. */
+	x0: number;
+	y0: number;
+	x1: number;
+	y1: number;
+}
+
+/** Gap from the screen edge to the attitude ball's rim. */
+export const BALL_EDGE_GAP = 22;
+
+/** Baseline of the roll/pitch readout, below the ball's rim. */
+export const BALL_LABEL_DROP = 15;
+
+/**
+ * Half-width of the heading tape, as a fraction of the viewport width.
+ *
+ * The tape is centred and spans `cx * 0.42` either side of centre, where
+ * `cx = w / 2` — so it covers the middle 42 % of the screen and its right edge
+ * is at 0.71 w.
+ */
+export const HEADING_TAPE_HALF_FRAC = 0.21;
+
+/** Box the heading tape occupies: top centre, including its labels. */
+export function headingTapeBox(w: number): Box {
+	const half = w * HEADING_TAPE_HALF_FRAC;
+	// The group sits at y = 34; text rises ~12 px above it and the readout
+	// baseline falls 39 px below, so this is the band it really owns.
+	return { x0: w / 2 - half, y0: 20, x1: w / 2 + half, y1: 78 };
+}
+
+/**
+ * Centre of the attitude ball: the TOP-RIGHT corner.
+ *
+ * It was bottom-left, above the telemetry strip. Top-right is the corner with
+ * the least competition: the wordmark holds top-left, the heading tape stops at
+ * 0.71 w, the alerts stack is top-centre, and the dock is pinned to the vertical
+ * centre of the right edge, not its top. The altitude tape runs down the right
+ * side but is centred vertically, so it starts well below this.
+ */
+export function ballCentre(w: number, h: number, radiusPx: number, gap = BALL_EDGE_GAP): { cx: number; cy: number } {
+	void h;   // placement is anchored to the top edge, so height does not enter
+	return { cx: w - radiusPx - gap, cy: radiusPx + gap };
+}
+
+/** Box the ball occupies, readout included — what must not overlap anything. */
+export function ballBox(w: number, h: number, radiusPx: number, gap = BALL_EDGE_GAP): Box {
+	const { cx, cy } = ballCentre(w, h, radiusPx, gap);
+	return {
+		x0: cx - radiusPx,
+		y0: cy - radiusPx,
+		x1: cx + radiusPx,
+		// The readout hangs below the rim and is part of the instrument.
+		y1: cy + radiusPx + BALL_LABEL_DROP,
+	};
+}
+
+/** Do two instrument boxes share any pixels? */
+export function overlaps(a: Box, b: Box): boolean {
+	return a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
+}
+
 /** Is this bank tick a major (longer) one? Dense near level, where small
  *  corrections matter; sparse past 30, where the exact number does not. */
 export function bankMajor(deg: number): boolean {

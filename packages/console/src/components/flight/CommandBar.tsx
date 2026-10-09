@@ -32,6 +32,7 @@ export function CommandBar() {
 	const linkState = useStore($linkState);
 	const commander = useStore($commander);
 	const [busy, setBusy] = useState(false);
+	const [claiming, setClaiming] = useState(false);
 	const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
 	const [takeoffAlt, setTakeoffAlt] = useState(30);
 
@@ -39,6 +40,23 @@ export function CommandBar() {
 	// them anyway). null/true = we have (or optimistically assume) control.
 	const notCommander = commander === false;
 	const live = linkState === "alive" && !notCommander;
+
+	// Re-bid for authority. gs grants it to the first claimer and holds it until
+	// that socket drops, and the console only claimed in ws.onopen — so without
+	// this the cure for a latched badge was to find and close the other tab, or
+	// reload and hope the race went the other way.
+	async function takeCommand() {
+		setClaiming(true);
+		setStatus(null);
+		try {
+			const ok = await telemetryClient.takeCommand();
+			setStatus({ ok, text: ok ? "command taken" : "another GCS still holds command" });
+		} catch (err) {
+			setStatus({ ok: false, text: err instanceof Error ? err.message : "failed" });
+		} finally {
+			setClaiming(false);
+		}
+	}
 
 	async function run(name: CommandName, args: Record<string, unknown> = {}) {
 		setBusy(true);
@@ -63,8 +81,23 @@ export function CommandBar() {
 						● IN CONTROL
 					</span>
 				) : commander === false ? (
-					<span className="text-[9px] font-semibold text-amber-400" title="Another GCS holds command authority; commands are disabled">
-						● ANOTHER GCS IN CONTROL
+					// This badge latches: gs answers a claim once, at connect, and
+					// releases authority silently when the holder's socket drops. So a
+					// console refused at startup goes on saying this long after the
+					// other tab has closed — with every command disabled and no way
+					// back. The button re-asks.
+					<span className="flex items-center gap-1.5">
+						<span className="text-[9px] font-semibold text-amber-400" title="Another GCS holds command authority; commands are disabled. It may also have since disconnected — ask again.">
+							● ANOTHER GCS IN CONTROL
+						</span>
+						<button
+							onClick={takeCommand}
+							disabled={claiming}
+							className="rounded border border-amber-400/40 px-1 text-[9px] font-semibold text-amber-300 hover:bg-amber-400/10 disabled:opacity-40"
+							title="Ask gs to hand command authority to this console"
+						>
+							{claiming ? "…" : "Take"}
+						</button>
 					</span>
 				) : null}
 			</div>

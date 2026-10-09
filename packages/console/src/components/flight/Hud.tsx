@@ -9,12 +9,12 @@ import { $linkState } from "@/stores/link.store";
 import { isNum } from "@/lib/flightGeometry";
 import {
 	headingTicks, tapeTicks, wrap360, ballPitchMarks, BALL_BANK_TICKS,
-	bankMajor, rollLabel, pitchLabel,
+	bankMajor, rollLabel, pitchLabel, ballCentre, BALL_LABEL_DROP,
 } from "@/lib/hud";
 
 // Flight instruments drawn over the globe: airspeed and altitude tapes down the
 // sides, a heading tape across the top, and a compact attitude ball in the
-// bottom-left corner.
+// top-right corner.
 //
 // There WAS a full cockpit HUD here — a screen-height pitch ladder, horizon and
 // flight path marker through the centre. It went because the metaphor was wrong
@@ -28,6 +28,14 @@ import {
 // much air is underneath, which way round, and precise attitude in degrees. The
 // tapes live at the edges and the ball is 92 px in a corner the globe was not
 // using.
+//
+// The ball sits TOP-RIGHT. It was bottom-left, which put it in the corner a
+// camera tilted toward the horizon fills with sky and foreground terrain, and
+// directly above the telemetry strip it had to be nudged clear of. Top-right is
+// the quietest corner on the page: the wordmark owns top-left, the alerts stack
+// top-centre, the heading tape stops at 0.71 w, and the dock is pinned to the
+// vertical centre of the right edge rather than its top. lib/hud.ts holds the
+// boxes and a test asserts they do not collide.
 //
 // All geometry comes from lib/hud.ts, which is pure and tested. Nothing here
 // computes an angle, because a sign error in an instrument is read as truth.
@@ -43,8 +51,9 @@ const FONT = "600 12px ui-monospace, SFMono-Regular, Menlo, monospace";
  *  fits +-30 degrees of pitch either side of the horizon inside the disc. */
 const BALL_R = 46;
 const BALL_PX_PER_DEG = 1.2;
-/** Gap from the bottom edge, clearing the telemetry strip. */
-const BALL_BOTTOM_GAP = 118;
+// Where the ball goes is in lib/hud.ts (ballCentre / ballBox), with the rest of
+// the HUD's geometry — a corner that is clear at 1440 px need not be at 900, and
+// two instruments over the same pixels fail silently.
 
 /** The tapes: step between ticks, labelled every, and pixels per unit. */
 const SPEED_TAPE = { step: 1, labelEvery: 5, pxPerUnit: 9, halfPx: 92 };
@@ -154,9 +163,9 @@ export default function Hud() {
 					subTone={d.clearance === "critical" ? "rgba(255,110,110,0.95)"
 						: d.clearance === "low" ? "rgba(255,190,110,0.95)" : STROKE_DIM}
 				/>
-				{/* ---- attitude ball, bottom left ---- */}
+				{/* ---- attitude ball, top right ---- */}
 				<AttitudeBall
-					cx={BALL_R + 22} cy={h - BALL_BOTTOM_GAP}
+					{...ballCentre(w, h, BALL_R)}
 					rollDeg={attitudeKnown ? rollDeg : null}
 					pitchDeg={attitudeKnown ? pitchDeg : null}
 				/>
@@ -241,7 +250,7 @@ function AttitudeBall({
 			<circle cx={0} cy={0} r={1.6} fill={STROKE} />
 
 			{/* The numbers, because reading a 92 px disc to the degree is guesswork. */}
-			<text x={0} y={BALL_R + 15} textAnchor="middle" style={{ font: FONT }}
+			<text x={0} y={BALL_R + BALL_LABEL_DROP} textAnchor="middle" style={{ font: FONT }}
 				fill={known ? STROKE : "rgba(255,120,120,0.9)"}>
 				{known ? `${rollLabel(rollDeg)}  ${pitchLabel(pitchDeg)}` : "NO ATTITUDE"}
 			</text>

@@ -36,7 +36,7 @@ change that test deliberately rather than deleting the assertion.
 | Top centre | Transient alerts, warning severity and worse | Only while alerting |
 | Top right | Cesium's scene-mode toggle | One button |
 | Right edge | The dock, 36 px, one panel at a time | A gutter |
-| Bottom left | The 92 px attitude ball, above the strip | One small disc |
+| Top right | The 92 px attitude ball | One small disc |
 | Bottom edge | The editable telemetry strip | One or more rows, operator's choice |
 
 Nothing is pinned to the left edge. No instrument sits in a box.
@@ -63,7 +63,7 @@ What is left is what the globe genuinely cannot say.
   MSL alone does not answer whether the aircraft clears the hill.
 - **Heading tape** across the top: cardinals as letters, exact bearing under the
   pointer.
-- **Attitude ball** bottom left, 92 px: horizon, a countable pitch scale, bank
+- **Attitude ball** top right, 92 px: horizon, a countable pitch scale, bank
   ticks on the rim and a fixed aircraft reference, with roll and pitch in degrees
   written underneath. Same conventions as a cockpit instrument, so the horizon
   rotates by minus the bank angle and moves down as the nose comes up.
