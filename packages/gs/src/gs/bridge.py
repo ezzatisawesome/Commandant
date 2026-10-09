@@ -932,6 +932,23 @@ class Bridge:
                 L["lat"] = msg.lat / 1e7
                 L["lon"] = msg.lon / 1e7
                 L["alt"] = msg.alt / 1000.0  # mm -> m (MSL)
+                # Height above HOME, which is a different number from `alt` and
+                # the one the mission protocol actually speaks.
+                #
+                # Mission items go up as MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, so a
+                # waypoint's z is metres above home — but the console only ever
+                # had `alt` (MSL) to seed one from, so an altitude clicked on the
+                # globe meant MSL when placed and relative-to-home when PX4 flew
+                # it. Measured on this vehicle: alt 206.9 MSL against
+                # relativeAlt 97.8, so home is at 109 m and every waypoint
+                # authored from `alt` was 109 m TOO HIGH. It is also why a
+                # "landing" taken from the aircraft's own altitude ended up in
+                # the air instead of on the ground.
+                #
+                # Exposing it lets the console author in the frame it uploads in,
+                # and lets it derive home's elevation (alt - relativeAlt) so the
+                # plan can still be DRAWN at the right height on an MSL globe.
+                L["relativeAlt"] = msg.relative_alt / 1000.0
                 if msg.hdg != 65535:
                     L["heading"] = msg.hdg / 100.0
 

@@ -196,7 +196,10 @@ export default function MissionPanel() {
 					<div className="flex items-center gap-1 border-b border-white/10 pb-1 text-[9px] uppercase tracking-wide text-white/40">
 						<span className="w-4" title="Sequence — the order PX4 flies them">#</span>
 						<span className="w-[7.5rem]">Type</span>
-						<span className="w-14 text-right" title="Altitude, metres, relative to home">Alt m</span>
+						<span className="w-14 text-right"
+						title="Altitude in metres ABOVE HOME — the frame mission items upload in (GLOBAL_RELATIVE_ALT_INT), not height above sea level. The HUD's altitude tape reads MSL, so the two differ by home's elevation.">
+						Alt ▲home
+					</span>
 						<span className="w-12 text-right" title="Radius, seconds or turns, depending on the type">Radius</span>
 						<span className="flex-1" />
 						<span className="w-3" title="Warnings about this item" />
@@ -211,7 +214,17 @@ export default function MissionPanel() {
 								<span className="w-4 text-white/40">{it.seq}</span>
 								<select
 									value={it.kind}
-									onChange={(e) => updateItem(it.seq, { kind: e.target.value as MissionKind })}
+									onChange={(e) => {
+										const kind = e.target.value as MissionKind;
+										// A landing is where the aircraft touches DOWN, so it
+										// belongs at ground level. Inheriting the cruise
+										// altitude of the waypoint it was converted from is
+										// what put a "landing" 50 m in the air and made PX4
+										// reject the approach as impossibly steep.
+										updateItem(it.seq, kind === "land" && (it.alt ?? 0) > 0
+											? { kind, alt: 0 }
+											: { kind });
+									}}
 									className="h-6 w-[7.5rem] rounded border border-white/15 bg-transparent px-1 text-white"
 								>
 									{KINDS.map((k) => <option key={k} value={k} className="bg-black">{k}</option>)}
@@ -222,7 +235,7 @@ export default function MissionPanel() {
 										value={it.alt ?? 0}
 										onChange={(e) => updateItem(it.seq, { alt: Number(e.target.value) })}
 										className="h-6 w-14 rounded border border-white/15 bg-transparent px-1 text-right text-white"
-										title="alt (m) — or drag the ▲ handle on the globe"
+										title="Altitude in metres above HOME (the upload frame) — or drag the ▲ handle on the globe"
 									/>
 								) : <span className="w-14" />}
 								{extra ? (

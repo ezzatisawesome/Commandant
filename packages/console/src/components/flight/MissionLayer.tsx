@@ -49,6 +49,7 @@ import {
 import { firstTaggedId, tagSeq } from "@/lib/pickTag";
 import { $params } from "@/stores/params.store";
 import { landingGeometry, landingSlopeLimit, lookupFrom, minLegalRunM } from "@/lib/missionCheck";
+import { authoringAltM, drawHeightM, homeAltM } from "@/lib/altFrames";
 import { ALT_HANDLE_MISSION, ALT_HANDLE_OFFSET_PX, ALT_HANDLE_PX } from "@/lib/altHandle";
 import { $aircraftStore } from "@/stores/aircraft.store";
 import type { MissionItem } from "@/types/app";
@@ -83,7 +84,16 @@ export default function MissionLayer() {
 
 		const itemOf = (seq: number): MissionItem | undefined =>
 			$missionItems.get().find((x) => x.seq === seq);
+		// An item's `alt` is metres ABOVE HOME (that is the frame it uploads in).
+		// Cesium draws at MSL, so every height below goes through drawHeightM
+		// with home's elevation, which the autopilot gives us as the difference
+		// between its two reported altitudes. Drawing the raw relative number —
+		// what this did before — put the whole plan low by home's elevation.
+		const home = () => homeAltM($aircraftStore.get());
 		const altOf = (it: MissionItem | undefined) =>
+			drawHeightM(it?.alt, home());
+		// The authored value itself, for the readout and the drag arithmetic.
+		const relAltOf = (it: MissionItem | undefined) =>
 			it && Number.isFinite(it.alt) ? (it.alt as number) : 0;
 		// Grabbers are an authoring affordance: hidden outside edit mode so a
 		// monitoring console is not peppered with handles, and never shown in the
@@ -293,7 +303,10 @@ export default function MissionLayer() {
 				markers.push($viewer.entities.add({
 					position: new CallbackPositionProperty(() => posOf(seq), false),
 					label: {
-						text: new CallbackProperty(() => `${Math.round(altOf(itemOf(seq)))} m`, false),
+						// The authored altitude, above home — the number the table shows
+						// and the one PX4 flies. Showing the MSL height it is DRAWN at
+						// would disagree with the table by home's elevation.
+						text: new CallbackProperty(() => `${Math.round(relAltOf(itemOf(seq)))} m`, false),
 						font: "bold 12px ui-monospace, Menlo, monospace",
 						fillColor: Color.WHITE,
 						style: LabelStyle.FILL,
@@ -411,7 +424,7 @@ export default function MissionLayer() {
 			addWaypoint(
 				CesiumMath.toDegrees(geo.latitude),
 				CesiumMath.toDegrees(geo.longitude),
-				clampAlt($aircraftStore.get()?.alt ?? 0),
+				clampAlt(authoringAltM($aircraftStore.get()).alt),
 			);
 			return true;
 		};
@@ -491,6 +504,9 @@ export default function MissionLayer() {
 				const it = itemOf(drag.seq);
 				if (!it || it.lat === undefined || it.lon === undefined) return;
 				const higher = Cartesian3.fromDegrees(it.lon, it.lat, altOf(it) + ALT_SAMPLE_M);
+				// altOf() is the MSL draw height; the sample only needs to be one
+				// ALT_SAMPLE_M above it, and the result is applied to the stored
+				// above-home value, so no home offset enters the arithmetic.
 				const s0 = SceneTransforms.worldToWindowCoordinates($viewer.scene, base);
 				const s1 = SceneTransforms.worldToWindowCoordinates($viewer.scene, higher);
 				if (!s0 || !s1) return;

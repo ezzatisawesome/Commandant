@@ -42,6 +42,7 @@ import {
 	updateRallyItem,
 } from "@/stores/geo.store";
 import { ALT_SAMPLE_M, altDeltaFromDrag, clampAlt, clampRadius, snap } from "@/lib/grabbers";
+import { authoringAltM, drawHeightM, homeAltM } from "@/lib/altFrames";
 import { firstTaggedId, tagSeq } from "@/lib/pickTag";
 import { ALT_HANDLE_OFFSET_PX, ALT_HANDLE_PX, ALT_HANDLE_RALLY } from "@/lib/altHandle";
 import type { FenceItem } from "@/types/app";
@@ -333,10 +334,13 @@ export default function GeoLayer() {
 			// wire, so it is drawn at its own, on a stem, like a waypoint.
 			for (const it of $rallyItems.get()) {
 				const seq = it.seq;
-				const rallyAlt = () => {
+				// Stored above home (RallyItem.alt is relative-to-home, like a
+				// mission item); drawn at MSL.
+				const rallyRelAlt = () => {
 					const cur = $rallyItems.get().find((x) => x.seq === seq);
 					return cur && Number.isFinite(cur.alt) ? (cur.alt as number) : 0;
 				};
+				const rallyAlt = () => drawHeightM(rallyRelAlt(), homeAltM($aircraftStore.get()));
 				ents.push($viewer.entities.add({
 					polyline: {
 						positions: new CallbackProperty(() => {
@@ -388,7 +392,7 @@ export default function GeoLayer() {
 							disableDepthTestDistance: Number.POSITIVE_INFINITY,
 						},
 						label: {
-							text: new CallbackProperty(() => `${Math.round(rallyAlt())} m`, false),
+							text: new CallbackProperty(() => `${Math.round(rallyRelAlt())} m`, false),
 							font: "10px monospace", fillColor: Color.CYAN,
 							style: LabelStyle.FILL, verticalOrigin: VerticalOrigin.CENTER,
 							pixelOffset: new Cartesian2(16, ALT_HANDLE_OFFSET_PX),
@@ -428,7 +432,7 @@ export default function GeoLayer() {
 			const kind = $geoPlaceKind.get();
 			// A rally point takes the aircraft's current altitude to start from and
 			// is then dragged vertically like a waypoint.
-			if (kind === "rally") addRallyPoint(at.lat, at.lon, clampAlt($aircraftStore.get()?.alt ?? 0));
+			if (kind === "rally") addRallyPoint(at.lat, at.lon, clampAlt(authoringAltM($aircraftStore.get()).alt));
 			else addFencePoint(kind, at.lat, at.lon);
 		}, ScreenSpaceEventType.LEFT_CLICK);
 
@@ -512,8 +516,11 @@ export default function GeoLayer() {
 				const cur = $rallyItems.get().find((x) => x.seq === d.seq);
 				if (!cur) return;
 				const here = Number.isFinite(cur.alt) ? (cur.alt as number) : 0;
-				const base = Cartesian3.fromDegrees(cur.lon, cur.lat, here);
-				const higher = Cartesian3.fromDegrees(cur.lon, cur.lat, here + ALT_SAMPLE_M);
+				// Project at the MSL height it is drawn at; apply the result to the
+				// stored above-home value.
+				const drawn = drawHeightM(here, homeAltM($aircraftStore.get()));
+				const base = Cartesian3.fromDegrees(cur.lon, cur.lat, drawn);
+				const higher = Cartesian3.fromDegrees(cur.lon, cur.lat, drawn + ALT_SAMPLE_M);
 				const s0 = SceneTransforms.worldToWindowCoordinates($viewer.scene, base);
 				const s1 = SceneTransforms.worldToWindowCoordinates($viewer.scene, higher);
 				if (!s0 || !s1) return;
