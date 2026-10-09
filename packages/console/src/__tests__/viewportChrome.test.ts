@@ -17,7 +17,7 @@ const DOCK = readFileSync(
 
 const PANELS = [
 	"MissionPanel", "GeoPanel", "ParamEditor", "AirframeConfig",
-	"StatusLog", "ViewControls", "CommandsPanel",
+	"ViewControls", "CommandsPanel",
 ];
 
 const FEED = readFileSync(
@@ -79,8 +79,19 @@ describe("flight page screen budget", () => {
 		expect(own).toContain("left-4");
 		expect(own).toMatch(/max-w-/);
 		expect(FEED).toMatch(/const TAIL = \d+;/);
-		// The dock keeps the full, scrollable, clearable record.
-		expect(PAGE).toContain("<StatusLog />");
+	});
+
+	it("shows the status log instead of putting it behind a dock icon", () => {
+		// The dock's Status panel was a click to read something the screen can
+		// simply show, and the tail under the wordmark was too small to read it
+		// from. There is now one log surface, and it is legible: mono at 12px or
+		// more, and a tail deep enough to be a record rather than a hint.
+		expect(PAGE).not.toContain("StatusLog");
+		expect(PAGE).not.toContain("ScrollText");
+		const px = Number(FEED.match(/text-\[(\d+)px\]/)?.[1] ?? 0);
+		expect(px).toBeGreaterThanOrEqual(12);
+		const tail = Number(FEED.match(/const TAIL = (\d+);/)?.[1] ?? 0);
+		expect(tail).toBeGreaterThanOrEqual(12);
 	});
 
 	it("keeps vehicle health out of the dock and on the strip", () => {

@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { Shield, Terminal, Eye, ScrollText, Route, Sliders } from "lucide-react";
+import { Shield, Terminal, Eye, Route, Sliders } from "lucide-react";
 import { Saira_Condensed } from "next/font/google";
 
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -27,7 +27,7 @@ const MissionPanel = dynamic(() => import("@/components/flight/MissionPanel"), {
 const GeoLayer = dynamic(() => import("@/components/flight/GeoLayer"), { ssr: false });
 const SituationLayer = dynamic(() => import("@/components/flight/SituationLayer"), { ssr: false });
 const GeoPanel = dynamic(() => import("@/components/flight/GeoPanel"), { ssr: false });
-const StatusLog = dynamic(() => import("@/components/flight/StatusLog").then((m) => m.StatusLog), { ssr: false });
+const CursorGround = dynamic(() => import("@/components/flight/CursorGround"), { ssr: false });
 const LogFeed = dynamic(() => import("@/components/flight/LogFeed").then((m) => m.LogFeed), { ssr: false });
 
 const ICON = "h-4 w-4";
@@ -38,10 +38,12 @@ const ICON = "h-4 w-4";
 //                marker, heading tape on top, airspeed and altitude tapes down
 //                the sides. Strokes over the globe, fixed to the screen, and
 //                transparent to the mouse, so it costs no area at all.
-//   top-left     wordmark and the read-only badge, one line, with the last few
-//                autopilot status lines tailing beneath it in green
+//   top-left     wordmark and the read-only badge, one line, with the autopilot
+//                status lines tailing beneath it in green — the log lives here
+//                now, read-only and at readable size, rather than behind an
+//                icon on the right
 //   top-centre   transient alerts, warning severity and worse only
-//   right edge   a 36 px dock; five icons, one panel at a time, opening inboard
+//   right edge   a 36 px dock; four icons, one panel at a time, opening inboard
 //   bottom edge  the telemetry strip, full width, with vehicle health pinned
 //                to its header line
 //
@@ -50,11 +52,13 @@ const ICON = "h-4 w-4";
 // difference between a map with chrome around it and a dashboard with a map in
 // the corner.
 export default function FlightPage() {
-	// Five icons, down from seven. The gutter is permanent screen real estate, so
+	// Four icons, down from seven. The gutter is permanent screen real estate, so
 	// an icon has to earn its slot: health moved out of the dock onto the
-	// telemetry strip (always visible, no click), and the pairs that do the same
-	// job — mission/geofence, parameters/airframe — share one icon with tabs,
-	// since the dock only ever shows one panel anyway.
+	// telemetry strip (always visible, no click), the status log moved to the
+	// top-left tail (same — the scroll icon was a click to read something the
+	// screen can simply show), and the pairs that do the same job —
+	// mission/geofence, parameters/airframe — share one icon with tabs, since the
+	// dock only ever shows one panel anyway.
 	const items: DockItem[] = [
 		{ key: "cmd", label: "Commands", icon: <Terminal className={ICON} />, panel: <ErrorBoundary name="Commands"><CommandsPanel /></ErrorBoundary> },
 		// Authoring and parameter writing are cockpit-only. The globe still draws
@@ -80,7 +84,6 @@ export default function FlightPage() {
 			},
 		]),
 		{ key: "view", label: "View and overlays", icon: <Eye className={ICON} />, panel: <ErrorBoundary name="View controls"><ViewControls /></ErrorBoundary> },
-		{ key: "log", label: "Status log", icon: <ScrollText className={ICON} />, panel: <ErrorBoundary name="Status log"><StatusLog /></ErrorBoundary> },
 	];
 
 	return (
@@ -90,6 +93,9 @@ export default function FlightPage() {
 			<MissionLayer />
 			<GeoLayer />
 			<SituationLayer />
+			{/* The cursor's plumb line to the ground. Globe entities only; it adds
+			    no chrome and takes no clicks. */}
+			<CursorGround />
 
 			{/* The HUD sits above the globe and below the chrome. */}
 			<ErrorBoundary name="HUD"><Hud /></ErrorBoundary>
@@ -98,8 +104,8 @@ export default function FlightPage() {
 			<ErrorBoundary name="Telemetry strip"><TelemetryStrip /></ErrorBoundary>
 
 			{/* The autopilot's own words, tailing down the top-left under the
-			    wordmark. Read-only and transparent to the mouse: the dock's Status
-			    panel is still the full record. */}
+			    wordmark. Read-only and transparent to the mouse, and now the whole
+			    log surface: the dock's Status panel is gone. */}
 			<ErrorBoundary name="Log feed"><LogFeed /></ErrorBoundary>
 
 			{/* Wordmark. One line, top-left, the log feed beneath it. */}
