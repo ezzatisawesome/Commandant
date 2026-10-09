@@ -393,9 +393,20 @@ export class TelemetryClient {
 		});
 	}
 
-	/** Enable/disable a MAVLink stream at a rate (hz=0 disables). Fire-and-forget. */
-	setStream(msgId: number, hz: number) {
-		this.send({ type: "stream", msgId, hz });
+	/**
+	 * Set a MAVLink message's rate (hz=0 stops it), and report what came back.
+	 *
+	 * This used to be fire-and-forget over `{type:"stream"}`: PX4's COMMAND_ACK
+	 * arrived at gs, matched nothing, and was dropped, so a rate the autopilot
+	 * refused or capped looked exactly like one it took. It now rides the
+	 * ordinary command path, which means retries, a real result
+	 * (accepted / unsupported / denied) and a timeout that says "timeout".
+	 *
+	 * Resolves with the ack, ok:false included — only a transport failure or a
+	 * timeout rejects, matching sendCommand.
+	 */
+	setStream(msgId: number, hz: number): Promise<AckMessage> {
+		return this.sendCommand("set_message_interval", { msgId, hz });
 	}
 
 	private resolveParamAck(ack: ParamAckMessage) {

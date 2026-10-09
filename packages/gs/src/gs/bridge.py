@@ -143,6 +143,32 @@ def build_command(name: str, args: dict[str, Any]) -> tuple[int, list[float]]:
         lon = float(args.get("lon", _NAN))
         alt = float(args.get("alt", _NAN))
         return m.MAV_CMD_DO_REPOSITION, [-1, 1, 0, _NAN, lat, lon, alt]
+    if name == "set_message_interval":
+        # Stream control. The console speaks Hz, because that is the number an
+        # operator picks; PX4 wants a period in microseconds, and -1 is how
+        # "stop sending this" is spelled -- which is what a rate of 0 means.
+        #
+        # This is a COMMAND, not a display preference, and that is the whole
+        # point of it living here: routed through the normal command path it
+        # gets retries, COMMAND_ACK matching and a timeout, so a rate PX4
+        # refuses or does not support says so instead of vanishing.
+        raw_id = args.get("msgId")
+        if isinstance(raw_id, bool) or raw_id is None:
+            raise ValueError("set_message_interval needs an integer msgId")
+        try:
+            msg_id = int(raw_id)
+        except (TypeError, ValueError):
+            raise ValueError("set_message_interval needs an integer msgId") from None
+        if msg_id < 0:
+            raise ValueError("msgId must not be negative")
+        try:
+            hz = float(args.get("hz") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("set_message_interval needs a numeric hz") from None
+        if not math.isfinite(hz):
+            raise ValueError("hz must be finite")
+        interval_us = -1.0 if hz <= 0 else 1e6 / hz
+        return m.MAV_CMD_SET_MESSAGE_INTERVAL, [float(msg_id), interval_us, 0, 0, 0, 0, 0]
     raise ValueError(f"unknown command '{name}'")
 
 
@@ -604,7 +630,15 @@ class Bridge:
                 "ok": ok, "text": text,
             })
 
-    # --- misc fire-and-forget sends (stream control) -------------------------
+    # --- misc fire-and-forget sends (legacy stream control) ------------------
+    # The unacked `{type:"stream"}` message, kept for clients written against
+    # the Phase 5 contract. The console now sends stream changes as a tracked
+    # `set_message_interval` command instead, so it learns whether PX4 took
+    # the rate; anything arriving here still gets the old best-effort send.
+    #
+    # The Hz -> microseconds mapping is NOT repeated here: it comes from
+    # build_command, so the two paths cannot drift into disagreeing about what
+    # "0 Hz" means.
     def _service_misc(self, conn: Any) -> None:
         while True:
             try:
@@ -613,17 +647,14 @@ class Bridge:
                 break
             if item.get("kind") == "stream":
                 try:
-                    hz = float(item.get("hz") or 0)
-                    msg_id = int(item["msgId"])
-                except (TypeError, ValueError, KeyError):
-                    print(f"[gs] ignoring malformed stream request: {item}")
+                    mav_cmd, params = build_command("set_message_interval", {
+                        "msgId": item.get("msgId"), "hz": item.get("hz"),
+                    })
+                except (ValueError, TypeError) as exc:
+                    print(f"[gs] ignoring malformed stream request: {item} ({exc})")
                     continue
-                interval_us = -1 if hz <= 0 else int(1e6 / hz)
                 try:
-                    conn.mav.command_long_send(
-                        self.tsys, self.tcomp,
-                        mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
-                        msg_id, interval_us, 0, 0, 0, 0, 0)
+                    self._send_command_long(conn, mav_cmd, params, 0)
                 except Exception as exc:
                     print(f"[gs] stream request failed: {exc}")
 

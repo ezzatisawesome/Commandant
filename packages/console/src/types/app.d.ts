@@ -92,7 +92,11 @@ export type LinkState = "connecting" | "alive" | "stale" | "lost";
 // Commands the UI can issue. args shapes mirror AircraftSim/src/px4/mavlink_io.py.
 export type CommandName =
     | "arm" | "disarm" | "set_mode"
-    | "takeoff" | "land" | "rtl" | "hold" | "reposition";
+    | "takeoff" | "land" | "rtl" | "hold" | "reposition"
+    // Stream control. A rate change is a command, not a preference: it is
+    // acked, retried and timed out like any other, so the console can say
+    // whether PX4 took the rate. args: { msgId, hz } — hz 0 stops the stream.
+    | "set_message_interval";
 
 // console -> gs
 export interface CommandMessage {
@@ -112,6 +116,12 @@ export interface ParamSetMessage {
     value: number,
     ptype?: number,         // MAV_PARAM_TYPE; gs infers if omitted
 }
+/**
+ * Legacy unacked stream control (Phase 5). gs still honours it, but nothing in
+ * the console sends it any more: a rate change goes out as a
+ * `set_message_interval` command, which comes back with a result. Kept so a
+ * client written against the old contract keeps working.
+ */
 export interface StreamMessage {
     type: "stream",
     msgId: number,          // MAVLink message id to (de)activate

@@ -112,6 +112,7 @@ Same `{type:"command", id, name, args}` envelope + `ack` response. Shapes mirror
 | `rtl`        | `{}`                       | `MAV_CMD_NAV_RETURN_TO_LAUNCH`             |
 | `hold`       | `{}`                       | `MAV_CMD_NAV_LOITER_UNLIM` (or set_mode AUTO.LOITER) |
 | `reposition` | `{ "lat", "lon", "alt" }`  | `MAV_CMD_DO_REPOSITION` ("fly to here"; FW = loiter-at-point) |
+| `set_message_interval` | `{ "msgId": 30, "hz": 10 }` | `MAV_CMD_SET_MESSAGE_INTERVAL` (p2 = µs period, `-1` when hz ≤ 0) |
 
 ## Health / status (gs → console)
 Merged into the `telemetry` frame (not separate messages):
@@ -150,12 +151,23 @@ gs → console:
   (value match) → `param_ack`; mismatch/timeout → `ok:false`.
 
 ## Stream control (Phase 5)
-console → gs:
+
+A rate change is a **command**, so it is acked like one. console → gs:
+```json
+{ "type": "command", "id": "<uuid>", "name": "set_message_interval",
+  "args": { "msgId": 30, "hz": 10 } }
+```
+→ `MAV_CMD_SET_MESSAGE_INTERVAL` with the rate converted to a period in
+microseconds (`hz` 0 → `-1`, which stops the stream) → the usual
+`ack {ok, result, text}`, with retries and a timeout. So a rate PX4 does not
+support comes back `unsupported` rather than disappearing. Commander-only, like
+every other command. Generalizes the daemon's hardcoded extra-stream requests.
+
+The older fire-and-forget form is still accepted, for clients written against
+it, and is still unacknowledged — gs sends it best-effort and reports nothing:
 ```json
 { "type": "stream", "msgId": 30, "hz": 10 }
 ```
-→ `SET_MESSAGE_INTERVAL` (hz=0 disables). Generalizes the daemon's existing
-hardcoded extra-stream requests.
 
 ## Missions (Phase 4)
 
