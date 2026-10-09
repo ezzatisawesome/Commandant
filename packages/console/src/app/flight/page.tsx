@@ -17,7 +17,8 @@ const saira = Saira_Condensed({ subsets: ["latin"], weight: ["600"] });
 const Globe = dynamic(() => import("@/components/Globe"), { ssr: false });
 const Aircraft = dynamic(() => import("@/components/flight/Aircraft"), { ssr: false });
 const InstrumentPanel = dynamic(() => import("@/components/flight/InstrumentPanel"), { ssr: false });
-const HeadsUpInstruments = dynamic(() => import("@/components/flight/HeadsUpInstruments"), { ssr: false });
+const Hud = dynamic(() => import("@/components/flight/Hud"), { ssr: false });
+const Alerts = dynamic(() => import("@/components/flight/Alerts"), { ssr: false });
 const TelemetryStrip = dynamic(() => import("@/components/flight/TelemetryStrip").then((m) => m.TelemetryStrip), { ssr: false });
 const ViewControls = dynamic(() => import("@/components/flight/ViewControls"), { ssr: false });
 const AirframeConfig = dynamic(() => import("@/components/flight/AirframeConfig"), { ssr: false });
@@ -33,15 +34,19 @@ const ICON = "h-4 w-4";
 
 // Screen budget, deliberately: the globe keeps everything except four edges.
 //
+//   everywhere   the HUD: horizon, pitch ladder, bank scale, flight path
+//                marker, heading tape on top, airspeed and altitude tapes down
+//                the sides. Strokes over the globe, fixed to the screen, and
+//                transparent to the mouse, so it costs no area at all.
 //   top-left     wordmark and the read-only badge, one line
-//   top-right    attitude and heading, drawn bare, no panel
+//   top-centre   transient alerts, warning severity and worse only
 //   right edge   a 36 px dock; one panel at a time, opening inboard
 //   bottom edge  the telemetry strip
 //
-// Nothing is pinned to the left edge, and nothing but those two instruments is
-// permanently on screen. Panels that used to stack down the right side are now
-// dock entries, which is the difference between a map with chrome around it and
-// a dashboard with a map in the corner.
+// Nothing is pinned to the left edge, and no instrument sits in a box any more.
+// Panels that used to stack down the right side are dock entries, which is the
+// difference between a map with chrome around it and a dashboard with a map in
+// the corner.
 export default function FlightPage() {
 	const items: DockItem[] = [
 		{ key: "inst", label: "Instruments and health", icon: <Gauge className={ICON} />, panel: <ErrorBoundary name="Instruments"><InstrumentPanel /></ErrorBoundary> },
@@ -65,6 +70,9 @@ export default function FlightPage() {
 			<GeoLayer />
 			<SituationLayer />
 
+			{/* The HUD sits above the globe and below the chrome. */}
+			<ErrorBoundary name="HUD"><Hud /></ErrorBoundary>
+
 			{/* Telemetry readout: a band over the bottom edge of the globe. */}
 			<ErrorBoundary name="Telemetry strip"><TelemetryStrip /></ErrorBoundary>
 
@@ -84,10 +92,9 @@ export default function FlightPage() {
 				) : null}
 			</div>
 
-			{/* The only always-on instruments. */}
-			<div className="fixed top-3 right-14 z-40">
-				<ErrorBoundary name="Heads-up instruments"><HeadsUpInstruments /></ErrorBoundary>
-			</div>
+			{/* Autopilot warnings and failsafes, in front of everything. The
+			    status log keeps the full record; this is what interrupts. */}
+			<ErrorBoundary name="Alerts"><Alerts /></ErrorBoundary>
 
 			<Dock items={items} />
 		</>

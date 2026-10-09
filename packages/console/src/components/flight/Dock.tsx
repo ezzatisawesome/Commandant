@@ -64,7 +64,9 @@ export function Dock({ items }: { items: DockItem[] }) {
 				<div
 					role="dialog"
 					aria-label={active.label}
-					className="max-h-[80vh] overflow-y-auto rounded-md border border-white/10 bg-black/70 p-3 backdrop-blur"
+					// Capped so an open panel cannot reach the telemetry strip along
+					// the bottom edge or the heading tape across the top.
+					className="max-h-[calc(100vh-13rem)] overflow-y-auto rounded-md border border-white/10 bg-black/70 p-3 backdrop-blur"
 				>
 					{active.panel}
 				</div>

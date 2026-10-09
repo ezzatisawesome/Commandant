@@ -70,10 +70,13 @@
     @apply bg-background text-foreground;
   }
 }
-/* Move Cesium's toolbar (scene-mode toggle) to the bottom-right so it no
-   longer sits under the FlightHUD panel pinned at top-right. */
+/* Cesium's own toolbar (just the scene-mode toggle; everything else is off).
+   It used to be moved to the bottom-right to dodge a right-rail panel that no
+   longer exists — where it then sat on top of the telemetry strip, which spans
+   the bottom edge. Park it at the top-right instead, clear of the wordmark on
+   the left, the dock at the vertical centre and the strip below. */
 .cesium-viewer-toolbar {
-  top: auto !important;
-  bottom: 16px !important;
-  right: 16px !important;
+  top: 14px !important;
+  bottom: auto !important;
+  right: 14px !important;
 }

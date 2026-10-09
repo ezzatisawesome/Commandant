@@ -31,12 +31,23 @@ describe("flight page screen budget", () => {
 		expect(leftAnchored[0]).toContain("pointer-events-none");
 	});
 
-	it("keeps only the wordmark and the two bare instruments always on screen", () => {
-		// Everything else reaches the screen through the dock or the bottom strip,
-		// never through a fixed container of its own on the page.
+	it("pins nothing on the page but the wordmark", () => {
+		// The HUD, the alerts and the strip own their own fixed containers inside
+		// their components. The page itself places only the wordmark; everything
+		// else reaches the screen through the dock or one of those overlays.
 		const fixedBlocks = [...PAGE.matchAll(/className="[^"]*\bfixed\b[^"]*"/g)];
-		expect(fixedBlocks).toHaveLength(2);
+		expect(fixedBlocks).toHaveLength(1);
 		expect(PAGE).toContain("<Dock items={items} />");
+		expect(PAGE).toContain("<Hud />");
+	});
+
+	it("draws attitude and heading as a HUD, not as boxed widgets", () => {
+		// The boxed attitude indicator and compass were a picture OF the aircraft
+		// in a corner. The HUD is the view FROM it, drawn over the globe at no cost
+		// in area. Reintroducing a boxed instrument should fail here.
+		expect(PAGE).not.toContain("HeadsUpInstruments");
+		expect(PAGE).not.toContain("AttitudeIndicator");
+		expect(PAGE).not.toContain("Compass");
 	});
 
 	it("routes every heavyweight panel through the dock", () => {
