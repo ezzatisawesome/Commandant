@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 
 import {
 	$visibleFields, $extraRows, stripRows, setCell, addCell, addRow, removeRow,
-	moveCell, isDerivedKey, allFieldOptions,
+	moveCell, isDerivedKey, allFieldOptions, CHANNEL_GROUPS,
 } from "@/stores/displayConfig.store";
 
 // The strip is edited in place, so its layout model is what the operator is
@@ -69,10 +69,35 @@ describe("strip grid", () => {
 describe("field catalog", () => {
 	it("offers telemetry and derived fields from one list", () => {
 		const opts = allFieldOptions();
-		const groups = new Set(opts.map((o) => o.group));
-		expect(groups).toEqual(new Set(["Telemetry", "Derived"]));
 		expect(opts.some((o) => o.key === "airspeed")).toBe(true);
 		expect(opts.some((o) => o.key === "aglFt")).toBe(true);
+	});
+
+	it("names every option as a dotted channel under a known subsystem", () => {
+		const known = new Set(CHANNEL_GROUPS.map((g) => g.ns));
+		for (const o of allFieldOptions()) {
+			expect(o.channel, o.key).toMatch(/^[a-z]+\.[a-z_]+$/);
+			expect(o.channel.startsWith(`${o.group}.`), o.channel).toBe(true);
+			expect(known, o.channel).toContain(o.group);
+		}
+		const byKey = new Map(allFieldOptions().map((o) => [o.key, o.channel]));
+		expect(byKey.get("voltage")).toBe("bus.voltage");
+		expect(byKey.get("alt")).toBe("nav.alt");
+		expect(byKey.get("wind")).toBe("derived.wind");
+	});
+
+	it("gives every channel a distinct id", () => {
+		const chans = allFieldOptions().map((o) => o.channel);
+		expect(new Set(chans).size).toBe(chans.length);
+	});
+
+	it("lists channels in subsystem order, so the picker groups contiguously", () => {
+		const order = CHANNEL_GROUPS.map((g) => g.ns);
+		const seen = allFieldOptions().map((o) => order.indexOf(o.group));
+		expect(seen).toEqual([...seen].sort((a, b) => a - b));
+		// Derived values are marked as computed rather than read off the wire.
+		expect(allFieldOptions().filter((o) => o.derived).map((o) => o.key))
+			.toEqual(["aglFt", "drift", "fenceDist", "sunEl", "targetDist", "wind"]);
 	});
 
 	it("distinguishes derived keys, which are computed rather than on the wire", () => {

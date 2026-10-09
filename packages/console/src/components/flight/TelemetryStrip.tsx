@@ -2,15 +2,15 @@
 
 import { memo, useMemo, useState } from "react";
 import { useStore } from "@nanostores/react";
-import { Plus, X, ChevronLeft, ChevronRight, Rows3, Pencil } from "lucide-react";
+import { Plus, X, ChevronLeft, ChevronRight, Rows3, Pencil, Search } from "lucide-react";
 
 import { $hudFrame, $historyStore, isNum } from "@/stores/aircraft.store";
 import { $linkState } from "@/stores/link.store";
 import { $derived } from "@/stores/derived.store";
 import {
 	$visibleFields, $extraRows, $chartedFields, FIELD_BY_KEY, DERIVED_BY_KEY,
-	isDerivedKey, allFieldOptions, setCell, addCell, addRow, removeRow, moveCell,
-	toggleCharted,
+	CHANNEL_GROUPS, isDerivedKey, allFieldOptions, setCell, addCell, addRow,
+	removeRow, moveCell, toggleCharted,
 } from "@/stores/displayConfig.store";
 import type { LinkState, TelemetryFrame } from "@/types/app";
 import type { ClearanceBand } from "@/lib/flightGeometry";
@@ -90,6 +90,9 @@ const Cell = memo(function Cell({
 
 const Divider = () => <div className="mx-0.5 h-7 w-px shrink-0 bg-white/10" />;
 
+/** The link column, reserved on every row so the channels line up under it. */
+const LINK_GUTTER = "w-[7.5rem] px-3";
+
 export function TelemetryStrip() {
 	const f = useStore($hudFrame);
 	const history = useStore($historyStore);
@@ -102,6 +105,7 @@ export function TelemetryStrip() {
 	const [editing, setEditing] = useState(false);
 	// Which cell the picker is open for: [row, index], or index -1 to append.
 	const [picking, setPicking] = useState<[number, number] | null>(null);
+	const [query, setQuery] = useState("");
 
 	const rows = useMemo(() => [row0, ...extra], [row0, extra]);
 	const chartedSet = useMemo(() => new Set(charted), [charted]);
@@ -203,46 +207,92 @@ export function TelemetryStrip() {
 		};
 	}
 
-	const options = allFieldOptions();
-	const groups = ["Telemetry", "Derived"];
+	// The picker is a LIST of channels, not a grid of labels. A label alone
+	// ("Voltage", "Current") does not say which subsystem it came from, so each
+	// row leads with the dotted channel id — bus.voltage, power.motor — grouped
+	// under its subsystem and filterable by typing. A grid of bare words made
+	// the operator guess; a channel list reads like the telemetry it indexes.
+	const matches = useMemo(() => {
+		const q = query.trim().toLowerCase();
+		const all = allFieldOptions();
+		return q
+			? all.filter((o) => o.channel.toLowerCase().includes(q)
+				|| o.label.toLowerCase().includes(q))
+			: all;
+	}, [query]);
+	const groupsShown = useMemo(
+		() => CHANNEL_GROUPS.filter((g) => matches.some((o) => o.group === g.ns)),
+		[matches],
+	);
 
 	return (
 		<div className="pointer-events-none fixed inset-x-0 bottom-0 z-40 flex flex-col items-stretch">
 			{/* Field picker, opened by clicking a cell in edit mode. */}
 			{picking ? (
-				<div className="pointer-events-auto mb-1 max-h-72 w-80 self-center overflow-auto rounded-md
-					border border-white/15 bg-black/90 p-2 text-[11px] backdrop-blur">
-					<div className="mb-1 flex items-center justify-between">
+				<div className="pointer-events-auto mb-1 flex max-h-96 w-96 self-center flex-col
+					overflow-hidden rounded-md border border-white/15 bg-black/90 text-[11px] backdrop-blur">
+					<div className="flex items-center justify-between px-2 pt-2">
 						<span className="uppercase tracking-wide text-white/50">
-							{picking[1] < 0 ? "Add field" : "Change field"}
+							{picking[1] < 0 ? "Add channel" : "Change channel"}
 						</span>
 						<button onClick={() => setPicking(null)} className="text-white/40 hover:text-white">
 							<X className="h-3.5 w-3.5" />
 						</button>
 					</div>
-					{groups.map((g) => (
-						<div key={g} className="mb-1">
-							<div className="mb-0.5 text-[9px] uppercase tracking-wide text-white/30">{g}</div>
-							<div className="grid grid-cols-3 gap-1">
-								{options.filter((o) => o.group === g).map((o) => (
-									<button
-										key={o.key}
-										onClick={() => {
-											const [r, i] = picking;
-											if (i < 0) addCell(r, o.key); else setCell(r, i, o.key);
-											setPicking(null);
-										}}
-										className="truncate rounded border border-white/10 px-1.5 py-1 text-left
-											text-white/80 hover:bg-white/10"
-									>
-										{o.label}
-									</button>
-								))}
+
+					<div className="flex items-center gap-1.5 px-2 py-2">
+						<Search className="h-3.5 w-3.5 shrink-0 text-white/30" />
+						<input
+							autoFocus
+							value={query}
+							onChange={(e) => setQuery(e.target.value)}
+							placeholder="Filter channels — bus.voltage, nav, wind…"
+							className="w-full bg-transparent font-mono text-[11px] text-white/90
+								placeholder:text-white/25 focus:outline-none"
+						/>
+					</div>
+
+					<div className="flex-1 overflow-y-auto border-t border-white/10">
+						{groupsShown.map((g) => (
+							<div key={g.ns}>
+								<div className="sticky top-0 bg-black/90 px-2 py-1 text-[9px] uppercase
+									tracking-wide text-white/30">
+									{g.ns} — {g.title}
+								</div>
+								{matches.filter((o) => o.group === g.ns).map((o) => {
+									const current = picking[1] >= 0
+										&& rows[picking[0]]?.[picking[1]] === o.key;
+									return (
+										<button
+											key={o.key}
+											onClick={() => {
+												const [r, i] = picking;
+												if (i < 0) addCell(r, o.key); else setCell(r, i, o.key);
+												setPicking(null); setQuery("");
+											}}
+											className={`flex w-full items-baseline gap-2 px-2 py-1 text-left
+												hover:bg-sky-400/10 ${current ? "bg-white/5" : ""}`}
+										>
+											<span className={`font-mono ${current ? "text-sky-300" : "text-white/85"}`}>
+												{o.channel}
+											</span>
+											<span className="truncate text-white/40">{o.label}</span>
+											<span className="flex-1" />
+											{o.unit ? (
+												<span className="shrink-0 font-mono text-[9px] text-white/30">{o.unit}</span>
+											) : null}
+										</button>
+									);
+								})}
 							</div>
-						</div>
-					))}
+						))}
+						{matches.length === 0 ? (
+							<div className="px-2 py-3 text-white/35">No channel matches “{query}”.</div>
+						) : null}
+					</div>
+
 					{picking[1] >= 0 ? (
-						<div className="mt-1 flex items-center gap-1 border-t border-white/10 pt-1">
+						<div className="flex items-center gap-1 border-t border-white/10 p-2">
 							<button
 								onClick={() => { moveCell(picking[0], picking[1], -1); setPicking(null); }}
 								className="rounded border border-white/10 px-1.5 py-1 text-white/70 hover:bg-white/10"
@@ -291,28 +341,37 @@ export function TelemetryStrip() {
 				border-t border-white/10 bg-black/70 backdrop-blur">
 				{rows.map((row, r) => (
 					<div key={r}
+						// Edit mode rings every cell, and rings that touch read as one
+						// block rather than separate targets — so the row only gains gaps
+						// (and side padding, so the end rings aren't flush against the
+						// screen) while editing. Normal flight keeps the cells tight.
 						className={`flex items-stretch overflow-x-auto py-1.5
+							${editing ? "gap-1.5 px-1" : ""}
 							${r > 0 ? "border-t border-white/10" : ""}`}>
-						{/* Link status leads the first row: the first thing to check. */}
-						{r === 0 ? (
-							<>
-								<div className="flex shrink-0 items-center gap-2 px-3" title={dot.title}>
-									<span className={`h-2 w-2 rounded-full ${dot.className}`} />
-									<div className="flex flex-col leading-none">
+						{/* Link status leads the first row: the first thing to check. The
+						    gutter is a FIXED width and every later row reserves it, so
+						    channels on row 1+ start where row 0's channels do instead of
+						    sliding under the link block — the strip reads as columns. */}
+						<div className={`flex shrink-0 items-center gap-2 ${LINK_GUTTER}`}
+							title={r === 0 ? dot.title : undefined} aria-hidden={r > 0}>
+							{r === 0 ? (
+								<>
+									<span className={`h-2 w-2 shrink-0 rounded-full ${dot.className}`} />
+									<div className="flex min-w-0 flex-col leading-none">
 										<span className="text-[9px] uppercase tracking-wide text-white/45">Link</span>
-										<span className="font-mono text-[11px] text-white/80">{linkState}</span>
+										{frozen ? (
+											<span className="font-mono text-[11px] font-semibold text-red-400"
+												title={`No new vehicle data for ${Math.round((age as number) / 1000)} s`}>
+												stale {Math.round((age as number) / 1000)}s
+											</span>
+										) : (
+											<span className="font-mono text-[11px] text-white/80">{linkState}</span>
+										)}
 									</div>
-									{frozen ? (
-										<span className="rounded border border-red-500/50 px-1 py-0.5 text-[9px]
-											font-semibold uppercase tracking-wide text-red-400"
-											title={`No new vehicle data for ${Math.round((age as number) / 1000)} s`}>
-											stale {Math.round((age as number) / 1000)}s
-										</span>
-									) : null}
-								</div>
-								<Divider />
-							</>
-						) : null}
+								</>
+							) : null}
+						</div>
+						<Divider />
 
 						{row.map((key, i) => {
 							const view = viewFor(key);
@@ -323,7 +382,7 @@ export function TelemetryStrip() {
 									key={`${r}:${i}:${key}`}
 									view={view}
 									editing={editing}
-									onEdit={() => setPicking([r, i])}
+									onEdit={() => { setQuery(""); setPicking([r, i]); }}
 									spark={def?.kind === "num" && chartedSet.has(key)
 										? seriesByKey[def.key] : undefined}
 								/>
@@ -332,7 +391,7 @@ export function TelemetryStrip() {
 
 						{editing ? (
 							<button
-								onClick={() => setPicking([r, -1])}
+								onClick={() => { setQuery(""); setPicking([r, -1]); }}
 								className="mx-1 shrink-0 self-center rounded border border-dashed border-white/25
 									px-2 py-1 text-white/50 hover:bg-white/10"
 								title="Add a field to this row"
