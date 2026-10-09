@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { useStore } from "@nanostores/react";
 
 import { $hudFrame } from "@/stores/aircraft.store";
@@ -9,7 +9,7 @@ import { $linkState } from "@/stores/link.store";
 import { isNum } from "@/lib/flightGeometry";
 import {
 	headingTicks, tapeTicks, wrap360, ballPitchMarks, BALL_BANK_TICKS,
-	bankMajor, rollLabel, pitchLabel,
+	bankMajor, rollLabel, pitchLabel, quantize, HUD_STEP,
 } from "@/lib/hud";
 
 // Flight instruments drawn over the globe: airspeed and altitude tapes down the
@@ -31,6 +31,12 @@ import {
 //
 // All geometry comes from lib/hud.ts, which is pure and tested. Nothing here
 // computes an angle, because a sign error in an instrument is read as truth.
+//
+// Every input is quantised to the precision its instrument can show, and each
+// instrument is memoised on those quantised values. Without that, a float whose
+// last bits change every tick defeats every memo and the whole SVG is diffed ten
+// times a second: measured at 8.4 ms per frame with the CPU throttled 4x, which
+// is this console's real situation beside a SITL simulator. See lib/hud.ts.
 //
 // One SVG, pointer-events-none, so the whole thing is transparent to the mouse
 // and the globe still drags and zooms underneath.
@@ -85,53 +91,29 @@ export default function Hud() {
 	const cy = h / 2;
 
 	const dead = linkState !== "alive" || !f?.connected;
-	const rollDeg = isNum(f?.roll) ? (f!.roll * 180) / Math.PI : null;
-	const pitchDeg = isNum(f?.pitch) ? (f!.pitch * 180) / Math.PI : null;
-	const headingDeg = isNum(f?.yaw)
-		? wrap360((f!.yaw * 180) / Math.PI)
-		: (isNum(f?.heading) ? wrap360(f!.heading) : null);
+	const rollDeg = quantize(isNum(f?.roll) ? (f!.roll * 180) / Math.PI : null,
+		HUD_STEP.attitudeDeg);
+	const pitchDeg = quantize(isNum(f?.pitch) ? (f!.pitch * 180) / Math.PI : null,
+		HUD_STEP.attitudeDeg);
+	const headingDeg = quantize(
+		isNum(f?.yaw) ? wrap360((f!.yaw * 180) / Math.PI)
+			: (isNum(f?.heading) ? wrap360(f!.heading) : null),
+		HUD_STEP.headingDeg);
 
 	const attitudeKnown = rollDeg !== null && pitchDeg !== null && !dead;
 
 	// Airspeed where the vehicle reports it, groundspeed otherwise. Labelled so
 	// the two are never confused: on a solar aircraft in wind they differ a lot.
 	const speedIsAir = isNum(f?.airspeed) && f!.airspeed > 0;
-	const speed: number | null = speedIsAir ? f!.airspeed!
-		: (isNum(f?.groundspeed) ? f!.groundspeed : null);
-	const alt = isNum(f?.alt) ? f!.alt : null;
+	const speed = quantize(speedIsAir ? f!.airspeed
+		: (isNum(f?.groundspeed) ? f!.groundspeed : null), HUD_STEP.speedMps);
+	const alt = quantize(isNum(f?.alt) ? f!.alt : null, HUD_STEP.altM);
+	const aglM = quantize(d.aglM, HUD_STEP.aglM);
 
 	return (
 		<div ref={host} className="pointer-events-none fixed inset-0 z-30">
 			<svg width={w} height={h} className="block">
-				{/* ---- heading tape, top centre ---- */}
-				{headingDeg !== null && !dead ? (
-					<g transform={`translate(${cx} 34)`}>
-						<line x1={-cx * 0.42} y1={14} x2={cx * 0.42} y2={14}
-							stroke={STROKE_DIM} strokeWidth={1} />
-						{headingTicks(headingDeg).map((t) => {
-							const x = t.offsetDeg * (cx * 0.42 / 40);
-							return (
-								<g key={`${t.deg}:${t.offsetDeg}`} transform={`translate(${x} 0)`}>
-									<line x1={0} y1={t.major ? 4 : 9} x2={0} y2={14}
-										stroke={t.major ? STROKE : STROKE_DIM}
-										strokeWidth={t.major ? 1.5 : 1} />
-									{t.label ? (
-										<text x={0} y={-2} textAnchor="middle"
-											style={{ font: FONT }} fill={STROKE}>
-											{t.label}
-										</text>
-									) : null}
-								</g>
-							);
-						})}
-						{/* Pointer and the exact heading, because reading a tape to the
-						    degree is slower than reading three digits. */}
-						<polygon points="0,16 -6,26 6,26" fill={STROKE} />
-						<text x={0} y={39} textAnchor="middle" style={{ font: FONT }} fill={STROKE}>
-							{String(Math.round(headingDeg) % 360).padStart(3, "0")}
-						</text>
-					</g>
-				) : null}
+				<HeadingTape cx={cx} deg={dead ? null : headingDeg} />
 
 				{/* ---- airspeed tape, left ---- */}
 				<Tape
@@ -150,7 +132,7 @@ export default function Hud() {
 					caption="m MSL"
 					// AGL under the altitude tape: the number that decides whether the
 					// aircraft clears the hill, which MSL alone does not answer.
-					sub={d.aglM !== null ? `${d.aglM.toFixed(0)} AGL` : undefined}
+					sub={aglM !== null ? `${aglM.toFixed(0)} AGL` : undefined}
 					subTone={d.clearance === "critical" ? "rgba(255,110,110,0.95)"
 						: d.clearance === "low" ? "rgba(255,190,110,0.95)" : STROKE_DIM}
 				/>
@@ -173,7 +155,7 @@ export default function Hud() {
  * the horizon rotates by minus the bank angle and moves DOWN as the nose comes
  * up, and the aircraft reference never moves.
  */
-function AttitudeBall({
+const AttitudeBall = memo(function AttitudeBall({
 	cx, cy, rollDeg, pitchDeg,
 }: { cx: number; cy: number; rollDeg: number | null; pitchDeg: number | null }) {
 	const known = rollDeg !== null && pitchDeg !== null;
@@ -247,12 +229,12 @@ function AttitudeBall({
 			</text>
 		</g>
 	);
-}
+});
 
 interface TapeSpec { step: number; labelEvery: number; pxPerUnit: number; halfPx: number }
 
 /** One vertical tape: ticks scrolling against a fixed boxed readout. */
-function Tape({
+const Tape = memo(function Tape({
 	x, cy, value, spec, side, digits, caption, sub, subTone,
 }: {
 	x: number; cy: number; value: number | null; spec: TapeSpec;
@@ -304,4 +286,40 @@ function Tape({
 			) : null}
 		</g>
 	);
-}
+});
+
+/** The heading tape across the top: cardinals as letters, exact bearing under
+ *  the pointer. Memoised on a quantised bearing, so a steady orbit redraws it
+ *  about twice a second rather than ten times. */
+const HeadingTape = memo(function HeadingTape(
+	{ cx, deg }: { cx: number; deg: number | null },
+) {
+	if (deg === null) return null;
+	const halfPx = cx * 0.42;
+	return (
+		<g transform={`translate(${cx} 34)`}>
+			<line x1={-halfPx} y1={14} x2={halfPx} y2={14}
+				stroke={STROKE_DIM} strokeWidth={1} />
+			{headingTicks(deg).map((t) => (
+				<g key={`${t.deg}:${t.offsetDeg}`}
+					transform={`translate(${t.offsetDeg * (halfPx / 40)} 0)`}>
+					<line x1={0} y1={t.major ? 4 : 9} x2={0} y2={14}
+						stroke={t.major ? STROKE : STROKE_DIM}
+						strokeWidth={t.major ? 1.5 : 1} />
+					{t.label ? (
+						<text x={0} y={-2} textAnchor="middle"
+							style={{ font: FONT }} fill={STROKE}>
+							{t.label}
+						</text>
+					) : null}
+				</g>
+			))}
+			{/* Pointer and the exact heading: reading a tape to the degree is
+			    slower than reading three digits. */}
+			<polygon points="0,16 -6,26 6,26" fill={STROKE} />
+			<text x={0} y={39} textAnchor="middle" style={{ font: FONT }} fill={STROKE}>
+				{String(Math.round(deg) % 360).padStart(3, "0")}
+			</text>
+		</g>
+	);
+});

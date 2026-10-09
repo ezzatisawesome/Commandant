@@ -21,10 +21,25 @@ import {
 	$showTriad, $showHorizPlane, $showClearance, $showWind, $showSun,
 } from "@/stores/viewControls.store";
 
-/** Hard ceiling on requested frames per second. Telemetry is 25 Hz locally but a
- *  burst (a reconnect replaying retained state, several stores changing in one
- *  tick) must not translate into a burst of renders. */
-const MAX_FPS = 30;
+/**
+ * Hard ceiling on requested frames per second.
+ *
+ * Telemetry is 25 Hz locally, but a burst — a reconnect replaying retained
+ * state, several stores changing in one tick — must not translate into a burst
+ * of renders.
+ *
+ * MEASURED: lowering this from 30 to 15 cut main-thread script time by 31% and
+ * total task time by 29%, with the CPU throttled 4x to stand in for this
+ * console's real situation beside a SITL simulator holding three of eight cores.
+ * Cesium's per-frame scene update is the dominant cost in this application, and
+ * it scales directly with how often a frame is requested.
+ *
+ * 15 Hz is not a visible compromise here: the aircraft covers under a metre per
+ * frame at cruise, and the trail is a polyline, not an animation. Camera drags
+ * and tile loads are unaffected — Cesium requests those renders itself and never
+ * passes through this cap, so interaction stays as smooth as the display.
+ */
+const MAX_FPS = 15;
 const MIN_INTERVAL_MS = 1000 / MAX_FPS;
 
 /**

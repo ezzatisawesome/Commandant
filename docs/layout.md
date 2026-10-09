@@ -101,28 +101,124 @@ bubbling listener never sees the click and the panel would stay open exactly
 where it is most in the way.
 
 
-## Render quality
+## Performance
 
-`lib/renderQuality.ts`. Cesium's defaults are tuned for a demo on an idle
-machine: 4x MSAA, an FXAA pass on top of it, and terrain refined to a 2 px
-screen-space error. None of those were chosen; they were never set.
+Every number here was measured on an Apple M1 through ANGLE's Metal backend
+(confirmed by reading the renderer string, so a software rasteriser cannot pass
+itself off as a GPU result), against a live link, with the aircraft's position
+asserted to have actually changed during the window. Frame rate is measured with
+the frame-rate cap removed, because a vsync-capped 60 fps measures nothing about
+headroom.
 
-This console runs beside a SITL simulator that takes three of eight cores, in a
-browser also holding a 25 Hz websocket. Measured in a headless Chromium with the
-frame rate cap removed, so frame time is actually scene-bound, three trials each:
+Two earlier claims in this file were wrong and are recorded here as such, since a
+retracted measurement is more useful than a quietly deleted one.
 
-| | Cesium defaults | chosen |
+### Render settings: real, 2x headroom
+
+Cesium's defaults are tuned for a demo on an idle machine, and for a scene that
+might be viewed from orbit. `lib/renderQuality.ts` chooses instead.
+
+| | Cesium defaults | shipped |
 |---|---|---|
-| Frames per second | 60.5 | 122.0 |
-| Frame gap, 95th percentile | 34.6 ms | 13.9 ms |
-| Frame gap, worst | 52.4 ms | 30.4 ms |
-| First-load transfer | 4508 KB | 2857 KB |
-| First-load requests | 364 | 212 |
+| Frames per second | 68.8 | 132.0 |
+| Frame time, median | 14.30 ms | 7.40 ms |
+| Frame gap, 95th percentile | 32.9 ms | 12.1 ms |
 
-Twice the frame headroom and 37 per cent less traffic. Fog stays on: it is how
-the globe reads as having depth, and the day/night lighting depends on the same
-haze.
+Attributed by toggling one setting at a time, from a 14.10 ms baseline frame:
 
-With the cap in place both arms sit at 60 fps, which is why the first attempt at
-this measurement showed no difference at all. A vsync-capped frame rate measures
-nothing about headroom.
+| Change | Saved per frame |
+|---|---|
+| MSAA 4 to 1 | 4.70 ms |
+| FXAA off | 1.90 ms |
+| Screen-space error 2 to 3 | 0.40 ms |
+
+The terrain change was **reverted**: 0.40 ms is inside run-to-run noise, and it
+buys coarser terrain for it.
+
+Dropping the star-field cube map saves 715 KB and six requests on every cold
+load, verified by watching for the requests and confirming none are made. The
+atmosphere and the day/night lighting are untouched.
+
+### Render rate: real, 31% less CPU
+
+`lib/driveRendering.ts` caps data-driven renders. Lowering that cap from 30 to 15
+per second, with the CPU throttled 4x to stand in for the simulator next door:
+
+| | 30 fps cap | 15 fps cap |
+|---|---|---|
+| Script time per 10 s | 7.34 s | 5.06 s |
+| All task time per 10 s | 8.56 s | 6.11 s |
+
+Cesium's per-frame scene update is the dominant main-thread cost in this
+application, and it scales with how often a frame is requested. Camera drags and
+tile loads bypass this cap, so interaction is unaffected.
+
+### Retracted: the bandwidth claim
+
+An earlier version of this file said the render settings cut first-load traffic
+by 37%. **They do not.** That figure came from `content-length`, which most
+responses here omit, and from an A/B that toggled the terrain setting *after* page
+load, so both arms had already fetched identical tiles. Measured properly, with
+the setting baked into two separate builds and a cold browser context per trial:
+
+| | defaults | chosen |
+|---|---|---|
+| First-load encoded | 7331 KB | 7369 KB |
+| Terrain and imagery | 6203 KB over 223 requests | 6241 KB over 223 requests |
+
+Indistinguishable. The tile set at this camera is governed by the terrain
+provider's available levels, not by the screen-space error.
+
+### Retracted: the HUD cost claim
+
+One throttled run suggested the instruments cost 8.4 ms per frame. A repeat run
+of the same harness reported that *removing* them made the page slower, which is
+impossible, so the harness was noise-dominated at high throttle and the
+attribution was worthless.
+
+Measured properly, as main-thread CPU time over a fixed window rather than frame
+rate, quantising the instrument inputs and memoising each instrument gives:
+
+| | unquantised | quantised |
+|---|---|---|
+| Script time per 10 s | 7.10 s | 7.34 s |
+| Style recalculation | 0.170 s | 0.056 s |
+
+Script time is unchanged. Style recalculation is 3x lower, which is 1% of total
+task time. The change was kept — it is cheap, it removes sub-pixel jitter from
+the tick marks, and the style saving is real — but it is not a significant
+performance win and should not be described as one.
+
+### Not worth doing: the wire format
+
+The telemetry frame is 1227 B of JSON at 24 Hz, which looks like an obvious
+target for delta encoding. It is not. `permessage-deflate` is already negotiated
+on both hops, and measured at the socket:
+
+| Path | Wire per frame | Rate |
+|---|---|---|
+| Daemon to browser, compressed | 221 B | 5.1 KB/s |
+| Daemon to browser, uncompressed | 1232 B | 28.7 KB/s |
+| Public relay, compressed | 267 B | 1.3 KB/s |
+
+Sending only changed fields would be 636 B before compression, and deltas
+compress worse than whole frames because they break the repetitive structure
+deflate exploits. Of 50 fields, 15 never change at all across 200 frames — and
+deflate already handles exactly that.
+
+### Where the remaining weight is
+
+First cold load is 7.3 MB. The breakdown, so nobody optimises the wrong thing:
+
+| | Size | Requests |
+|---|---|---|
+| Terrain tiles | 3278 KB | 100 |
+| JavaScript | 1218 KB | 57 |
+| Terrain availability index (`layer.json`) | 899 KB | 1 |
+| Imagery and other tiles | 899 KB | 78 |
+| Approximate terrain heights | 97 KB | 1 |
+
+The largest single file is an 837 KB JavaScript chunk, which is Cesium. Cutting
+it means importing engine modules directly instead of the umbrella package, and
+Cesium tree-shakes poorly; it is a real but large piece of work with an uncertain
+payoff, and all of it is cached after first load.

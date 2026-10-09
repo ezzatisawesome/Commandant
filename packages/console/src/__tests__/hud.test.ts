@@ -3,6 +3,7 @@ import { describe, it, expect } from "vitest";
 import {
 	wrap180, wrap360, headingTicks, tapeTicks,
 	ballPitchMarks, BALL_BANK_TICKS, bankMajor, rollLabel, pitchLabel,
+	quantize, HUD_STEP,
 } from "@/lib/hud";
 
 // An instrument that is wrong is worse than no instrument: the operator reads it
@@ -213,5 +214,62 @@ describe("vertical tapes", () => {
 		expect(tapeTicks(NaN, 2, 10, 4, 60)).toEqual([]);
 		expect(tapeTicks(10, 0, 10, 4, 60)).toEqual([]);
 		expect(tapeTicks(10, 2, 10, 0, 60)).toEqual([]);
+	});
+});
+
+describe("input quantisation", () => {
+	// This is a performance primitive, not cosmetic rounding: it exists so React
+	// memo comparisons can succeed on a 10 Hz float feed. A quantiser that
+	// returns a value differing in its last bits would defeat its own purpose, so
+	// the identity below is the point of the whole function.
+
+	it("returns a value that compares equal across repeated calls", () => {
+		// The failure this guards: 0.1 + 0.2 arithmetic producing
+		// 0.30000000000000004 and making every frame look like a change.
+		const a = quantize(13.37, 0.2);
+		const b = quantize(13.38, 0.2);
+		expect(a).toBe(b);
+		expect(Object.is(a, b)).toBe(true);
+	});
+
+	it("holds steady while the input jitters below the step", () => {
+		// A real airspeed trace wobbling inside sensor noise must produce one
+		// value, or the tape redraws for nothing.
+		const jitter = [13.40, 13.42, 13.38, 13.45, 13.36, 13.41];
+		const out = new Set(jitter.map((v) => quantize(v, HUD_STEP.speedMps)));
+		expect(out.size).toBe(1);
+	});
+
+	it("still moves when the input genuinely moves", () => {
+		expect(quantize(13.4, 0.2)).not.toBe(quantize(13.8, 0.2));
+	});
+
+	it("rounds to the nearest step, not toward zero", () => {
+		expect(quantize(10.4, 0.5)).toBe(10.5);
+		expect(quantize(10.2, 0.5)).toBe(10);
+		expect(quantize(-10.4, 0.5)).toBe(-10.5);
+	});
+
+	it("passes through null for anything that is not a finite number", () => {
+		// gs sends null for non-finite floats, and an instrument must show a dash
+		// rather than a confident zero.
+		expect(quantize(null, 0.5)).toBeNull();
+		expect(quantize(undefined, 0.5)).toBeNull();
+		expect(quantize(NaN, 0.5)).toBeNull();
+		expect(quantize(Infinity, 0.5)).toBeNull();
+		expect(quantize("12.3", 0.5)).toBeNull();
+	});
+
+	it("never rounds a value to beyond the precision its instrument shows", () => {
+		// Every step is coarser than the smallest change the display can render.
+		for (const step of Object.values(HUD_STEP)) {
+			expect(step).toBeGreaterThan(0);
+			expect(step).toBeLessThanOrEqual(1);
+		}
+	});
+
+	it("keeps a quantised integer exact", () => {
+		expect(quantize(214, 0.5)).toBe(214);
+		expect(quantize(103, 1)).toBe(103);
 	});
 });

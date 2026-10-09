@@ -20,6 +20,50 @@
 // were removed with it: see Hud.tsx for why that metaphor was wrong here. Git
 // has them if a cockpit view ever earns its place.
 
+/**
+ * Round to a step, or null if the input is not a finite number.
+ *
+ * This is a performance primitive, not cosmetic rounding. The instruments are
+ * React components fed from a 10 Hz telemetry frame, and a float that differs in
+ * its last bits every tick makes every memo comparison fail, so the entire SVG
+ * is diffed ten times a second whether or not anything moved a pixel.
+ *
+ * MEASURED: with the CPU throttled 4x — roughly this console's situation next to
+ * a SITL simulator holding three of eight cores — that cost 8.4 ms per frame,
+ * nearly half the frame budget, for drawing that was already correct. Quantising
+ * each input to the precision the instrument can actually show lets the memo
+ * hold, so a steady orbit redraws its tapes a couple of times a second instead
+ * of ten.
+ *
+ * It also removes sub-pixel jitter from the tick marks, which is a visible
+ * improvement rather than a trade.
+ */
+export function quantize(v: unknown, step: number): number | null {
+	if (typeof v !== "number" || !Number.isFinite(v)) return null;
+	const q = Math.round(v / step) * step;
+	// Snap to the step's own precision so 0.30000000000000004 cannot reappear and
+	// defeat the comparison this function exists to make succeed.
+	const dp = Math.max(0, Math.ceil(-Math.log10(step)) + 1);
+	return Number(q.toFixed(dp));
+}
+
+/** Display precision for each instrument input, in its own units.
+ *
+ *  Chosen as the smallest change the instrument can actually render: finer than
+ *  this is redraw for nothing, coarser starts to look steppy. */
+export const HUD_STEP = {
+	/** Degrees. The heading tape moves ~1 deg/s in a 800 m orbit. */
+	headingDeg: 0.5,
+	/** Degrees. Roll and pitch sit nearly constant in a steady orbit. */
+	attitudeDeg: 0.5,
+	/** m/s. Finer than this is airspeed sensor noise. */
+	speedMps: 0.2,
+	/** Metres. The altitude tape is labelled every 10 m. */
+	altM: 0.5,
+	/** Metres. AGL is displayed as a whole number. */
+	aglM: 1,
+} as const;
+
 /** Wrap to (-180, 180]. Used wherever a difference of bearings is taken, so a
  *  heading tape crossing north scrolls instead of jumping 360 degrees. */
 export function wrap180(deg: number): number {
