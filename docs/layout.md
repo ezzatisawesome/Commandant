@@ -34,7 +34,7 @@ change that test deliberately rather than deleting the assertion.
 | Everywhere | Instruments drawn as strokes: two tapes, the heading tape, the attitude ball | None; all of it is transparent to the mouse |
 | Top left | Wordmark, and the `watching` badge on the hosted viewer | One line |
 | Top centre | Transient alerts, warning severity and worse | Only while alerting |
-| Top right | Cesium's scene-mode toggle | One button |
+| Right edge, under the ball | Cesium's scene-mode toggle | One button |
 | Right edge | The dock, 36 px, one panel at a time | A gutter |
 | Top right | The 92 px attitude ball | One small disc |
 | Bottom edge | The editable telemetry strip | One or more rows, operator's choice |
