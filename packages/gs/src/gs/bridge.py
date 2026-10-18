@@ -1606,42 +1606,42 @@ class Bridge:
             # Drop stale/reordered frames; a large backward jump is a reboot.
             boot = msg.time_boot_ms
             last = self._last_pos_boot_ms
-            if last >= 0 and boot <= last and last - boot < REBOOT_GAP_MS:
-                # Ambiguous: a reordered frame, or a reboot that happened within
-                # REBOOT_GAP_MS of the last report. See BOOT_REBOOT_RATIO.
-                suspect = self._boot_suspect
-                confirmed = (suspect is not None
-                             and suspect <= boot < suspect + REBOOT_GAP_MS)
-                if not confirmed:
-                    # Only a jump that loses most of the uptime is even a
-                    # candidate; a true reorder is a small blip. Remember it and
-                    # wait for the next frame to say which this was.
-                    self._boot_suspect = (boot if boot * BOOT_REBOOT_RATIO < last
-                                          else None)
-                    return
-                # The stream is ascending from the low value: it rebooted.
-                self._boot_suspect = None
-                self._reboot_pending = boot
-                self._last_pos_boot_ms = boot
+            # One decision about the vehicle's own uptime clock going backward:
+            # a reordered frame (drop it), a counter wrap (keep it, say nothing),
+            # or a reboot (keep it, and tell everyone -- see _on_vehicle_reboot).
+            rebooted = False
+            if last >= 0 and boot <= last:
+                if last - boot >= REBOOT_GAP_MS:
+                    # Unambiguous -- unless the counter simply wrapped: it was
+                    # about to overflow and has come back around (BOOT_MS_WRAP).
+                    if (last >= BOOT_MS_WRAP - BOOT_WRAP_MARGIN_MS
+                            and boot <= BOOT_WRAP_MARGIN_MS):
+                        print(f"[gs] vehicle uptime counter wrapped at 49.7 days "
+                              f"({last} -> {boot} ms); not a reboot")
+                    else:
+                        rebooted = True
+                    self._boot_suspect = None
+                else:
+                    # Ambiguous: a reordered frame, or a reboot that happened
+                    # within REBOOT_GAP_MS of the last report. One frame cannot
+                    # say which, so a candidate is held and confirmed only when
+                    # the next frame continues from it. See BOOT_REBOOT_RATIO.
+                    suspect = self._boot_suspect
+                    if suspect is not None and suspect <= boot < suspect + REBOOT_GAP_MS:
+                        rebooted = True            # ascending from the low value
+                        self._boot_suspect = None
+                    else:
+                        # Only a jump that loses most of the uptime is even a
+                        # candidate; a true reorder is a small blip.
+                        self._boot_suspect = (boot if boot * BOOT_REBOOT_RATIO < last
+                                              else None)
+                        return
             else:
                 self._boot_suspect = None
-            # A big backward jump in the VEHICLE's own uptime clock is a reboot.
-            # It was already tolerated here (the frame is accepted rather than
-            # dropped as reordered), but nothing was told about it -- and a
-            # reboot invalidates things the operator is looking at. On the bench
-            # and in HITL this happens constantly: every restart, every flash.
-            # Flagged here, acted on in _on_mav_protocol, because reacting means
-            # transmitting and this runs under the lock.
-            if last >= 0 and boot < last:
-                # ...unless the counter simply wrapped: it was about to overflow
-                # and has come back around. See BOOT_MS_WRAP.
-                wrapped = (last >= BOOT_MS_WRAP - BOOT_WRAP_MARGIN_MS
-                           and boot <= BOOT_WRAP_MARGIN_MS)
-                if wrapped:
-                    print(f"[gs] vehicle uptime counter wrapped at 49.7 days "
-                          f"({last} -> {boot} ms); not a reboot")
-                else:
-                    self._reboot_pending = boot
+            if rebooted:
+                # Flagged here, acted on in _on_mav_protocol, because reacting
+                # means transmitting and this runs under the lock.
+                self._reboot_pending = boot
             self._last_pos_boot_ms = boot
             # PX4's own uptime clock, surfaced for diagnostics: when the
             # simulator stalls this is the value PX4's clock stops at, which
