@@ -127,6 +127,17 @@ uv run python scripts/day_in_the_life.py --net                      # fat pipe
 uv run python scripts/day_in_the_life.py --loss 0.08                # a worse day
 ```
 
+Against a **real** autopilot — PX4 SITL, a HITL rig, or the aircraft on the
+bench — point it with `--attach` and it runs the same steps with the same
+pass/fail. That the stand-in is indistinguishable from the real thing is what
+makes this the same test:
+
+```sh
+uv run python scripts/day_in_the_life.py --attach auto --net        # find it
+uv run python scripts/day_in_the_life.py --attach udpin:0.0.0.0:14550 --net
+uv run python scripts/day_in_the_life.py --attach serial:/dev/ttyACM0:115200
+```
+
 **Did a refactor change the frame?** The emitted frame is the console's
 contract, and it is built by a long branch that gets restructured. This feeds one
 identical MAVLink sequence into the working tree and into any git ref, and diffs

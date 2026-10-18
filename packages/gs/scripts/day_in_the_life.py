@@ -109,17 +109,31 @@ def fence():
 async def fly(args):
     random.seed(args.seed)
     bps = 1_000_000.0 if args.net else args.bps
-    mav_p, ws_p, json_p = (_free_port(socket.SOCK_DGRAM), _free_port(socket.SOCK_STREAM),
-                           _free_port(socket.SOCK_DGRAM))
-    px4 = SimAutopilot(mav_p, (bps, 0.0 if args.net else args.latency, args.loss)).start()
-    b = Bridge(mavlink_endpoint=f"udpin:127.0.0.1:{mav_p}",
-               json_port=json_p, ws_port=ws_p, budget_bps=bps)
+    ws_p, json_p = _free_port(socket.SOCK_STREAM), _free_port(socket.SOCK_DGRAM)
+
+    # --attach points the rehearsal at a REAL autopilot -- PX4 SITL, a HITL rig,
+    # or the aircraft on the bench -- instead of the stand-in. This is the whole
+    # reason the stand-in is written to be indistinguishable from them: the same
+    # script, the same steps, the same pass/fail, against the real thing. A tool
+    # for validating against SITL that cannot be pointed at SITL is half a tool.
+    px4 = None
+    if args.attach:
+        endpoint = args.attach
+        budget = None if args.net else bps      # let gs infer it from a real link
+    else:
+        mav_p = _free_port(socket.SOCK_DGRAM)
+        px4 = SimAutopilot(mav_p, (bps, 0.0 if args.net else args.latency, args.loss)).start()
+        endpoint = f"udpin:127.0.0.1:{mav_p}"
+        budget = bps
+    b = Bridge(mavlink_endpoint=endpoint,
+               json_port=json_p, ws_port=ws_p, budget_bps=budget)
     threading.Thread(target=b._mav_loop, daemon=True).start()
     serve = asyncio.create_task(b._serve())
     await asyncio.sleep(0.4)
 
-    link = "a fat pipe (SITL / HITL / USB)" if args.net else (
-        f"{bps:.0f} B/s, {args.latency * 1000:.0f} ms, {args.loss:.0%} loss")
+    link = (f"REAL autopilot on {args.attach}" if args.attach
+            else "a simulated fat pipe (SITL / HITL / USB)" if args.net
+            else f"simulated {bps:.0f} B/s, {args.latency * 1000:.0f} ms, {args.loss:.0%} loss")
     print(f"\nA day in the life — link: {link}\n")
     try:
         async with websockets.connect(f"ws://127.0.0.1:{ws_p}") as ws:
@@ -179,7 +193,10 @@ async def fly(args):
                          lambda g: g.get("type") == "ack" and g.get("id") == "r1",
                          lambda g: g["text"])
 
-            if args.reboot:
+            if args.reboot and px4 is None:
+                print(" (--reboot needs the stand-in; power-cycle the real one"
+                      " yourself and watch for the `vehicle_reboot` step)")
+            if args.reboot and px4 is not None:
                 print(" the autopilot restarts mid-mission")
                 px4.reboot_now = True
                 await r.step("gs reports the reboot", None,
@@ -226,10 +243,11 @@ async def fly(args):
                 print(f"  stream groups reported        {sorted(ages[-1])}")
             print(f"  link reopens                  {b.link_reopens}")
             print(f"  swallowed handler errors      {b.handler_errors}")
-            print(f"  GCS heartbeats PX4 received   {px4.gcs_heartbeats}"
-                  + ("" if px4.gcs_heartbeats
-                     else "   <-- PX4 would call the datalink lost"))
-            print(f"  radio frames dropped          {px4.radio.dropped}")
+            if px4 is not None:
+                print(f"  GCS heartbeats PX4 received   {px4.gcs_heartbeats}"
+                      + ("" if px4.gcs_heartbeats
+                         else "   <-- PX4 would call the datalink lost"))
+                print(f"  radio frames dropped          {px4.radio.dropped}")
             if st:
                 print(f"  gs says                       "
                       f"up {st['upMs'] / 1000:.0f}s, {st['clients']} client(s), "
@@ -246,7 +264,8 @@ async def fly(args):
                 print(f"NOTE: {b.handler_errors} handler errors were swallowed; check the log")
             return 1 if (bad or b.handler_errors) else 0
     finally:
-        px4.stop()
+        if px4 is not None:
+            px4.stop()
         serve.cancel()
 
 
@@ -259,6 +278,11 @@ def main() -> int:
     ap.add_argument("--items", type=int, default=12, help="mission items")
     ap.add_argument("--seed", type=int, default=3)
     ap.add_argument("--budget", type=float, default=45.0, help="per-step budget, seconds")
+    ap.add_argument("--attach", default="", metavar="ENDPOINT",
+                    help="drive a REAL autopilot instead of the stand-in: an "
+                         "endpoint gs understands (`auto`, udpin:0.0.0.0:14550 for "
+                         "PX4 SITL, serial:/dev/ttyACM0:115200 for one over USB). "
+                         "The link model is not simulated in this mode.")
     ap.add_argument("--reboot", action="store_true",
                     help="restart the autopilot mid-mission and check the recovery")
     ap.add_argument("--net", action="store_true",
