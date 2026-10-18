@@ -1945,12 +1945,42 @@ class Bridge:
         mtype = msg.get("type")
 
         if mtype == "claim":
-            # First claimer wins until it disconnects; same ws re-claiming is fine.
+            # A plain claim takes authority only if it is free, and a client
+            # re-claiming keeps it. `force` is an explicit takeover.
+            #
+            # The distinction is the whole point. The hub's premise is "join the
+            # WiFi, open the page", so several people do -- and the first to
+            # load held command until its socket dropped. A phone in someone's
+            # pocket with the page open keeps answering gs's 5 s pings, so its
+            # socket never drops, and the pilot at the laptop could not get
+            # authority: every command, mission upload and param write refused,
+            # with the only cure being to find that person. The console grew a
+            # "Take command" button for exactly this and it re-sent a plain
+            # claim, which was refused for the same reason -- a button that
+            # could not do the thing it was named after.
+            #
+            # So: a page merely loading must never take command from someone who
+            # is flying (that is what a plain claim is, and it still refuses),
+            # while an operator who pressed a button that says "Take command"
+            # has stated their intent and gets it. The displaced client is told,
+            # so its UI can grey out rather than silently have everything
+            # rejected.
             cid = msg.get("id")
+            force = bool(msg.get("force", False))
             if self._commander is None or self._commander is ws:
                 self._commander = ws
                 if cid is not None:
                     await self._send(ws, {"type": "ack", "id": cid, "ok": True, "result": 0, "text": "commander"})
+            elif force:
+                displaced = self._commander
+                self._commander = ws
+                print("[gs] command authority taken over by another console")
+                await self._send(displaced, {
+                    "type": "commander", "held": False,
+                    "text": "another console took command"})
+                if cid is not None:
+                    await self._send(ws, {"type": "ack", "id": cid, "ok": True,
+                                          "result": 0, "text": "commander (taken over)"})
             elif cid is not None:
                 await self._send(ws, {"type": "ack", "id": cid, "ok": False, "result": -1, "text": "not commander"})
 

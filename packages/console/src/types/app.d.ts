@@ -119,7 +119,14 @@ export interface CommandMessage {
 }
 // Bid to be the single commander. When `id` is set, gs replies with an AckMessage
 // (text "commander" | "not commander") so the UI can confirm it holds authority.
-export interface ClaimMessage { type: "claim", id?: string }
+/** Bid for command authority. `force` is an explicit takeover — the operator
+ *  pressed "Take command". Without it gs grants only if authority is free, so a
+ *  page merely loading can never pull it away from whoever is flying. */
+export interface ClaimMessage { type: "claim", id?: string, force?: boolean }
+/** gs telling a console whether it holds command authority. Sent unprompted to
+ *  the console that just LOST it to a takeover, so its UI can grey out instead
+ *  of leaving the operator to discover it from every action being rejected. */
+export interface CommanderMessage { type: "commander", held: boolean, text?: string }
 export interface ParamRefreshMessage { type: "param_refresh" } // request the full param list
 export interface ParamSetMessage {
     type: "param_set",
@@ -271,4 +278,5 @@ export type ServerMessage =
     | MissionMessage | MissionProgressMessage | MissionAckMessage
     | MissionCurrentMessage | MissionReachedMessage
     | FenceMessage | RallyMessage | FenceAckMessage | RallyAckMessage
-    | VehicleRebootMessage;
+    | VehicleRebootMessage
+    | CommanderMessage;

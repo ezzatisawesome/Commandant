@@ -201,6 +201,16 @@ export class TelemetryClient {
 				this.resolveGeoAck(this.pendingFence, msg as FenceAckMessage);
 			} else if (type === "rally_ack") {
 				this.resolveGeoAck(this.pendingRally, msg as RallyAckMessage);
+			} else if (type === "commander") {
+				// Another console took command. Said explicitly so this one can
+				// grey out, rather than leaving the operator to discover it from
+				// every action being rejected.
+				const c = msg as { held?: boolean; text?: string };
+				$commander.set(c.held === true);
+				if (c.held !== true) {
+					pushStatus(SEVERITY_WARNING,
+						c.text || "another console took command", Date.now());
+				}
 			} else if (type === "vehicle_reboot") {
 				// The autopilot restarted (on a bench or in HITL, constantly: every
 				// restart, every flash). Params are the dangerous leftover — PX4
@@ -330,7 +340,10 @@ export class TelemetryClient {
 	 * treats authority optimistically. Fire-and-forget from the caller's view.
 	 */
 	private claim() {
-		void this.takeCommand().catch(() => { /* no confirm — authority stays unknown */ });
+		// On connect, BID — never take. A page merely loading must not pull
+		// authority away from whoever is flying, which is exactly what would
+		// happen if this shared the "Take command" path. See bid().
+		void this.bid(false).catch(() => { /* no confirm — authority stays unknown */ });
 	}
 
 	/**
@@ -345,6 +358,17 @@ export class TelemetryClient {
 	 * cure was to find and close the other tab, with nothing on screen saying so.
 	 */
 	takeCommand(): Promise<boolean> {
+		// The operator pressed a button that says "Take command", which is them
+		// stating the intent. gs honours `force` by moving authority and telling
+		// the console that held it. Without the flag this re-sent a plain claim
+		// that gs refused for the same reason it refused the first one, so the
+		// button could not do the thing it was named after.
+		return this.bid(true);
+	}
+
+	/** Ask for command authority. `force` is an explicit takeover (see
+	 *  takeCommand); without it, gs grants only if authority is free. */
+	private bid(force: boolean): Promise<boolean> {
 		return new Promise((resolve, reject) => {
 			if (IS_VIEW) {
 				// The hosted view has no route back to the hub by design.
@@ -369,7 +393,7 @@ export class TelemetryClient {
 				reject,
 				timer,
 			});
-			this.send({ type: "claim", id });
+			this.send(force ? { type: "claim", id, force: true } : { type: "claim", id });
 		});
 	}
 

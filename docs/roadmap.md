@@ -72,6 +72,23 @@ fixed (`packages/gs/tests/test_flight_ready.py`, 14 tests).
    the EKF wind estimate are simply never populated, with no error. The dialect
    is now rebound explicitly.
 
+**"Take command" could not take command (2026-10-18):** gs granted authority to
+the first claimer and held it until that socket dropped. The hub's premise is
+"join the WiFi, open the page", so several people do — and whoever loaded first
+held command. A phone in a pocket with the page open keeps answering gs's 5 s
+pings, so its socket never drops and the pilot at the laptop could not get
+authority: every command, mission upload and param write refused. The console
+had grown a "Take command" button for exactly this, and it re-sent a plain
+`claim`, which gs refused for the same reason it refused the first one — a
+button that could not do the thing it was named after, with the only real cure
+being to find the other person.
+
+`claim {force: true}` is now an explicit takeover, and the console sends it only
+from that button; the bid on page load stays a plain claim, so a browser opening
+can still never pull authority from someone who is flying. The displaced console
+is told with a new `commander` message and greys out, instead of discovering it
+from every action being rejected.
+
 **Long-flight and per-stream staleness (2026-10-18):** three findings aimed at
 the stated target of a flight that lasts days.
 

@@ -221,3 +221,44 @@ describe("a vehicle reboot clears what it invalidates (gs fault H16)", () => {
 		expect($linkState.get()).not.toBe("lost");
 	});
 });
+
+describe("command authority can actually be taken (gs fault H20)", () => {
+	// The hub's premise is "join the WiFi, open the page", so several people do,
+	// and the first to load held command until its socket dropped. A phone in a
+	// pocket with the page open keeps answering gs's 5 s pings, so its socket
+	// never drops and the pilot at the laptop could not get authority.
+	it("bids without forcing on connect, so a page load cannot steal command", () => {
+		client.connect();
+		ws().open();
+		const claim = ws().lastSent();
+		expect(claim.type).toBe("claim");
+		expect(claim.force).toBeUndefined();
+	});
+
+	it("forces only when the operator pressed Take command", () => {
+		client.connect();
+		ws().open();
+		void client.takeCommand();
+		const claim = ws().lastSent();
+		expect(claim.type).toBe("claim");
+		expect(claim.force).toBe(true);
+	});
+
+	it("greys out when told another console took over", () => {
+		client.connect();
+		ws().open();
+		ws().recv({ type: "ack", id: JSON.parse(ws().sent[0]).id, ok: true, result: 0, text: "commander" });
+		expect($commander.get()).toBe(true);
+		ws().recv({ type: "commander", held: false, text: "another console took command" });
+		expect($commander.get()).toBe(false);
+		expect($statusTexts.get().some((e) => /took command/.test(e.text))).toBe(true);
+	});
+
+	it("a commander notice is not treated as telemetry", () => {
+		client.connect();
+		ws().open();
+		ws().recv({ type: "telemetry", t: 1, connected: true, lat: 37.4, lon: -122.1, alt: 100 });
+		ws().recv({ type: "commander", held: false });
+		expect($aircraftStore.get()?.lat).toBe(37.4);
+	});
+});

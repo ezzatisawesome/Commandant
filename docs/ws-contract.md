@@ -134,12 +134,34 @@ Reuse the exact command shapes in `AircraftSim/src/px4/mavlink_io.py`
 
 ### `claim` (authority)
 ```json
-{ "type": "claim" }
+{ "type": "claim", "id": "<uuid>" }
+{ "type": "claim", "id": "<uuid>", "force": true }
 ```
-Marks this WS connection as the single active commander. gs accepts `command`
-messages only from the current commander; others get `ack` with
-`ok:false, text:"not commander"`. First claimer wins until it disconnects; a new
-`claim` after disconnect takes over. (SITL-simple; refine later.)
+Marks this WS connection as the single active commander. gs accepts `command`,
+`param_set` and the `*_push` messages only from the current commander; others
+get `ok:false, text:"not commander"`.
+
+**A plain claim takes authority only if it is free.** This is what a page sends
+on connect, and it must never pull authority away from whoever is flying.
+
+**`force: true` is an explicit takeover**, and the hub needs one. The premise is
+"join the WiFi, open the page", so several people do — and the first to load
+held command until its socket dropped. A phone in someone's pocket with the page
+open keeps answering gs's 5 s pings, so its socket never drops and the pilot at
+the laptop could not get authority: every command, mission upload and param
+write refused, with the only cure being to find that person. The console's "Take
+command" button used to re-send a plain claim, which gs refused for the same
+reason it refused the first one — a button that could not do the thing it was
+named after. The operator pressing it has stated the intent, so `force` honours
+it.
+
+### `commander` (authority moved, unprompted)
+```json
+{ "type": "commander", "held": false, "text": "another console took command" }
+```
+Sent to the console that just **lost** authority to a takeover, so its UI can
+grey out immediately rather than leaving the operator to discover it from every
+action being rejected. A client should set its own authority state from `held`.
 
 ## gs behavior
 

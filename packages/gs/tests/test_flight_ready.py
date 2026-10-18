@@ -1406,3 +1406,143 @@ def test_h19_ages_reset_when_the_link_is_reopened():
     assert "gps" in b._src_at
     b._on_reopen()
     assert b._src_at == {}
+
+
+# --- H20: "Take command" could not take command ----------------------------
+
+async def _claim(ws, cid, **extra):
+    import asyncio
+    import json as _json
+    await ws.send(_json.dumps({"type": "claim", "id": cid, **extra}))
+    for _ in range(40):
+        try:
+            got = _json.loads(await asyncio.wait_for(ws.recv(), timeout=1.0))
+        except asyncio.TimeoutError:
+            continue
+        if got.get("type") == "ack" and got.get("id") == cid:
+            return got
+    return None
+
+
+def test_h20_a_second_console_can_take_command_when_it_says_it_is_doing_that(ports):
+    """gs grants authority to the first claimer and holds it until that socket
+    drops. The hub's whole premise is "join the WiFi, open the page", so several
+    people do -- and whoever loaded first holds command. A phone in someone's
+    pocket with the page open keeps answering gs's 5 s pings, so its socket
+    never drops and the pilot at the laptop cannot get authority: gs rejects
+    every command, mission upload and param write from them. The console grew a
+    "Take command" button for exactly this, but it re-sent a plain `claim`,
+    which gs refused for the same reason -- a button that could not do the thing
+    it was named after. The only cure was to find the other person.
+
+    A plain claim must still NOT steal authority (a page loading in a browser
+    must never take it from someone actively flying). An explicit takeover is
+    different: the operator pressed a button that says so."""
+    b = _bridge(json_port=ports["json"], ws_port=ports["ws"])
+
+    async def scenario():
+        import asyncio
+
+        import websockets
+        serve = asyncio.create_task(b._serve())
+        await asyncio.sleep(0.3)
+        url = f"ws://127.0.0.1:{ports['ws']}"
+        async with websockets.connect(url) as a, websockets.connect(url) as c:
+            assert (await _claim(a, "a1"))["ok"] is True
+
+            # A plain claim from the second console is refused, as it must be.
+            refused = await _claim(c, "c1")
+            assert refused["ok"] is False and refused["text"] == "not commander"
+
+            # An explicit takeover succeeds.
+            took = await _claim(c, "c2", force=True)
+            assert took is not None and took["ok"] is True, f"takeover refused: {took}"
+            assert b._commander is not None
+
+            # And the console that lost it is TOLD, so its UI can grey out
+            # instead of silently having every command rejected.
+            notice = None
+            for _ in range(40):
+                try:
+                    got = await asyncio.wait_for(a.recv(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+                import json as _json
+                msg = _json.loads(got)
+                if msg.get("type") == "commander":
+                    notice = msg
+                    break
+            assert notice is not None, "the displaced console was never told"
+            assert notice["held"] is False
+        serve.cancel()
+
+    import asyncio
+    asyncio.run(scenario())
+
+
+def test_h20_a_takeover_makes_the_new_console_the_one_that_can_command(ports):
+    """Authority has to actually move, not just be reported as moved."""
+    b = _bridge(json_port=ports["json"], ws_port=ports["ws"])
+
+    async def scenario():
+        import asyncio
+        import json as _json
+
+        import websockets
+        serve = asyncio.create_task(b._serve())
+        await asyncio.sleep(0.3)
+        url = f"ws://127.0.0.1:{ports['ws']}"
+        async with websockets.connect(url) as a, websockets.connect(url) as c:
+            await _claim(a, "a1")
+            await _claim(c, "c1", force=True)
+            # The old commander's command is now refused...
+            await a.send(_json.dumps({"type": "command", "id": "x1", "name": "rtl"}))
+            got = await _recv_type(a, "ack", "x1")
+            assert got["ok"] is False and got["text"] == "not commander"
+            # ...and the new one's is accepted onto the mav thread.
+            await c.send(_json.dumps({"type": "command", "id": "y1", "name": "rtl"}))
+            await asyncio.sleep(0.2)
+            assert "y1" in b._pending_clients
+        serve.cancel()
+
+    import asyncio
+    asyncio.run(scenario())
+
+
+async def _recv_type(ws, mtype, mid=None, tries=40):
+    import asyncio
+    import json as _json
+    for _ in range(tries):
+        try:
+            got = _json.loads(await asyncio.wait_for(ws.recv(), timeout=1.0))
+        except asyncio.TimeoutError:
+            continue
+        if got.get("type") == mtype and (mid is None or got.get("id") == mid):
+            return got
+    return None
+
+
+def test_h20_a_plain_claim_still_never_steals_authority(ports):
+    """The regression that matters: a page loading must not take command from
+    someone who is flying. Several reloads and reconnects, none of which asked."""
+    b = _bridge(json_port=ports["json"], ws_port=ports["ws"])
+
+    async def scenario():
+        import asyncio
+
+        import websockets
+        serve = asyncio.create_task(b._serve())
+        await asyncio.sleep(0.3)
+        url = f"ws://127.0.0.1:{ports['ws']}"
+        async with websockets.connect(url) as a:
+            await _claim(a, "a1")
+            for i in range(3):
+                async with websockets.connect(url) as other:
+                    got = await _claim(other, f"o{i}")
+                    assert got["ok"] is False, "a plain claim stole command authority"
+            # The original still holds it.
+            assert (await _claim(a, "a2"))["ok"] is True
+        serve.cancel()
+
+    import asyncio
+    asyncio.run(scenario())
