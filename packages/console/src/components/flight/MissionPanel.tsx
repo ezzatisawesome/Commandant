@@ -15,6 +15,7 @@ import {
 	clearMission,
 } from "@/stores/mission.store";
 import { $fenceItems } from "@/stores/geo.store";
+import { $planRead } from "@/stores/mission.store";
 import { $linkState, $commander } from "@/stores/link.store";
 import { telemetryClient } from "@/services/telemetry";
 import { Button } from "@/components/ui/button";
@@ -86,6 +87,7 @@ export default function MissionPanel() {
 	// silent refusal later. Returns structured findings, so the chip can be two
 	// words, the offending row can carry a flag, and the globe can draw the
 	// constraint — rather than all three being one paragraph of amber text.
+	const planRead = useStore($planRead);
 	const fence = useStore($fenceItems);
 	const blockers = missionBlockers(items, lookupFrom(params), fence);
 
@@ -189,7 +191,9 @@ export default function MissionPanel() {
 			<div className="mt-2 overflow-auto font-mono text-[11px]">
 				{items.length === 0 ? (
 					<div className="py-4 text-center text-white/30">
-						no items — turn on “Edit map” and click the globe, or Download
+						{planRead.mission
+							? "no mission on the vehicle — turn on “Edit map” and click the globe"
+							: "not read from the vehicle yet — Download to see what it is flying, or turn on “Edit map” to author one"}
 					</div>
 				) : (<>
 					{/* Header row. Four unlabelled numeric columns is a guessing

@@ -28,7 +28,7 @@ import { TelemetryClient } from "@/services/telemetry";
 import { $aircraftStore, $trailStore, pushFrame } from "@/stores/aircraft.store";
 import { $linkState, $commander } from "@/stores/link.store";
 import { $params, $paramsStale } from "@/stores/params.store";
-import { $missionCurrent, $missionProgress, $missionReached, $missionItems, setMissionItems } from "@/stores/mission.store";
+import { $missionCurrent, $missionProgress, $missionReached, $missionItems, setMissionItems, $planRead, clearPlanRead } from "@/stores/mission.store";
 import { $statusTexts, clearStatus } from "@/stores/statustext.store";
 
 let client: TelemetryClient;
@@ -38,7 +38,7 @@ beforeEach(() => {
 	FakeWS.throwOnConstruct = false;
 	$aircraftStore.set(null); $trailStore.set([]); $params.set({});
 	$missionCurrent.set(null); $missionReached.set(null); $missionProgress.set(null);
-	clearStatus();
+	clearStatus(); clearPlanRead();
 	client = new TelemetryClient("ws://test:8790");
 });
 afterEach(() => { client.disconnect(); vi.useRealTimers(); });
@@ -357,5 +357,29 @@ describe("asking the daemon what it decided (gs `status`)", () => {
 
 	it("rejects rather than hanging when the socket is not open", async () => {
 		await expect(client.status()).rejects.toThrow(/not connected/);
+	});
+});
+
+describe("plan readback state across a reconnect", () => {
+	it("a mission readback marks the plane read; a reconnect takes it back", () => {
+		client.connect(); ws().open();
+		expect($planRead.get().mission).toBe(false);
+		ws().recv({ type: "mission", count: 0, items: [] });
+		// Count 0 from a READBACK is real information: the vehicle has no
+		// mission. That is exactly what an unasked panel could not say.
+		expect($planRead.get().mission).toBe(true);
+
+		ws().close();
+		vi.advanceTimersByTime(5000);
+		ws().open();
+		expect($planRead.get().mission).toBe(false);
+	});
+
+	it("fence and rally readbacks mark their own planes", () => {
+		client.connect(); ws().open();
+		ws().recv({ type: "fence", count: 0, items: [] });
+		expect($planRead.get()).toMatchObject({ mission: false, fence: true, rally: false });
+		ws().recv({ type: "rally", count: 0, items: [] });
+		expect($planRead.get()).toMatchObject({ fence: true, rally: true });
 	});
 });

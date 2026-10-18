@@ -34,6 +34,8 @@ import {
 	$missionProgress,
 	$missionReached,
 	setMissionItems,
+	markPlanRead,
+	clearPlanRead,
 } from "@/stores/mission.store";
 import { setFenceItems, setRallyItems } from "@/stores/geo.store";
 import envs, { IS_VIEW } from "@/lib/envs";
@@ -151,6 +153,10 @@ export class TelemetryClient {
 				// unsaved writes, the radio may have been moved to another
 				// aircraft. Keep the values, stop claiming they are current.
 				markParamsStale();
+				// Same reasoning for the plan panes: what the vehicle holds may
+				// have changed while nobody was listening, so an empty panel
+				// must go back to meaning "not asked" rather than "none".
+				clearPlanRead();
 			}
 			this.hadSession = true;
 			// Bid to be the single active commander as soon as the socket is up, so
@@ -195,6 +201,7 @@ export class TelemetryClient {
 			} else if (type === "mission") {
 				// Readback after a pull: replace the editable plan wholesale.
 				setMissionItems((msg as MissionMessage).items);
+				markPlanRead("mission");
 				$missionProgress.set(null);
 			} else if (type === "mission_progress") {
 				const p = msg as { phase: "upload" | "download"; seq: number; count: number };
@@ -208,8 +215,10 @@ export class TelemetryClient {
 				$missionReached.set((msg as { seq: number }).seq);
 			} else if (type === "fence") {
 				setFenceItems((msg as FenceMessage).items);
+				markPlanRead("fence");
 			} else if (type === "rally") {
 				setRallyItems((msg as RallyMessage).items);
+				markPlanRead("rally");
 			} else if (type === "fence_ack") {
 				this.resolveGeoAck(this.pendingFence, msg as FenceAckMessage);
 			} else if (type === "rally_ack") {

@@ -4,7 +4,10 @@ import {
 	$fenceItems, addFencePoint, fenceItemsForPush, clearFence, removeFenceItem,
 	setFenceItems, fenceGeometryProblem,
 } from "@/stores/geo.store";
-import { $missionItems, addWaypoint, removeItem, reorderItem, clearMission, updateItem } from "@/stores/mission.store";
+import {
+	$missionItems, addWaypoint, removeItem, reorderItem, clearMission, updateItem,
+	$planRead, markPlanRead, clearPlanRead,
+} from "@/stores/mission.store";
 
 describe("fence push shaping", () => {
 	beforeEach(() => clearFence());
@@ -88,5 +91,37 @@ describe("a fence that is not a fence is refused at authoring time (gs fault H13
 		addFencePoint("fence_circle_exclusion", 9, 9);   // defaults to radius 100
 		for (const [la, lo] of [[1, 1], [1, 2], [2, 2]]) addFencePoint("fence_inclusion", la, lo);
 		expect(fenceGeometryProblem()).toBeNull();
+	});
+});
+
+describe("an empty plan panel must not claim the vehicle has no plan", () => {
+	// It meant two different things and said neither: "the aircraft has no
+	// mission" and "nobody has asked the aircraft". On a fresh page load, or
+	// after a reconnect where the daemon may have restarted, it is always the
+	// second — and the panel read as the first.
+	beforeEach(() => clearPlanRead());
+
+	it("starts as not-read, because nothing has been asked yet", () => {
+		expect($planRead.get()).toEqual({ mission: false, fence: false, rally: false });
+	});
+
+	it("a readback is what makes an empty plan mean 'the vehicle has none'", () => {
+		markPlanRead("mission");
+		expect($planRead.get().mission).toBe(true);
+		expect($planRead.get().fence).toBe(false);   // asked about one plane only
+	});
+
+	it("each plane is tracked separately, since each is pulled separately", () => {
+		markPlanRead("fence");
+		markPlanRead("rally");
+		expect($planRead.get()).toEqual({ mission: false, fence: true, rally: true });
+	});
+
+	it("a reconnect takes the claim back", () => {
+		// What the vehicle holds may have changed while nobody was listening.
+		markPlanRead("mission");
+		markPlanRead("fence");
+		clearPlanRead();
+		expect($planRead.get()).toEqual({ mission: false, fence: false, rally: false });
 	});
 });

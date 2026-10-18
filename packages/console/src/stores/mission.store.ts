@@ -19,6 +19,33 @@ export const $missionProgress = atom<
 // (off by default so clicks don't fight camera pan). The MissionLayer reads this.
 export const $missionEdit = atom<boolean>(false);
 
+/** Which plan planes have been READ BACK from the vehicle this session.
+ *
+ *  An empty plan panel meant two different things and said neither: "the
+ *  aircraft has no mission" and "nobody has asked the aircraft". On a fresh
+ *  page load — or after a reconnect, when the daemon may have restarted — it is
+ *  always the second, and the panel read as the first.
+ *
+ *  Auto-pulling on connect is the wrong fix twice over: these stores hold the
+ *  operator's EDITABLE draft, so a pull would discard unsaved authoring work,
+ *  and it would spend radio bandwidth on every page load and every viewer that
+ *  joins. The right fix is to stop implying. A readback sets the flag; a
+ *  reconnect clears it, because what the vehicle holds may have changed while
+ *  nobody was listening. */
+export const $planRead = atom<{ mission: boolean; fence: boolean; rally: boolean }>({
+	mission: false, fence: false, rally: false,
+});
+
+export function markPlanRead(plane: "mission" | "fence" | "rally") {
+	const cur = $planRead.get();
+	if (!cur[plane]) $planRead.set({ ...cur, [plane]: true });
+}
+
+/** The link dropped: whatever was read predates the gap. */
+export function clearPlanRead() {
+	$planRead.set({ mission: false, fence: false, rally: false });
+}
+
 // Which kinds carry a position (lat/lon). rtl is positionless; the others are
 // placed on the globe. Used by the authoring layer and the table alike.
 export function kindHasPosition(kind: MissionKind): boolean {
