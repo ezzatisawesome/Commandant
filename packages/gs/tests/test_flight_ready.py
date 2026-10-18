@@ -1610,3 +1610,76 @@ def test_h21_offer_never_raises_even_before_the_loop_exists():
             raise RuntimeError("Event loop is closed")
     p._loop = ClosedLoop()
     p.offer(dumps({"type": "telemetry"}), "telemetry")   # must be swallowed
+
+
+# --- H22: stream control was not an authority-gated write ------------------
+
+def test_h22_stream_control_is_commander_only(ports):
+    """`stream` is labelled a display preference, but it is not: it sends
+    SET_MESSAGE_INTERVAL, which changes what the VEHICLE transmits, for
+    everyone, out of a shared and finite link budget. Any phone on the hub's
+    WiFi could do it.
+
+    That is the H14 failure with a different trigger. A careless tab asking for
+    a fat message at a high rate is the operator's commands competing for a
+    radio they were already measured to lose. The rate clamp (H2) bounds the
+    damage to gs's share of the link, but the authority question is separate:
+    this is a write to the aircraft and belongs to the one console that holds
+    command, exactly like a param write or a mission upload."""
+    b = _bridge(json_port=ports["json"], ws_port=ports["ws"])
+
+    async def scenario():
+        import asyncio
+
+        import websockets
+        serve = asyncio.create_task(b._serve())
+        await asyncio.sleep(0.3)
+        url = f"ws://127.0.0.1:{ports['ws']}"
+        async with websockets.connect(url) as a, websockets.connect(url) as c:
+            assert (await _claim(a, "a1"))["ok"] is True
+
+            # The non-commander is refused, and TOLD, rather than silently ignored.
+            await c.send(json.dumps({"type": "stream", "id": "s1",
+                                     "msgId": bridgemod.MSG_ACTUATOR_OUTPUT_STATUS,
+                                     "hz": 25}))
+            got = await _recv_type(c, "ack", "s1")
+            assert got is not None, "a refused stream request said nothing"
+            assert got["ok"] is False and got["text"] == "not commander"
+            await asyncio.sleep(0.2)
+            assert b._misc_queue.empty(), "a non-commander's stream request was queued"
+
+            # The commander's goes through.
+            await a.send(json.dumps({"type": "stream",
+                                     "msgId": bridgemod.MSG_ACTUATOR_OUTPUT_STATUS,
+                                     "hz": 5}))
+            await asyncio.sleep(0.2)
+            assert not b._misc_queue.empty(), "the commander's stream request was dropped"
+        serve.cancel()
+
+    import asyncio
+    asyncio.run(scenario())
+
+
+def test_h22_param_refresh_stays_open_to_any_client(ports):
+    """A refresh is a read, and a viewer wanting to see the param table is not
+    taking anything from the operator: gs dedupes concurrent refreshes and
+    paces them to a share of the link (H14). Keeping it open is deliberate, and
+    pinned so it is not tightened by reflex along with `stream`."""
+    b = _bridge(json_port=ports["json"], ws_port=ports["ws"])
+
+    async def scenario():
+        import asyncio
+
+        import websockets
+        serve = asyncio.create_task(b._serve())
+        await asyncio.sleep(0.3)
+        url = f"ws://127.0.0.1:{ports['ws']}"
+        async with websockets.connect(url) as a, websockets.connect(url) as c:
+            await _claim(a, "a1")
+            await c.send(json.dumps({"type": "param_refresh"}))
+            await asyncio.sleep(0.2)
+            assert not b._param_queue.empty(), "a viewer's param refresh was refused"
+        serve.cancel()
+
+    import asyncio
+    asyncio.run(scenario())

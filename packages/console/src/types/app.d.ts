@@ -137,6 +137,10 @@ export interface ParamSetMessage {
 }
 export interface StreamMessage {
     type: "stream",
+    /** Optional; when present gs replies with an `ack` under it. The request
+     *  is authority-gated and the rate may be clamped to the link budget, so a
+     *  client that wants to know what happened should send one. */
+    id?: string,
     msgId: number,          // MAVLink message id to (de)activate
     hz: number,             // rate; 0 disables the stream
 }

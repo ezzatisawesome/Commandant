@@ -236,10 +236,27 @@ gs → console:
 ## Stream control (Phase 5)
 console → gs:
 ```json
-{ "type": "stream", "msgId": 30, "hz": 10 }
+{ "type": "stream", "id": "<uuid>", "msgId": 30, "hz": 10 }
 ```
 → `SET_MESSAGE_INTERVAL` (hz=0 disables). Generalizes the daemon's existing
 hardcoded extra-stream requests.
+
+**This is a write to the aircraft, not a display preference**, despite how it
+reads: it changes what the *vehicle* transmits, for every client, out of a
+shared and finite link budget. It was open to any phone on the hub's WiFi, which
+is the param-refresh contention measured above with a different trigger — a
+careless tab asking for a fat message at a high rate is the operator's commands
+competing for a radio they were already measured to lose. So it is
+**commander-only**, like a param write or a plan upload.
+
+**The rate may be clamped** to what the transport can carry (see the link
+budget). gs then sends a `statustext` saying so, because an operator picking a
+rate in a dropdown cannot know the budget and a silent clamp looks like the
+control not working.
+
+`id` is optional but a client should send one: with it gs replies with an `ack`
+under that id, so a refusal (`not commander`) or a clamp is visible instead of
+the request appearing to do nothing.
 
 ## Missions (Phase 4)
 

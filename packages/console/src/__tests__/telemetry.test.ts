@@ -262,3 +262,36 @@ describe("command authority can actually be taken (gs fault H20)", () => {
 		expect($aircraftStore.get()?.lat).toBe(37.4);
 	});
 });
+
+
+describe("stream control is a write to the vehicle, not a display preference (gs fault H22)", () => {
+	// It sends SET_MESSAGE_INTERVAL, which changes what the vehicle transmits,
+	// for every client, out of a finite link budget — so gs gates it on command
+	// authority and may clamp the rate. Sent fire-and-forget, a refusal or a
+	// clamp was invisible and the operator just saw nothing happen.
+	it("carries an id so the outcome comes back", () => {
+		client.connect(); ws().open();
+		void client.setStream(375, 25);
+		const sent = ws().lastSent();
+		expect(sent.type).toBe("stream");
+		expect(typeof sent.id).toBe("string");
+		expect(sent.msgId).toBe(375);
+		expect(sent.hz).toBe(25);
+	});
+
+	it("surfaces a refusal from a console that does not hold command", async () => {
+		client.connect(); ws().open();
+		const p = client.setStream(375, 25);
+		const id = ws().lastSent().id;
+		ws().recv({ type: "ack", id, ok: false, result: -1, text: "not commander" });
+		await expect(p).resolves.toMatchObject({ ok: false, text: "not commander" });
+	});
+
+	it("surfaces a rate clamped to the link budget", async () => {
+		client.connect(); ws().open();
+		const p = client.setStream(375, 50);
+		const id = ws().lastSent().id;
+		ws().recv({ type: "ack", id, ok: true, result: 0, text: "capped at 1.9 Hz" });
+		await expect(p).resolves.toMatchObject({ ok: true, text: "capped at 1.9 Hz" });
+	});
+});

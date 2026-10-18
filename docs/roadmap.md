@@ -72,6 +72,17 @@ fixed (`packages/gs/tests/test_flight_ready.py`, 14 tests).
    the EKF wind estimate are simply never populated, with no error. The dialect
    is now rebound explicitly.
 
+**Stream control was not authority-gated (2026-10-18):** `stream` is labelled a
+display preference, and is not one: it sends `SET_MESSAGE_INTERVAL`, which
+changes what the *vehicle* transmits, for every client, out of a shared and
+finite link budget — and it was open to any phone on the hub's WiFi. That is the
+param-refresh contention above with a different trigger. The rate clamp bounds
+the damage; the authority question is separate, and a write to the aircraft
+belongs to the console holding command. It is commander-only now, and the
+console's request carries an `id` so a refusal or a clamp is visible — sent
+fire-and-forget, both were invisible and the operator just saw nothing happen.
+The Apply button is also disabled, with the reason, when authority is elsewhere.
+
 **The relay uplink on a flaky hotspot (2026-10-18):** the documented claims —
 never block the 25 Hz loop, never grow unbounded — hold. MEASURED with no uplink
 and 5000 frames plus 5000 events offered: one telemetry slot (latest-wins) and

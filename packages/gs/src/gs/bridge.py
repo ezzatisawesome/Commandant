@@ -2019,7 +2019,22 @@ class Bridge:
                                    "value": msg.get("value"), "ptype": msg.get("ptype")})
 
         elif mtype == "stream":
-            # Display preference (SET_MESSAGE_INTERVAL); open to any client.
+            # Not a display preference, despite how it reads. This sends
+            # SET_MESSAGE_INTERVAL, which changes what the VEHICLE transmits,
+            # for every client, out of a shared and finite link budget -- and it
+            # was open to any phone on the hub's WiFi. That is the H14 failure
+            # with a different trigger: a careless tab asking for a fat message
+            # at a high rate is the operator's commands competing for a radio
+            # they were already measured to lose. The clamp above bounds the
+            # damage; the authority question is separate. A write to the
+            # aircraft belongs to the console that holds command, exactly like a
+            # param write or a mission upload.
+            cid = msg.get("id")
+            if ws is not self._commander:
+                if cid is not None:
+                    await self._send(ws, {"type": "ack", "id": cid, "ok": False,
+                                          "result": -1, "text": "not commander"})
+                return
             self._misc_queue.put({"kind": "stream", "msgId": msg.get("msgId"), "hz": msg.get("hz", 0)})
 
         elif mtype in ("mission_push", "fence_push", "rally_push"):

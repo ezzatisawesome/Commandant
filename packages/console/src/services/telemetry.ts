@@ -434,9 +434,32 @@ export class TelemetryClient {
 		});
 	}
 
-	/** Enable/disable a MAVLink stream at a rate (hz=0 disables). Fire-and-forget. */
-	setStream(msgId: number, hz: number) {
-		this.send({ type: "stream", msgId, hz });
+	/** Enable/disable a MAVLink stream at a rate (hz=0 disables).
+	 *
+	 *  Carries an `id` so the result comes back. This is not a local display
+	 *  preference: it sends SET_MESSAGE_INTERVAL, which changes what the vehicle
+	 *  transmits, for every client, out of a finite link budget — so gs gates it
+	 *  on command authority and may clamp the rate to the link's budget. Sent
+	 *  fire-and-forget, a refusal or a clamp was invisible and the operator just
+	 *  saw nothing happen. */
+	setStream(msgId: number, hz: number): Promise<AckMessage> {
+		return new Promise((resolve, reject) => {
+			if (IS_VIEW) {
+				reject(new Error("read-only view"));
+				return;
+			}
+			if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+				reject(new Error("not connected"));
+				return;
+			}
+			const id = uuidv4();
+			const timer = setTimeout(() => {
+				this.pending.delete(id);
+				reject(new Error("timeout"));
+			}, COMMAND_TIMEOUT_MS);
+			this.pending.set(id, { resolve, reject, timer });
+			this.send({ type: "stream", id, msgId, hz });
+		});
 	}
 
 	private resolveParamAck(ack: ParamAckMessage) {

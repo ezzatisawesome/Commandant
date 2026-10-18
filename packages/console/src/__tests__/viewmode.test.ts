@@ -58,11 +58,13 @@ describe("view mode is read-only by construction", () => {
 			client.pushFence([]),
 			client.pushRally([]),
 			client.takeCommand(),
+			// setStream returns a promise now: it is authority-gated and the rate
+			// may be clamped, so the caller is told what happened.
+			client.setStream(30, 10),
 		];
 		client.refreshParams();
 		client.pullMission();
 		client.setCurrentMissionItem(2);
-		client.setStream(30, 10);
 		expect(ws().sent).toEqual([]);
 		// The promise-returning ones must settle IMMEDIATELY, not hang until a
 		// timeout. send() drops the frame in view mode, so a push that waits for
