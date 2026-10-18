@@ -100,6 +100,29 @@ whatever induces it.
 | 5 % loss (3 seeds) | 10–39 kickoffs; 2 of 3 never completed | **1 kickoff, 11–20 s, 3/3 ok** |
 | 10 % loss (3 seeds) | — | **1 kickoff, 18–27 s, 3/3 ok** |
 
+**Known limits, measured** (3.4 kB/s / 120 ms, 40-item mission, 400 params).
+Past 10 % loss things fail, and the point of the table is that they now fail
+*loudly* — a reported `timeout` the operator can act on, not a livelock:
+
+| loss | arm | mission upload | param refresh |
+|---|---|---|---|
+| ≤ 5 % | ok, <1.5 s | ok, 11–20 s | ok, ~10 s |
+| 10 % | ok, 0.3 s | ok, 21 s | ok, 12.7 s |
+| 20 % | ok, 0.3 s | **timeout at 31 s** | ok, 27.8 s |
+| 30 % | **timeout at 3.2 s** | **timeout at 6.7 s** | ok, 31.7 s |
+
+Arm gets `CMD_MAX_TRIES × CMD_RETRY_MS` = 3 s, which is why it is the first
+thing to go. That was left alone deliberately: 20–30 % loss is not a usable
+flight link, and retuning retry constants to survive it would be fitting them to
+an extreme at the cost of how fast a real failure is reported.
+
+**Not a problem, checked:** the 25 Hz telemetry broadcast. 861 B/frame, 11.5 µs
+to serialise, 21 kB/s and 0.03 % CPU per client; six clients on the hub come to
+126 kB/s, ~6 % of what a Pi's WiFi sustains. 38 % of each frame is fields that
+actually move at 25 Hz, so there is ~13 kB/s/client of redundancy — real, and
+far too small to be worth a dirty-field protocol. Measured because it looked
+like the obvious next optimisation; it is not one.
+
 `radio_soak.py` is a soak tool, not a unit test — stochastic and minutes per
 run, so deliberately outside the pytest suite. Run it when changing a protocol
 state machine or any timing constant. It exits non-zero on a failure *or* on an
