@@ -77,54 +77,13 @@ export function groupAgeMs(
 	return isNum(a) ? a : null;
 }
 
-/**
- * Solve the wind triangle from heading/airspeed and track/groundspeed.
- *
- * NOT used by the app: wind comes from PX4's EKF2 via WIND_COV, which fuses the
- * same inputs with a sideslip model and reports an uncertainty. This is kept as
- * a documented fallback for a vehicle that reports no WIND_COV, and because the
- * identity below is what makes the estimator's output checkable.
- *
- *   ground velocity = air velocity + wind
- *
- * Air velocity is airspeed along the *heading* (where the nose points); ground
- * velocity is groundspeed along the *track* (where the aircraft actually goes).
- * The difference is the wind. Reported as the direction it blows FROM, because
- * that is what every wind report in aviation means.
- */
-export function solveWind(
-	headingDeg: number, airspeedMps: number,
-	trackDeg: number, groundspeedMps: number,
-): Wind | null {
-	if (![headingDeg, airspeedMps, trackDeg, groundspeedMps].every(isNum)) return null;
-	// Components in a north/east frame.
-	const ax = airspeedMps * Math.cos(headingDeg * DEG);   // north
-	const ay = airspeedMps * Math.sin(headingDeg * DEG);   // east
-	const gx = groundspeedMps * Math.cos(trackDeg * DEG);
-	const gy = groundspeedMps * Math.sin(trackDeg * DEG);
-	const wx = gx - ax, wy = gy - ay;                      // wind vector (toward)
-	const speedMps = Math.hypot(wx, wy);
-	// Blowing TOWARD atan2(wy,wx); FROM is the reciprocal.
-	const towardDeg = (Math.atan2(wy, wx) * RAD + 360) % 360;
-	return {
-		fromDeg: (towardDeg + 180) % 360,
-		speedMps,
-		driftDeg: angleDiffDeg(trackDeg, headingDeg),
-	};
-}
-
-/** Track (course over ground) from two consecutive fixes, or null if the aircraft
- *  has not moved far enough for the bearing to be meaningful rather than noise. */
-export function trackFromFixes(
-	prevLat: number, prevLon: number, lat: number, lon: number,
-	minMoveM = 1.0,
-): number | null {
-	if (![prevLat, prevLon, lat, lon].every(isNum)) return null;
-	if (distanceM(prevLat, prevLon, lat, lon) < minMoveM) return null;
-	return bearingDeg(prevLat, prevLon, lat, lon);
-}
-
-// --- solar geometry -----------------------------------------------------------
+// The hand-rolled wind triangle and the differenced-position track used to live
+// here. Both are gone, and deliberately not kept "just in case": wind now comes
+// from PX4's EKF2 (WIND_COV) and track from GLOBAL_POSITION_INT's velocity,
+// because the local versions were measured inventing 8.6 m/s of wind out of GPS
+// noise at a 1.3 m baseline. Leaving a second implementation in the tree, alive
+// only through its own tests, is how a reader comes to believe there are two
+// wind sources and starts wondering which one the HUD is showing.
 
 export interface SunPosition {
 	/** Degrees true, 0..360: the compass direction of the sun. */
