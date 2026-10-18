@@ -81,6 +81,15 @@ fixed (`packages/gs/tests/test_flight_ready.py`, 14 tests).
    the EKF wind estimate are simply never populated, with no error. The dialect
    is now rebound explicitly.
 
+**The frame did not change (2026-10-18):** the `_on_mav` lock-scope split was
+the largest structural change of this pass, and the emitted frame is the
+console's contract. `scripts/frame_diff.py` feeds one identical 12-message
+MAVLink sequence into the working tree and into any git ref and diffs the
+resulting frame field by field: against `657fe0f`, the commit this pass started
+from, **39 fields identical, 0 changed, 0 removed**. Unit tests cover those
+branches one at a time; this is the question a reviewer of a restructuring
+actually has.
+
 **Relay hardening, labelled as such (2026-10-18):** two things found by reading
 the one internet-facing component rather than measured as failures. The bearer
 token was compared with `!=`; a timing attack across a WebSocket handshake is

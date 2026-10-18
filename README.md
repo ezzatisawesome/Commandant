@@ -114,6 +114,17 @@ uv run python scripts/day_in_the_life.py --net                      # fat pipe
 uv run python scripts/day_in_the_life.py --loss 0.08                # a worse day
 ```
 
+**Did a refactor change the frame?** The emitted frame is the console's
+contract, and it is built by a long branch that gets restructured. This feeds one
+identical MAVLink sequence into the working tree and into any git ref, and diffs
+the resulting frame field by field. Non-zero if a pre-existing field changed;
+new fields are reported, not failed.
+
+```sh
+cd packages/gs && uv run python scripts/frame_diff.py              # vs HEAD~1
+uv run python scripts/frame_diff.py --ref 657fe0f                  # vs any ref
+```
+
 **Where does it break?** Hammers one operation at a time to find the boundary.
 
 ```sh
