@@ -444,6 +444,70 @@ def mission_item_fields(seq: int, item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+FENCE_POLYGON_MIN_VERTICES = 3   # two points bound no area
+
+
+def validate_fence_plan(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Check a FENCE plan and return it with `vertexCount` derived by gs.
+
+    `param1` on a fence vertex is, per MAVLink, how many vertices PX4 should
+    read as belonging to *this* polygon; consecutive same-kind vertices are one
+    shape, so a flat list can carry several. That makes the count structural,
+    not decorative: get it wrong and PX4 mis-slices the whole fence.
+
+    gs used to take it from the client and forward whatever arrived. Measured on
+    the pre-fix code, every one of these was accepted and acked `accepted`:
+    a 2-vertex "polygon" (param1=[2,2]), a 1-vertex one, a client claiming 7 for
+    3 vertices, a client omitting the count entirely (param1=[0,0,0], i.e. "this
+    polygon has no vertices"), and a circle of radius 0. In each case the
+    operator is told they have a geofence when they do not -- and the whole
+    point of a fence is that it is there when something else has already gone
+    wrong, so `accepted` has to mean it.
+
+    gs is the authority on the wire: it serves the console and anything else
+    that ever speaks this protocol, so it cannot depend on a client computing
+    this correctly. The count is therefore DERIVED here. A client that supplied
+    a different number is refused rather than silently corrected -- if the two
+    ends disagree about what the fence is, uploading either answer without
+    saying so is its own failure."""
+    out: list[dict[str, Any]] = []
+    for it in items:
+        if not isinstance(it, dict):
+            raise ValueError("fence item must be an object")
+        out.append({**it, "params": dict(it.get("params") or {})})
+
+    i = 0
+    while i < len(out):
+        kind = out[i].get("kind")
+        if kind in _FENCE_POLY_KINDS:
+            j = i
+            while j < len(out) and out[j].get("kind") == kind:
+                j += 1
+            count = j - i
+            if count < FENCE_POLYGON_MIN_VERTICES:
+                raise ValueError(
+                    f"item {i}: a polygon fence needs at least "
+                    f"{FENCE_POLYGON_MIN_VERTICES} vertices, got {count}")
+            for k in range(i, j):
+                claimed = out[k]["params"].get("vertexCount")
+                if claimed is not None and int(claimed) != count:
+                    raise ValueError(
+                        f"item {k}: client says vertexCount {int(claimed)} but this "
+                        f"polygon run has {count} vertices")
+                out[k]["params"]["vertexCount"] = count
+            i = j
+            continue
+        if kind in _FENCE_CIRCLE_KINDS:
+            try:
+                radius = float(out[i]["params"].get("radius") or 0)
+            except (TypeError, ValueError):
+                raise ValueError(f"item {i}: circle radius must be a number") from None
+            if radius <= 0:
+                raise ValueError(f"item {i}: a circle fence needs a radius > 0, got {radius:g}")
+        i += 1
+    return out
+
+
 def mission_item_to_console(msg: Any) -> dict[str, Any]:
     """Reverse-map a downloaded MISSION_ITEM_INT to the console item shape."""
     kind = _CMD_TO_KIND.get(msg.command, f"cmd_{msg.command}")
@@ -1141,6 +1205,10 @@ class Bridge:
             items = job.get("items") or []
             if not isinstance(items, list):
                 raise ValueError("items must be a list")
+            # A fence is checked before it goes anywhere, and its vertex counts
+            # are derived here rather than trusted (see validate_fence_plan).
+            if job["mtype"] == MAV_MISSION_TYPE_FENCE:
+                items = validate_fence_plan(items)
             fields = [mission_item_fields(i, it) for i, it in enumerate(items)]
         except (ValueError, TypeError, AttributeError) as exc:
             self._report_mission_ack(job.get("id"), ok=False, result=-1, text=str(exc), ack_type=ack_type)

@@ -238,6 +238,23 @@ gs → console: `fence {count,items}` / `rally {count,items}` /
 (Polygon vertices of one inclusion/exclusion set share the same `vertexCount` and
 are consecutive, per the MAVLink fence convention.)
 
+**gs derives `vertexCount`; it does not trust it.** The count is structural —
+`param1` tells PX4 how many of the following vertices are one polygon, so a
+wrong or absent value mis-slices the whole fence. gs computes it from the actual
+contiguous run. A client that supplies a *different* number is refused rather
+than silently corrected: if the two ends disagree about what the fence is,
+uploading either answer without saying so is its own failure. A client may
+simply omit it.
+
+**A fence gs can prove is not a fence is refused before it goes on the wire:**
+a polygon run with fewer than 3 vertices, or a circle with radius ≤ 0. These
+used to upload and come back `accepted`, which told the operator they had a
+geofence when they had nothing — and a fence exists to be there when something
+else has already gone wrong, so `accepted` has to mean it. The `fence_ack`
+`text` names the offending item. The console applies the same rule while
+authoring (the Upload button says why), but gs is the authority: it serves
+clients other than the console.
+
 ## Param metadata (Phase 2 completion)
 PX4's `parameters.json` (name/shortDesc/longDesc/min/max/units/type/default) is
 bundled with the console and matched to live `param` values by name — units,

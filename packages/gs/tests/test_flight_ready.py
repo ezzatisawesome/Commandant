@@ -760,3 +760,104 @@ def test_h8_frame_carries_a_wall_timestamp_and_a_monotone_one(ports):
 
     import asyncio
     asyncio.run(scenario())
+
+
+# --- H13: gs forwarded a fence it could prove was not a fence ---------------
+
+def _push_fence(b, conn, items):
+    """Queue a fence_push and run one service tick. Returns the ack dict, or
+    None if the upload actually started."""
+    acks = []
+    b._loop = type("L", (), {"call_soon_threadsafe":
+                             lambda s, fn, *a: acks.append(a[0])})()
+    b._mission_queue.put({"kind": "push", "id": "f1", "items": items,
+                          "mtype": bridgemod.MAV_MISSION_TYPE_FENCE,
+                          "rtype": "fence", "ack_type": "fence_ack"})
+    b._service_missions(conn)
+    return acks[0] if acks else None
+
+
+def _poly(n, kind="fence_inclusion", claim=None):
+    return [{"kind": kind, "lat": 37.40 + i * 0.01, "lon": -122.20,
+             **({"params": {"vertexCount": claim}} if claim is not None else {})}
+            for i in range(n)]
+
+
+@pytest.mark.parametrize("n", [1, 2])
+def test_h13_a_polygon_fence_needs_three_vertices(n):
+    """`param1` on a fence vertex is, per MAVLink, how many vertices PX4 should
+    read as belonging to this polygon. Two points bound no area, so a 1- or
+    2-vertex "polygon" is not a fence. gs forwarded it anyway and the operator
+    got `accepted` -- told they have a geofence when they have nothing. The
+    whole point of a fence is that it is there when something else has gone
+    wrong, so "accepted" has to mean it."""
+    b = _bridge()
+    ack = _push_fence(b, RecordingConn(), _poly(n, claim=n))
+    assert ack is not None and ack["ok"] is False, \
+        f"a {n}-vertex polygon was accepted as a fence"
+    assert "3" in ack["text"] and "vert" in ack["text"].lower(), ack["text"]
+    assert b._mission is None
+
+
+def test_h13_vertex_count_is_derived_by_gs_not_trusted_from_the_client():
+    """gs is the authority on the wire -- it serves the console, and anything
+    else that ever speaks this protocol. A client that omits `vertexCount`
+    (an older console) made gs send param1=0 for every vertex, which tells PX4
+    the polygon has no vertices. Derive it from the actual run instead."""
+    b = _bridge()
+    conn = RecordingConn()
+    ack = _push_fence(b, conn, _poly(4))          # no vertexCount supplied
+    assert ack is None, f"a valid 4-vertex fence was rejected: {ack}"
+    assert b._mission is not None
+    assert [f["param1"] for f in b._mission["items"]] == [4.0] * 4
+
+
+def test_h13_a_client_that_disagrees_about_the_count_is_refused_not_guessed_at():
+    """If the client's claim and the geometry disagree, the two ends disagree
+    about what the fence IS. gs derives the right number, but says so rather
+    than silently substituting it -- on a geofence, quietly uploading something
+    other than what was asked for is its own failure."""
+    b = _bridge()
+    ack = _push_fence(b, RecordingConn(), _poly(3, claim=7))
+    assert ack is not None and ack["ok"] is False
+    assert "7" in ack["text"] and "3" in ack["text"], ack["text"]
+
+
+def test_h13_a_zero_radius_circle_is_not_a_fence():
+    b = _bridge()
+    for radius in (0, -5):
+        ack = _push_fence(b, _bridge() and RecordingConn(),
+                          [{"kind": "fence_circle_inclusion", "lat": 37.4,
+                            "lon": -122.2, "params": {"radius": radius}}])
+        assert ack is not None and ack["ok"] is False, f"radius {radius} accepted"
+        assert "radius" in ack["text"].lower(), ack["text"]
+
+
+def test_h13_two_separate_polygons_each_get_their_own_count():
+    """Contiguous same-kind runs are separate polygons, which is how MAVLink
+    carries more than one fence shape in a flat list."""
+    b = _bridge()
+    conn = RecordingConn()
+    items = _poly(3, "fence_inclusion") + _poly(4, "fence_exclusion")
+    ack = _push_fence(b, conn, items)
+    assert ack is None, ack
+    assert [f["param1"] for f in b._mission["items"]] == [3.0] * 3 + [4.0] * 4
+
+
+def test_h13_a_valid_fence_and_a_mission_are_both_unaffected():
+    """The guard is fence-shaped: it must not touch an ordinary mission, whose
+    items have no vertexCount and whose count of 1 is perfectly legal."""
+    b = _bridge()
+    conn = RecordingConn()
+    ack = _push_fence(b, conn, _poly(3, claim=3))
+    assert ack is None and b._mission is not None
+    b._mission = None
+    acks = []
+    b._loop = type("L", (), {"call_soon_threadsafe":
+                             lambda s, fn, *a: acks.append(a[0])})()
+    b._mission_queue.put({"kind": "push", "id": "m1",
+                          "items": [{"kind": "waypoint", "lat": 1, "lon": 2, "alt": 30}],
+                          "mtype": bridgemod.MAV_MISSION_TYPE_MISSION,
+                          "rtype": "mission", "ack_type": "mission_ack"})
+    b._service_missions(conn)
+    assert acks == [] and b._mission is not None, "a 1-item mission was rejected"

@@ -16,6 +16,8 @@ export const $geoEdit = atom<boolean>(false);
 export const $geoPlaceKind = atom<FenceKind | "rally">("fence_inclusion");
 
 const POLYGON_KINDS: FenceKind[] = ["fence_inclusion", "fence_exclusion"];
+/** Two points bound no area. Mirrors FENCE_POLYGON_MIN_VERTICES in gs. */
+export const FENCE_POLYGON_MIN_VERTICES = 3;
 const CIRCLE_KINDS: FenceKind[] = ["fence_circle_inclusion", "fence_circle_exclusion"];
 
 export function isPolygonKind(kind: FenceKind): boolean {
@@ -95,6 +97,39 @@ export function fenceItemsForPush(): FenceItem[] {
 		}
 	}
 	return out;
+}
+
+/** Why this fence cannot be uploaded, or null if it can.
+ *
+ *  gs refuses the same geometry and says why, which is the part that matters:
+ *  a fence exists to be there when something else has already gone wrong, so
+ *  "accepted" has to mean it. This is the same rule applied at authoring time,
+ *  so the operator finds out while placing vertices instead of after a round
+ *  trip to the aircraft. Deliberately a mirror, not the only check — the
+ *  authority is gs, which serves clients other than this one. */
+export function fenceGeometryProblem(items: FenceItem[] = $fenceItems.get()): string | null {
+	let i = 0;
+	while (i < items.length) {
+		const kind = items[i].kind;
+		if (isPolygonKind(kind)) {
+			let j = i;
+			while (j < items.length && items[j].kind === kind) j++;
+			const count = j - i;
+			if (count < FENCE_POLYGON_MIN_VERTICES) {
+				const what = kind === "fence_exclusion" ? "exclusion" : "inclusion";
+				return `the ${what} polygon at #${items[i].seq} has ${count} `
+					+ `vertex${count === 1 ? "" : "es"} — a polygon needs ${FENCE_POLYGON_MIN_VERTICES}`;
+			}
+			i = j;
+			continue;
+		}
+		if (isCircleKind(kind)) {
+			const r = items[i].params?.radius ?? 0;
+			if (!(r > 0)) return `the circle at #${items[i].seq} has no radius`;
+		}
+		i++;
+	}
+	return null;
 }
 
 // --- rally ------------------------------------------------------------------

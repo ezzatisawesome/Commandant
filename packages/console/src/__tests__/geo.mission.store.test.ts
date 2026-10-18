@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach } from "vitest";
 
-import { $fenceItems, addFencePoint, fenceItemsForPush, clearFence, removeFenceItem } from "@/stores/geo.store";
+import {
+	$fenceItems, addFencePoint, fenceItemsForPush, clearFence, removeFenceItem,
+	setFenceItems, fenceGeometryProblem,
+} from "@/stores/geo.store";
 import { $missionItems, addWaypoint, removeItem, reorderItem, clearMission, updateItem } from "@/stores/mission.store";
 
 describe("fence push shaping", () => {
@@ -44,5 +47,46 @@ describe("mission store", () => {
 		addWaypoint(1, 1, 50);
 		updateItem(0, { alt: 80 });
 		expect($missionItems.get()[0].alt).toBe(80);
+	});
+});
+
+describe("a fence that is not a fence is refused at authoring time (gs fault H13)", () => {
+	it("a polygon with fewer than 3 vertices is named, with its seq", () => {
+		setFenceItems([]);
+		addFencePoint("fence_inclusion", 37.4, -122.2);
+		expect(fenceGeometryProblem()).toMatch(/1 vertex .*needs 3/);
+		addFencePoint("fence_inclusion", 37.41, -122.2);
+		expect(fenceGeometryProblem()).toMatch(/2 vertexes .*needs 3/);
+		addFencePoint("fence_inclusion", 37.41, -122.1);
+		expect(fenceGeometryProblem()).toBeNull();
+	});
+
+	it("says which polygon, when there are several", () => {
+		setFenceItems([]);
+		for (const [la, lo] of [[1, 1], [1, 2], [2, 2]]) addFencePoint("fence_inclusion", la, lo);
+		addFencePoint("fence_exclusion", 5, 5);
+		addFencePoint("fence_exclusion", 5, 6);
+		const problem = fenceGeometryProblem();
+		expect(problem).toMatch(/exclusion/);
+		expect(problem).toMatch(/#3/);        // the run starts at seq 3
+	});
+
+	it("a circle with no radius is refused", () => {
+		setFenceItems([{ seq: 0, kind: "fence_circle_inclusion", lat: 1, lon: 1, params: { radius: 0 } }]);
+		expect(fenceGeometryProblem()).toMatch(/no radius/);
+		setFenceItems([{ seq: 0, kind: "fence_circle_inclusion", lat: 1, lon: 1, params: { radius: 150 } }]);
+		expect(fenceGeometryProblem()).toBeNull();
+	});
+
+	it("an empty fence is not a geometry problem (there is nothing to upload)", () => {
+		setFenceItems([]);
+		expect(fenceGeometryProblem()).toBeNull();
+	});
+
+	it("circles and polygons mix without confusing the run detection", () => {
+		setFenceItems([]);
+		addFencePoint("fence_circle_exclusion", 9, 9);   // defaults to radius 100
+		for (const [la, lo] of [[1, 1], [1, 2], [2, 2]]) addFencePoint("fence_inclusion", la, lo);
+		expect(fenceGeometryProblem()).toBeNull();
 	});
 });

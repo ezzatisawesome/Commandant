@@ -9,6 +9,7 @@ import {
 	$geoEdit,
 	$geoPlaceKind,
 	fenceItemsForPush,
+	fenceGeometryProblem,
 	isCircleKind,
 	updateFenceItem,
 	removeFenceItem,
@@ -77,7 +78,10 @@ export default function GeoPanel() {
 
 	const count = fence.length + rally.length;
 	// Fence and rally upload separately but are gated identically.
-	const fenceBlocked = uploadBlockedReason({ live, commander, count: fence.length });
+	// Authority/link first (what the operator can act on most often), then the
+	// geometry gs would refuse anyway — said here so they see it while authoring.
+	const fenceBlocked = uploadBlockedReason({ live, commander, count: fence.length })
+		?? fenceGeometryProblem(fence);
 	const rallyBlocked = uploadBlockedReason({ live, commander, count: rally.length });
 
 	return (
