@@ -224,3 +224,117 @@ def cmd_update(args: Any) -> int:
         print("== restart services ==")
         _sudo(["systemctl", "restart", *SERVICES])
     return rc
+
+
+# --- the rest of the lifecycle ----------------------------------------------
+#
+# install/update were the only verbs that existed, while the package
+# description and the roadmap both promised status/up/down/logs/uninstall. On a
+# field hub these are the ones actually reached for: `commandant status` and
+# `commandant logs` are what you type when the page does not load, and they were
+# an argparse error.
+#
+# Thin by design. Each is a few systemctl or journalctl calls, and the value is
+# that the operator does not have to remember two unit names, a port and a
+# journal filter while standing in a field.
+
+def _unit_state(unit: str) -> tuple[str, str]:
+    """(active-state, enabled-state) for a unit, without needing root."""
+    def ask(verb: str) -> str:
+        # `status` must work wherever it is typed, including off a Pi -- somebody
+        # checking the tool on a laptop should get an answer, not a traceback
+        # from a missing systemctl. The same guard covers a Pi where systemd is
+        # not where it is expected.
+        try:
+            r = subprocess.run(["systemctl", verb, unit], capture_output=True, text=True)
+        except (FileNotFoundError, OSError):
+            return "no systemd"
+        return (r.stdout or r.stderr).strip() or "unknown"
+    return ask("is-active"), ask("is-enabled")
+
+
+def cmd_status(args: Any) -> int:
+    """What is running, and where to look next. Read-only."""
+    o = _opts(args)
+    print("== commandant hub ==")
+    worst = 0
+    for unit in SERVICES:
+        active, enabled = _unit_state(unit)
+        flag = "" if active == "active" else "   <-- not running"
+        print(f"   {unit:18s} {active:10s} ({enabled}){flag}")
+        if active not in ("active", "no systemd"):
+            worst = 1
+    for unit in ("hostapd", "dnsmasq", "avahi-daemon"):
+        active, _ = _unit_state(unit)
+        print(f"   {unit:18s} {active}")
+        if active not in ("active", "no systemd"):
+            worst = 1
+
+    # The address the operator actually types, and whether wlan0 has it.
+    try:
+        ip = subprocess.run(["ip", "-4", "-o", "addr", "show", "dev", "wlan0"],
+                            capture_output=True, text=True).stdout.strip()
+    except (FileNotFoundError, OSError):
+        ip = ""
+    print(f"\n   wlan0   {ip or 'no address — the AP is not up'}")
+    print(f"   expect  {o['ap_ip']}/24, and http://{o['hostname']}.local/")
+
+    # gs knows things systemd cannot: which transport it found, what budget it
+    # derived, whether it has been quietly reopening the link. Pointed at rather
+    # than duplicated -- one source for that answer, not two that can disagree.
+    print(f"\n   the daemon's own view:  "
+          f"{o['repo']}/packages/gs/.venv/bin/python -m gs --status")
+    print(f"   recent logs:            commandant logs")
+    return worst
+
+
+def cmd_up(args: Any) -> int:
+    """Start the hub's services (the AP and mDNS are left to systemd at boot)."""
+    _sudo(["systemctl", "start", *SERVICES])
+    return cmd_status(args)
+
+
+def cmd_down(args: Any) -> int:
+    """Stop the services. Deliberately leaves the AP up, so a hub you are
+    standing next to does not drop its WiFi out from under your laptop."""
+    _sudo(["systemctl", "stop", *SERVICES])
+    return cmd_status(args)
+
+
+def cmd_logs(args: Any) -> int:
+    """Follow both services' journals together, which is the only view where a
+    console error and the daemon's reaction to it appear in order."""
+    cmd = ["journalctl", "-u", SERVICES[0], "-u", SERVICES[1], "-n", str(args.lines)]
+    if args.follow:
+        cmd.append("-f")
+    return _sudo(cmd, check=False)
+
+
+def cmd_uninstall(args: Any) -> int:
+    """Remove what install added, and nothing else.
+
+    The repo and the service user's home are left alone: this takes the hub
+    apart, it does not delete work. The AP config goes, because leaving a
+    machine broadcasting an open-ish access point nobody is maintaining is worse
+    than leaving a file behind."""
+    if not args.yes:
+        print("This stops and removes the commandant services, the AP config "
+              "(hostapd/dnsmasq) and the mDNS record.\n"
+              f"The repo at {_opts(args)['repo']} is NOT touched.\n"
+              "Re-run with --yes to proceed.", file=sys.stderr)
+        return 2
+    print("== stopping services ==")
+    _sudo(["systemctl", "disable", "--now", *SERVICES], check=False)
+    print("== removing files ==")
+    for path in ("/etc/systemd/system/gs.service",
+                 "/etc/systemd/system/console.service",
+                 "/etc/avahi/services/commandant.service",
+                 "/etc/dnsmasq.d/commandant.conf",
+                 "/etc/hostapd/hostapd.conf"):
+        _sudo(["rm", "-f", path], check=False)
+    _sudo(["systemctl", "disable", "--now", "hostapd", "dnsmasq"], check=False)
+    _sudo(["systemctl", "daemon-reload"], check=False)
+    print("\n== done ==\nThe static wlan0 block in /etc/dhcpcd.conf is marked "
+          "`# commandant-hub` and was left in place; remove it by hand if you "
+          "want the interface back on DHCP.")
+    return 0

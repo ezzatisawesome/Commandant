@@ -25,6 +25,8 @@ def _captured(monkeypatch) -> list[list[str]]:
 
 class _Done:
     returncode = 0
+    stdout = ""
+    stderr = ""
 
 
 def test_as_user_runs_as_the_service_user_not_the_invoker(monkeypatch):
@@ -166,3 +168,82 @@ def test_gs_env_ships_an_endpoint_so_the_unit_never_gets_an_empty_flag():
     line = next(l for l in env.splitlines() if l.startswith("GS_MAVLINK="))
     assert line.split("=", 1)[1].strip(), "GS_MAVLINK ships empty"
     assert next(l for l in env.splitlines() if l.startswith("GS_WS_PORT=")).split("=")[1].strip()
+
+
+# --- the rest of the lifecycle, which the package promised and did not have --
+
+def test_every_verb_the_package_description_claims_actually_exists():
+    """pyproject's description and the roadmap both listed
+    install/update/status/up/down/logs/uninstall. Only the first two existed, so
+    `commandant status` — the thing you type in a field when the page does not
+    load — was an argparse error."""
+    import tomllib
+    from commandant_cli import main as cli_main
+
+    described = tomllib.load(open(Path(__file__).parent.parent / "pyproject.toml", "rb"))
+    claimed = [w.strip() for w in
+               described["project"]["description"].split("(")[1].rstrip(")").split("/")]
+    assert len(claimed) == 7, claimed
+    for verb in claimed:
+        with pytest.raises(SystemExit) as e:
+            cli_main.main([verb, "--help"])
+        assert e.value.code == 0, f"`commandant {verb}` is not a command"
+
+
+def test_uninstall_refuses_without_an_explicit_yes(capsys):
+    from commandant_cli import main as cli_main
+    rc = cli_main.main(["uninstall"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "--yes" in err
+    assert "NOT touched" in err, "say what it will not delete"
+
+
+def test_uninstall_leaves_the_repo_alone(monkeypatch):
+    """It takes the hub apart; it does not delete work."""
+    calls = _captured(monkeypatch)
+    from commandant_cli import main as cli_main
+    monkeypatch.setattr(hub.os, "geteuid", lambda: 0)
+    cli_main.main(["uninstall", "--yes"])
+    flat = " ".join(" ".join(c) for c in calls)
+    assert "/opt/commandant" not in flat, "touched the repo"
+    assert "gs.service" in flat and "hostapd.conf" in flat
+
+
+def test_status_reports_nonzero_when_something_is_not_running(monkeypatch):
+    """So it can be used as a check, not only read."""
+    monkeypatch.setattr(hub, "_unit_state", lambda u: ("inactive", "enabled"))
+    monkeypatch.setattr(hub.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"stdout": "", "stderr": "",
+                                                       "returncode": 0})())
+    from commandant_cli import main as cli_main
+    assert cli_main.main(["status"]) == 1
+    monkeypatch.setattr(hub, "_unit_state", lambda u: ("active", "enabled"))
+    assert cli_main.main(["status"]) == 0
+
+
+def test_down_leaves_the_access_point_up(monkeypatch):
+    """Stopping the services must not drop the WiFi out from under the laptop
+    of whoever is standing next to the hub."""
+    calls = _captured(monkeypatch)
+    monkeypatch.setattr(hub, "_unit_state", lambda u: ("active", "enabled"))
+    monkeypatch.setattr(hub.os, "geteuid", lambda: 0)
+    from commandant_cli import main as cli_main
+    cli_main.main(["down"])
+    stops = [c for c in calls if "stop" in c]
+    flat = " ".join(" ".join(c) for c in stops)
+    assert "gs.service" in flat
+    assert "hostapd" not in flat, "stopped the access point"
+
+
+def test_logs_follows_both_units_together(monkeypatch):
+    """A console error and the daemon's reaction to it only appear in order in
+    one view."""
+    calls = _captured(monkeypatch)
+    monkeypatch.setattr(hub.os, "geteuid", lambda: 0)
+    from commandant_cli import main as cli_main
+    cli_main.main(["logs", "-f", "-n", "50"])
+    c = calls[-1]
+    assert c[0] == "journalctl"
+    assert c.count("-u") == 2
+    assert "-f" in c and "50" in c
