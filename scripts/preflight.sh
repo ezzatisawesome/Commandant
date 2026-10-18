@@ -35,6 +35,9 @@ echo "preflight — everything checkable without an aircraft"
 echo
 stage "gs protocol suite"   sh -c 'cd packages/gs && uv run pytest -q'
 stage "relay suite"         sh -c 'cd packages/relay && uv run pytest -q'
+# The hub installer. It provisions the field deployment and has never run on
+# hardware, so the parts that are pure logic are the only ones a gate can hold.
+stage "cli hub suite"       sh -c 'cd packages/cli && uv run --group dev pytest -q'
 stage "console suite"       sh -c 'cd packages/console && npm test --silent'
 stage "console typecheck"   sh -c 'cd packages/console && npm run typecheck --silent'
 stage "console prod build"  sh -c 'cd packages/console && npm run build'

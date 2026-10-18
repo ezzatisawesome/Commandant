@@ -183,8 +183,30 @@ def _ensure_dhcpcd_static(o: dict[str, str]) -> None:
     p.communicate(block.encode())
 
 
+def _current_user() -> str:
+    try:
+        import pwd
+        return pwd.getpwuid(os.geteuid()).pw_name
+    except (ImportError, KeyError):
+        return ""
+
+
 def _as_user(user: str, cmd: list[str], *, cwd: Path | None = None) -> None:
-    full = cmd if os.geteuid() != 0 else ["sudo", "-u", user, *cmd]
+    """Run a command AS `user`, unless we already are them.
+
+    The condition was the other way round -- `cmd if os.geteuid() != 0` -- which
+    is the opposite of what `_sudo` above does and breaks the documented install
+    flow. Invoked the normal way (as `pi`, with sudo available) it ran the build
+    steps as the INVOKING user, immediately after
+    `chown -R commandant:commandant` had handed the repo to the service user. So
+    `python -m venv` wrote into a tree it no longer owned and the install died
+    at the build step, every time, on a real Pi. Never caught because this file
+    has never been run.
+
+    `-H` sets HOME to the target user's, which npm needs: `sudo -u` alone keeps
+    the invoker's HOME, so the build would populate root's or pi's npm cache --
+    or fail outright for a service account whose shell is nologin."""
+    full = cmd if _current_user() == user else ["sudo", "-u", user, "-H", *cmd]
     print(f"   $ {' '.join(full)}")
     subprocess.run(full, check=True, cwd=str(cwd) if cwd else None)
 

@@ -6,6 +6,16 @@ Description=Commandant console (Next.js production server on :80)
 After=network-online.target
 Wants=network-online.target
 
+# Restart=always means always. Without this it does not: systemd's default
+# start limit is 5 starts per 10 s, and RestartSec=2 hits exactly that, so a
+# service that crash-loops for ten seconds at boot enters `failed` and STAYS
+# there until somebody ssh's in. On a hub whose premise is "turn the plane on,
+# turn the hub on, open the page", the likeliest cause of such a loop is
+# transient -- the radio enumerating a moment late, a stale instance still
+# holding the port -- and permanently failing on it is the worst answer
+# available. Zero disables the limit, so it retries until it works.
+StartLimitIntervalSec=0
+
 [Service]
 Type=simple
 # next workspace binary is hoisted to the monorepo root node_modules by npm
