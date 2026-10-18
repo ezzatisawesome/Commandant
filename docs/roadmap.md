@@ -72,6 +72,20 @@ fixed (`packages/gs/tests/test_flight_ready.py`, 14 tests).
    the EKF wind estimate are simply never populated, with no error. The dialect
    is now rebound explicitly.
 
+**The relay uplink on a flaky hotspot (2026-10-18):** the documented claims —
+never block the 25 Hz loop, never grow unbounded — hold. MEASURED with no uplink
+and 5000 frames plus 5000 events offered: one telemetry slot (latest-wins) and
+the event queue at its 256 cap, dropping oldest; 9743 dropped and nothing
+retained that was superseded. `offer()` is also a no-op before the uplink task
+exists and swallows a closed loop, so it cannot raise into the mav thread.
+Pinned by tests rather than left as a comment.
+
+One real fault: `startedAt` on the `flight` message was stamped at **connect**
+time, and `flight` is re-announced on every reconnect *and* retained by the
+relay for late joiners. A hotspot that drops every few minutes kept moving the
+flight's start forward, so a viewer opening the hosted page three hours in was
+told the flight began seconds ago. Captured once at construction now.
+
 **"Take command" could not take command (2026-10-18):** gs granted authority to
 the first claimer and held it until that socket dropped. The hub's premise is
 "join the WiFi, open the page", so several people do — and whoever loaded first

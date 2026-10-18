@@ -8,6 +8,7 @@ than by the sim's own JSON feed.
 
 from __future__ import annotations
 
+import json
 import socket
 import threading
 import time
@@ -17,7 +18,7 @@ import pytest
 from pymavlink import mavutil
 
 from gs import bridge as bridgemod
-from gs.bridge import Bridge
+from gs.bridge import Bridge, dumps
 
 m = mavutil.mavlink
 
@@ -1546,3 +1547,66 @@ def test_h20_a_plain_claim_still_never_steals_authority(ports):
 
     import asyncio
     asyncio.run(scenario())
+
+
+# --- H21: the relay uplink on a flaky field hotspot ------------------------
+
+def test_h21_the_flight_start_does_not_move_on_every_reconnect():
+    """`flight` is re-announced on each reconnect, and the relay RETAINS it for
+    late joiners. Stamping `startedAt` at connect time meant a hotspot that
+    drops every few minutes kept moving the flight's start forward: a viewer
+    opening the hosted page three hours in was told the flight began seconds
+    ago, and any elapsed time derived from it was wrong."""
+    from gs.relay import RelayPublisher
+    p = RelayPublisher(url="wss://example/publish", token="t", flight_id="coyote-hill")
+    first = p.started_at_ms
+    time.sleep(0.05)
+    assert p.started_at_ms == first, "the flight start moved without a new flight"
+    # It is a wall-clock epoch, because it is a timestamp a viewer displays.
+    assert abs(first - int(time.time() * 1000)) < 5000
+
+
+def test_h21_the_uplink_stays_bounded_while_it_is_down():
+    """The two things the uplink must never do are block the 25 Hz loop and grow
+    without bound while the internet is gone. The second is the one a test can
+    pin: a field hotspot can be down for hours.
+
+    MEASURED with no uplink and 5000 frames + 5000 events offered: one telemetry
+    slot (latest-wins — an unsent frame is worthless once superseded) and the
+    event queue at its cap, dropping oldest."""
+    import asyncio
+
+    from gs.relay import EVENT_QUEUE_MAX, RelayPublisher
+
+    async def scenario():
+        p = RelayPublisher(url="wss://example/publish", token="t", hz=5.0)
+        p._loop = asyncio.get_running_loop()
+        p._wake = asyncio.Event()
+        for i in range(5000):
+            p._enqueue(dumps({"type": "telemetry", "i": i}), "telemetry")
+            p._enqueue(dumps({"type": "statustext", "i": i}), "statustext")
+        assert len(p._latest) == 1, p._latest.keys()
+        assert len(p._events) == EVENT_QUEUE_MAX, len(p._events)
+        # Latest-wins means the frame still queued is the NEWEST, not the oldest.
+        assert json.loads(p._latest["telemetry"])["i"] == 4999
+        # The event queue drops the oldest, so the newest are what survive.
+        assert json.loads(p._events[-1])["i"] == 4999
+        assert p.dropped > 9000
+
+    asyncio.run(scenario())
+
+
+def test_h21_offer_never_raises_even_before_the_loop_exists():
+    """`offer` is called from the mav thread and the broadcast loop on every
+    frame. It must never raise into either of them -- including before the
+    uplink task has started, and during shutdown."""
+    from gs.relay import RelayPublisher
+    p = RelayPublisher(url="wss://example/publish", token="t")
+    assert p._loop is None
+    p.offer(dumps({"type": "telemetry"}), "telemetry")   # must be a no-op
+
+    class ClosedLoop:
+        def call_soon_threadsafe(self, *a):
+            raise RuntimeError("Event loop is closed")
+    p._loop = ClosedLoop()
+    p.offer(dumps({"type": "telemetry"}), "telemetry")   # must be swallowed
