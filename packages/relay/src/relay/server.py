@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 import time
 from typing import Any
 
@@ -119,7 +120,13 @@ class Relay:
         if self._publisher is not None:
             # A second hub claiming the stream is almost always a stale socket
             # from a reconnect; the newcomer wins and the old one is closed.
-            old, self._publisher = self._publisher, None
+            # Claim the slot BEFORE awaiting the old socket's close. Awaiting
+            # with `_publisher` set to None left a window in which a third
+            # connection saw the slot free, took it, and was then overwritten
+            # when this one resumed -- two hubs interleaving frames into one
+            # stream. Unreachable with a single hub, reachable with one
+            # reconnecting fast.
+            old, self._publisher = self._publisher, ws
             await old.close(code=4000, reason="superseded by a new publisher")
         self._publisher = ws
         print(f"[relay] publisher connected ({len(self._viewers)} viewers watching)")
@@ -182,7 +189,12 @@ class Relay:
         path = getattr(ws.request, "path", "/") if ws.request else "/"
         if path.startswith("/publish"):
             token = self._token_from(ws, path)
-            if not self.token or token != self.token:
+            # Constant-time, and fail closed on an unset token. A timing attack
+            # across a WebSocket handshake is impractical -- network jitter
+            # dwarfs a string compare -- so this is hygiene rather than a
+            # measured hole. It is also free, and this is the one component
+            # exposed to the internet.
+            if not self.token or not secrets.compare_digest(token or "", self.token):
                 await ws.close(code=4003, reason="bad token")
                 return
             await self._handle_publisher(ws)

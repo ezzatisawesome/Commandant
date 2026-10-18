@@ -81,6 +81,17 @@ fixed (`packages/gs/tests/test_flight_ready.py`, 14 tests).
    the EKF wind estimate are simply never populated, with no error. The dialect
    is now rebound explicitly.
 
+**Relay hardening, labelled as such (2026-10-18):** two things found by reading
+the one internet-facing component rather than measured as failures. The bearer
+token was compared with `!=`; a timing attack across a WebSocket handshake is
+impractical (network jitter dwarfs a string compare) so this is hygiene, but
+`compare_digest` is free. And a superseding publisher cleared `_publisher` to
+None *before* awaiting the old socket's close, leaving a window in which a third
+connection saw the slot free, took it, and was overwritten when the first
+resumed — two hubs interleaving frames into one stream. Unreachable with a
+single hub, reachable with one reconnecting fast. An unset token already failed
+closed, and now has a behavioural test saying so rather than an inspected one.
+
 **The relay's slow-viewer protection was dead code (2026-10-18):** the relay
 documents four constraints in priority order, and the third — "a slow viewer
 cannot affect the hub or other viewers" — was implemented in a `_fan_out`

@@ -366,3 +366,47 @@ def test_a_viewer_with_no_transport_is_left_alone():
     assert relay._drop_slow_viewers() == 0
     assert v in relay._viewers
     assert relay.viewers_dropped == 0
+
+
+def test_the_token_is_compared_in_constant_time():
+    # A source-inspection guard, deliberately: the property is "which function
+    # is used", and timing cannot be asserted reliably in a test.
+    """Hygiene, not a measured hole: a timing attack across a WebSocket
+    handshake is impractical because network jitter dwarfs a string compare.
+    It is free, though, and this is the one component on the internet."""
+    import inspect
+
+    from relay import server
+    src = inspect.getsource(server.Relay._handler)
+    assert "compare_digest" in src, "token compared with a plain !="
+
+
+async def test_an_unset_token_refuses_every_publish():
+    """Fail closed, for real rather than by inspection: a relay started with no
+    token must not become an open write endpoint on the internet."""
+    async with Harness(token="") as h:
+        for attempt in ("", "anything", "None"):
+            with pytest.raises(Exception):
+                pub = await websockets.connect(
+                    f"ws://127.0.0.1:{h.port}/publish?token={attempt}")
+                await pub.send(json.dumps({"type": "telemetry", "lat": 1}))
+                await pub.recv()          # closed by the relay
+        assert h.relay._publisher is None
+        assert h.relay.frames_in == 0
+
+
+def test_a_superseding_publisher_claims_the_slot_before_awaiting():
+    # Also source inspection. The behavioural version needs a three-way race
+    # with a controllable close, which would be flaky for a window this narrow;
+    # an ordering guard is the honest trade.
+    """`_publisher` was set to None while awaiting the old socket's close,
+    leaving a window where a third connection saw the slot free, took it, and
+    was overwritten when the first resumed — two hubs interleaving frames into
+    one stream. Unreachable with a single hub, reachable with one reconnecting
+    fast."""
+    import inspect
+    src = inspect.getsource(Relay._handle_publisher)
+    claim = src.index("old, self._publisher = self._publisher")
+    await_close = src.index("await old.close")
+    assert claim < await_close
+    assert "self._publisher, ws" in src, "still clears the slot before awaiting"
