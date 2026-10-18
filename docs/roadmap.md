@@ -20,6 +20,78 @@ was caught and fixed). Hub = `commandant` CLI scaffolded. Geofence + rally, PX4 
 live-validated (fence+rally upload/readback against SITL). **Not yet done:**
 Phase 3 SIL-rehearsal (real-aircraft gate) and real-Pi hub validation.
 
+**Flight-readiness pass (2026-10-17):** six faults that only appear when the
+link is a real radio, or when PX4 is driven by HITL rather than the sim's JSON
+feed. Each was hypothesised, proved with a test that fails on the old code, then
+fixed (`packages/gs/tests/test_flight_ready.py`, 14 tests).
+
+1. **gs never identified itself as a ground station.** No GCS HEARTBEAT was
+   transmitted, ever. PX4 decides a datalink exists by *receiving* heartbeats
+   from a GCS (`telemetry_status.heartbeat_type_gcs` → commander's
+   `data_link_check`), so to PX4 our GCS was never there: it reports "Data link
+   lost" and, with `NAV_DLL_ACT` set — the norm past line of sight — runs the
+   datalink-loss failsafe mid-mission while the operator watches telemetry flow.
+   gs now emits 1 Hz as `MAV_TYPE_GCS`/`MAV_AUTOPILOT_INVALID`, serviced before
+   anything else on the mav thread.
+2. **Stream requests ignored the link's bandwidth.** The three messages PX4
+   omits from the GCS stream were requested at a hardcoded 25 Hz. MEASURED:
+   6675 B/s, **133 % of a 57600 SiK link's usable goodput**, before PX4's own
+   ~1.2 kB/s — and what a saturated radio drops is `COMMAND_LONG` and
+   `STATUSTEXT`. Rates now come from a per-transport budget
+   (`link_budget_bps`/`budgeted_hz`): unchanged 25 Hz on UDP/TCP/USB, 1.9–5.5 Hz
+   on a 57600 radio, holding gs to 25 % of the link. An operator's explicit
+   `stream` request is clamped the same way, and says so on `statustext`.
+3. **Transport writes happened under the telemetry lock.** `_on_mav` ran its
+   whole dispatch inside `with self._lock`, and several branches transmit from
+   there. On UDP a send is a memcpy; on the hub it is a serial write. MEASURED:
+   one 150 ms blocking write stalled the 25 Hz broadcast tick **458 ms**, and
+   the broadcast loop is the asyncio loop, so every console's WS ping stalls
+   with it. `_on_mav` is now split: `_on_mav_state` folds into `latest` under
+   the lock, `_on_mav_protocol` runs the state machines and all I/O after it.
+4. **The sim's JSON feed outranked a live autopilot.** The flightlink feed is
+   documented as the *no-PX4* path but nothing enforced it; in HITL both are
+   live and it wrote lat/lon/alt/attitude/**mode/armed** over MAVLink's values
+   with no arbitration. The two interleave, the aircraft jitters between
+   estimate and truth, and `armed` from the sim can contradict the autopilot the
+   operator is commanding. Once a vehicle is locked MAVLink owns flight state;
+   JSON keeps `JSON_ONLY_KEYS` (the power model, the sim's own wind, the two PX4
+   SITL fakes already TTL-arbitrated). With no vehicle locked, nothing changes.
+5. **The vehicle lock never released.** `_vehicle` locks onto the first
+   autopilot heartbeat — right on a live link, a trap across a reopen: swap the
+   USB autopilot for a radio to an aircraft with a different `MAV_SYS_ID` and
+   every message from it is dropped, the console shows `connecting` forever with
+   a healthy radio, and commands keep going to a sysid that is not there.
+   `_on_reopen` now clears the lock, the boot-ms watermark and the stream-request
+   throttle.
+6. **The MAVLink 2 dialect depended on import order.** `MAVLINK20=1` only takes
+   effect if nothing has imported `mavutil` first, because mavutil binds
+   `mavutil.mavlink` to a dialect module at its own import time. Anything that
+   gets there first — the Phase 3 rehearsal gateway importing AircraftSim, a
+   test, a REPL — silently left the daemon on the v1 dialect, where
+   `ACTUATOR_OUTPUT_STATUS` and `WIND_COV` do not exist: the actuator PWMs and
+   the EKF wind estimate are simply never populated, with no error. The dialect
+   is now rebound explicitly.
+
+**Plug and play (2026-10-17):** `--mavlink auto` is the default. There is
+deliberately **no distinction between a HITL rig and the aircraft** — gs only
+ever sees MAVLink, and the one place the distinction leaked out was
+configuration: the operator had to know the endpoint string and the baud before
+anything worked. `auto` probes, most specific first, the serial devices an
+autopilot actually appears on (`/dev/tty.usbmodem*`, `/dev/ttyACM*` at 115200 —
+PX4 over USB; `/dev/tty.usbserial*`, `/dev/ttyUSB*` at 57600 — a telemetry
+radio), then `udpin:0.0.0.0:14550` (SITL, HITL, mavlink-router) and
+`tcp:127.0.0.1:5760` (SITL direct), and takes the first that heartbeats from
+something claiming to be an autopilot — a ground station on the wire, including
+gs's own heartbeat echoed by a router, is rejected. Nothing yet means PX4 is not
+powered up: gs falls back to `:14550` and re-probes on every reopen, so bringing
+the aircraft up, or swapping USB for the radio, is a hardware action rather than
+a restart. The link budget is recomputed from whatever was found, so a radio
+discovered by autodetect cannot get the fat-pipe rates. An end-to-end test
+(`test_plug_and_play_end_to_end`) asserts the whole claim against a fake PX4
+that is deliberately indistinguishable from HITL or the airframe: transport
+discovered, PX4 hearing our heartbeat, telemetry on the socket, and an arm that
+round-trips and changes the vehicle.
+
 **Hardening pass (2026-10-05):** transport-chain audit + fixes, both ends.
 gs: handler exceptions can no longer kill the mav thread; serial/TCP links reopen
 with backoff; vehicle sysid/compid lock-on (foreign heartbeats ignored); PX4
@@ -158,9 +230,10 @@ bridge (`src/lib/bridge/bridge.ts`) is RX-only and lives inside Next.
       disabled (`instrumentation.ts` is a no-op).
 - [x] **Link manager.** connecting/alive(<2s)/stale(<5s)/lost; `linkState` on
       every frame + `link` on transitions; console indicator + auto-reconnect.
-- [x] **Transport abstraction.** UDP today; interface ready for TCP/serial so
-      real-radio is a config change, not a rewrite. Multi-endpoint capable.
-      *(still pending — the one unticked foundation item.)*
+- [x] **Transport abstraction.** UDP/TCP/serial behind `open_connection`, and
+      `--mavlink auto` means real-radio is not even a config change: gs probes
+      USB/radio/UDP/TCP and re-probes on reopen. Per-transport bandwidth budget
+      sets the stream rates. *(done — see the 2026-10-17 pass.)*
 - [x] **Command ACK tracking.** `COMMAND_LONG` for arm/disarm/set_mode; 3 tries
       @1s then `ack{timeout}`; matched `COMMAND_ACK` routed to the originating
       client. Thread-safe TX funnelled onto the mav thread.

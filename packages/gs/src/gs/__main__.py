@@ -18,9 +18,12 @@ from .bridge import Bridge
 def main() -> int:
     parser = argparse.ArgumentParser(prog="gs", description="Commandant ground-station daemon")
     parser.add_argument("--version", action="version", version=f"gs {__version__}")
-    parser.add_argument("--mavlink", default="udpin:0.0.0.0:14550",
-                        help="MAVLink endpoint: udpin/udpout/tcp:host:port, "
-                             "serial:<device>[:baud], or a bare /dev/… device (the hub radio)")
+    parser.add_argument("--mavlink", default="auto",
+                        help="MAVLink endpoint: `auto` (default — probe USB/radio "
+                             "serial devices, then udp:14550 and tcp:5760, and "
+                             "re-probe on every reopen), or an explicit "
+                             "udpin/udpout/tcp:host:port, serial:<device>[:baud], "
+                             "or bare /dev/… device")
     parser.add_argument("--baud", type=int, default=57600,
                         help="serial baud when --mavlink is a serial device")
     parser.add_argument("--json-port", type=int, default=14555,

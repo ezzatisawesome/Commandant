@@ -24,9 +24,22 @@ Terminal 1 — the daemon:
 ```sh
 cd packages/gs
 uv venv && uv pip install -e ".[dev]"        # first time
-uv run python -m gs                           # udp:14550 in, ws://0.0.0.0:8790 out
-# real radio on the hub:  uv run python -m gs --mavlink serial:/dev/ttyUSB0:57600
+uv run python -m gs                           # autodetect in, ws://0.0.0.0:8790 out
 ```
+
+`--mavlink` defaults to `auto`: gs probes the serial devices an autopilot shows
+up on (PX4 over USB, then a telemetry radio), then `udp:14550` and `tcp:5760`,
+and takes the first that heartbeats as an autopilot. **It cannot tell, and does
+not care, whether that is PX4 SITL, a HITL rig or the aircraft** — the same
+binary, no configuration, for all three. If nothing is up yet it listens on
+`:14550` and re-probes on every reopen, so powering the plane on, or swapping
+USB for the radio, needs no restart. Pass an explicit endpoint
+(`--mavlink serial:/dev/ttyUSB0:57600`) to skip the probe.
+
+The stream rates gs asks PX4 for follow the transport it found: full rate over
+UDP/TCP/USB, and a bandwidth budget over a telemetry radio, where asking for
+25 Hz costs more than the link has and the thing that gets dropped is your next
+command.
 
 Terminal 2 — the console:
 
@@ -77,9 +90,9 @@ split dev setup. The console↔gs message contract is `docs/ws-contract.md`.
 ## Tests
 
 ```sh
-cd packages/gs      && uv run pytest -q   # 46 — protocol state machines vs a fake PX4
+cd packages/gs      && uv run pytest -q   # 66 — protocol state machines vs a fake PX4
 cd packages/relay   && uv run pytest -q   # 10 — fan-out, and the read-only guarantee
-cd packages/console && npm test           # 39 — stores, WS client, validation (vitest)
+cd packages/console && npm test           # 284 — stores, WS client, validation (vitest)
 cd packages/console && npm run typecheck
 ```
 
