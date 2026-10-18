@@ -142,6 +142,48 @@ fixed (`packages/gs/tests/test_flight_ready.py`, 14 tests).
    the EKF wind estimate are simply never populated, with no error. The dialect
    is now rebound explicitly.
 
+**The draft and the vehicle were one list (2026-10-18, third pass):** the
+console had one mission and one fence where it needed two — the operator's
+editable draft, and what the aircraft actually holds. Everything that described
+the aircraft from the draft was wrong, and wrong in the direction that
+reassures. Four instances, found by hypothesis and then closed out by a sweep of
+every draft-store use:
+
+1. **The globe highlighted a waypoint the aircraft was not flying to.** Mission
+   execution state (`$missionCurrent`) is a seq into the VEHICLE's mission,
+   while every edit runs the draft through `resequence`, renumbering it 0..n-1.
+   After any insert or reorder the yellow "currently flying to" marker landed on
+   whichever draft item now carried that number.
+2. **`BREACHED` was computed against the fence the operator had drawn.** Both
+   directions wrong, one of them badly: drag the draft *outward* and the readout
+   goes green while PX4 enforces the small one and acts on `GF_ACTION`. A
+   reassuring number for an aircraft about to be stopped, produced by the very
+   act of trying to fix a breach.
+3. **The MISSION button warned about the draft, not the plan it flies.** Read
+   back a plan PX4 will refuse, fix the draft without uploading, and the amber
+   went away — the warning vanished exactly when it was most needed, because the
+   operator had done the thing that looks like fixing it.
+4. The geofence panel never said when the outline on screen had parted company
+   with the boundary in effect.
+
+`$vehicleMission` and `$vehicleFence` record what the vehicle holds, set at the
+two moments the two provably agree — a readback, and an upload that was
+**accepted** — from the items *sent*, since that handshake takes seconds over a
+radio and the operator may keep editing during it. `null` means unknown and
+never matches: an unverified match is not a match. A reconnect clears them.
+
+**Not done, and a design call rather than a bug:** drawing both boundaries at
+once (draft dashed, enforced solid). The stores now make it possible.
+
+**The instruments showed stale values as live (2026-10-18, third pass):** H19
+gave each message group an age and then only the wind readout used it — the
+failure H19 was about, left standing in nine places out of ten. Each catalogue
+field now names its stream, and a cell whose stream has gone quiet is dimmed and
+struck through. Worst instance: `HealthStrip`, which this repo describes as "the
+one readout that must never need a click", showed a green **EKF OK** and
+**GPS 3D 14** for an estimator and receiver that had stopped reporting minutes
+earlier — on the readout an operator checks to decide whether to fly.
+
 **The hub installer would have failed on a real Pi (2026-10-18):**
 `packages/cli` provisions the field deployment, had never been run on hardware,
 and had no tests. Two faults, both decided before any command is issued:
