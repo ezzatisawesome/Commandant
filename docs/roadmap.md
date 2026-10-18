@@ -1,9 +1,29 @@
 # Commandant — Implementation Roadmap
 
-Status: **draft** · Last updated: 2026-10-02
+Status: **draft** · Last updated: 2026-10-18
 
 Turning Commandant from an ingest-only telemetry viewer into a real
 QGroundControl-replacement GCS for the solar aircraft.
+
+**Progress (2026-10-18):** a flight-readiness pass aimed at one question — is
+this daemon ready to be the ground station for a real PX4, a HITL rig, and the
+airframe, with no distinction between them? **Fourteen faults found and fixed**,
+each hypothesised, measured, and pinned by a test that fails on the old code.
+Written up in the dated sections below; the short version is that almost all of
+them were invisible on localhost UDP and only appear when the link is a radio,
+the clock is a Pi's, or the flight lasts longer than an afternoon.
+
+Three test assets came out of it, all under `packages/gs/scripts/`:
+`day_in_the_life.py` walks the operator's whole sequence once in order (20/20 on
+a 3.4 kB/s radio at 5 % loss with a reboot injected mid-flight),
+`radio_soak.py` hammers one operation at a time to find the boundary, and
+`frame_diff.py` proves a refactor did not change the telemetry frame. Suites:
+**gs 128 · relay 17 · console 314**, stable across repeated runs and under CPU
+load. `--mavlink auto` means there is now no configuration step at all: gs
+probes USB, radio, UDP and TCP and takes whatever has an autopilot on it.
+
+Still open and untouched by that pass: Phase 3 (SIL rehearsal), param snapshots,
+real-Pi hub validation, one DNS record, and Guppi egress.
 
 **Progress (2026-10-06):** checklists below were reconciled against the code —
 22 items were implemented but still showed unticked. What genuinely remains is
