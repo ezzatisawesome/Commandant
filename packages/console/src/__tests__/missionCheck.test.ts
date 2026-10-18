@@ -331,3 +331,44 @@ describe("a plan that leaves its own geofence is a blocker, not a paragraph", ()
 		expect(missionLooksRunnable([wp(0, 37.4, -122.15)], noParams, fence)).toBe(true);
 	});
 });
+
+describe("the MISSION button must reason about the plan the VEHICLE holds", () => {
+	// Pressing MISSION switches PX4 to AUTO.MISSION, which flies what the
+	// autopilot has. Checking the draft instead inverted the warning in the case
+	// that matters: read back a plan PX4 will refuse, fix the draft without
+	// uploading, and the amber went away while the autopilot still held the bad
+	// one — the warning disappeared exactly when it was most needed.
+	//
+	// This pins the decision as data, the way the bar computes it.
+	const needsLandingParam: ParamLookup = (n) => (n === TKO_LAND_REQ_PARAM ? 2 : undefined);
+	const wp = (seq: number, lat: number) =>
+		({ seq, kind: "waypoint" as const, lat, lon: -122.1, alt: 80 });
+	const landing = (seq: number) =>
+		({ seq, kind: "land" as const, lat: 37.4, lon: -122.1, alt: 0 });
+
+	it("warns about the vehicle's plan, not the fixed draft", () => {
+		const onVehicle = [wp(0, 37.40), wp(1, 37.41)];          // no landing: refused
+		const draft = [wp(0, 37.40), wp(1, 37.41), landing(2)];  // fixed, not uploaded
+
+		// What the bar used to do — and it reads as "all clear".
+		expect(missionBlockers(draft, needsLandingParam)).toEqual([]);
+		// What it does now.
+		const real = missionBlockers(onVehicle, needsLandingParam);
+		expect(real.map((b) => b.code)).toEqual(["needs-landing"]);
+	});
+
+	it("does not warn about a draft the vehicle was never given", () => {
+		const onVehicle = [wp(0, 37.40), landing(1)];            // fine
+		const draft = [wp(0, 37.40), wp(1, 37.41)];              // being authored
+		expect(missionBlockers(onVehicle, needsLandingParam)).toEqual([]);
+		// The draft on its own would have warned, about a plan PX4 does not have.
+		expect(missionBlockers(draft, needsLandingParam)).not.toEqual([]);
+	});
+
+	it("an unknown vehicle mission yields no blockers, so the bar must say so itself", () => {
+		// missionBlockers([]) is empty by design — "nothing to say about an empty
+		// plan". That is why the bar treats null as its own case rather than
+		// letting an empty result read as approval.
+		expect(missionBlockers([], needsLandingParam)).toEqual([]);
+	});
+});
