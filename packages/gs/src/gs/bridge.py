@@ -82,6 +82,26 @@ PARAM_GAP_MAX_SWEEPS = 10    # give up a refresh after this many fruitless gap s
 PARAM_BATCH_MS = 50          # coalesce streamed PARAM_VALUEs into one WS `params` message
 PARAM_BATCH_MAX = 64
 
+# A full PX4 param set is ~1000 values. PARAM_REQUEST_LIST makes the autopilot
+# send all of them as fast as the link will carry, which on localhost is free
+# and on a radio is the whole link for ten seconds. MEASURED on a 3.4 kB/s /
+# 120 ms SiK link with a 400-param set: an `arm` issued one second into a
+# refresh took 3.02 s and came back ok=False -- it exhausted
+# CMD_MAX_TRIES x CMD_RETRY_MS and reported `timeout` while the link was
+# perfectly healthy. On localhost UDP the same sequence acks in 0.09 s, which is
+# why this never showed: the contention is invisible at 1 MB/s.
+#
+# So on a narrow link gs does not ask for the flood. It walks the indices with
+# PARAM_REQUEST_READ at a rate it chooses, leaving the rest of the link for
+# flight. For 1000 params on that radio the trade is 10.7 s using 100 % of the
+# link (and commands failing) against 35.7 s using 30 % (and commands working),
+# which for a ground station is not a close call.
+PARAM_PACED_BELOW_BPS = 20_000   # narrower than this => pace, don't flood
+PARAM_LINK_SHARE = 0.30          # of the link a paced refresh may use
+PARAM_READ_BURST = 8             # max reads issued in one service tick
+PARAM_READ_RETRY_MS = 3000       # re-request an index that never answered
+PARAM_PACED_STALL_MS = 15000     # no new value for this long => give up
+
 DEFAULT_SERIAL_BAUD = 57600  # typical SiK/telemetry-radio rate on the real hub
 
 # --- GCS heartbeat (H1) -----------------------------------------------------
@@ -240,6 +260,14 @@ def message_bytes(msg_id: int) -> int:
     cls = mavutil.mavlink.mavlink_map.get(msg_id)
     size = getattr(getattr(cls, "unpacker", None), "size", 0) or 64
     return size + MAVLINK2_OVERHEAD
+
+
+def param_read_hz(budget_bps: float) -> float:
+    """Params per second a paced refresh may request, from the link budget."""
+    pv = message_bytes(mavutil.mavlink.MAVLINK_MSG_ID_PARAM_VALUE)
+    # Each param costs a request out and a value back; the value dominates and
+    # the request shares the much quieter uplink, so budget on the value.
+    return max(1.0, (budget_bps * PARAM_LINK_SHARE) / pv)
 
 
 def budgeted_hz(budget_bps: float, msg_id: int, shares: int = 1) -> float:
@@ -606,6 +634,19 @@ JSON_ONLY_KEYS = {
 
 _MONO_EPOCH = time.monotonic()   # daemon start, for _mono_ms
 
+# _mono_ms counts from this value rather than from 0, and the reason is a real
+# bug the monotonic switch introduced: `0` is the "never happened" sentinel for
+# every watermark in this file (_hb_at, a command's last_send_ms, _last_req_at,
+# _param_batch_at, a mission op's last). Under the old WALL clock `now - 0` was
+# ~1.7e12 ms, so "never" always read as "long ago" and every
+# `now - last >= TIMEOUT` test fired. Measured from daemon start, `now - 0` is
+# just the uptime -- so for the first second of the daemon's life "never" reads
+# as "just now" and everything is SUPPRESSED: the first GCS heartbeat delayed,
+# a command queued at startup not transmitted, the stream requests skipped. An
+# origin longer than any timeout here restores the old meaning without
+# reintroducing the wall clock.
+_MONO_ORIGIN_MS = 3_600_000   # an hour: longer than every timeout in this file
+
 
 def _now_ms() -> int:
     """WALL-CLOCK ms since the epoch. For TIMESTAMPS a human or a log reads.
@@ -638,8 +679,10 @@ def _mono_ms() -> int:
     saw any traffic" sentinel for last_mav_at / last_json_at, while a raw
     time.monotonic() is since-BOOT on Linux -- on a hub whose systemd unit
     starts gs at boot that is a single-digit number of seconds, uncomfortably
-    close to the sentinel. The +1 guarantees the two can never collide."""
-    return int((time.monotonic() - _MONO_EPOCH) * 1000) + 1
+    close to the sentinel. The origin offset guarantees the two can never
+    collide, and that a `0` watermark still reads as "long ago" -- see
+    _MONO_ORIGIN_MS, which is a bug this function caused before it had one."""
+    return int((time.monotonic() - _MONO_EPOCH) * 1000) + _MONO_ORIGIN_MS
 
 
 def _json_safe(obj: Any) -> Any:
@@ -674,6 +717,7 @@ class Bridge:
         ws_port: int = 8790,
         baud: int = DEFAULT_SERIAL_BAUD,
         relay: Any = None,
+        budget_bps: float | None = None,
     ) -> None:
         self.mavlink_endpoint = mavlink_endpoint
         self.json_port = json_port
@@ -739,12 +783,24 @@ class Bridge:
         self._param_gap_sweeps = 0
         self._param_batch: list[dict[str, Any]] = []   # mav-thread only
         self._param_batch_at = 0
+        # Paced-refresh state (narrow links; see PARAM_PACED_BELOW_BPS).
+        self._param_paced = False
+        self._param_req_at: dict[int, int] = {}   # index -> last request (mono ms)
+        self._param_paced_at = 0                  # last paced request tick
         self._tasks: set[asyncio.Task[Any]] = set()    # keep ack-delivery tasks alive
         self.link_reopens = 0                          # diagnostics: transport reopen count
         self._hb_at = 0                                # last GCS heartbeat tx (mav thread)
         # What this transport can carry, and therefore what rate gs may ask PX4
         # for on its three extra streams. See link_budget_bps / budgeted_hz.
-        self.link_budget_bps = link_budget_bps(mavlink_endpoint, baud)
+        # Usable goodput of the link, which sets the stream rates and the param
+        # fetch strategy. Normally inferred from the endpoint -- but a UDP socket
+        # says "fat pipe", and that is a lie exactly when mavlink-router (or any
+        # other proxy) sits between gs and a telemetry radio: gs would then ask a
+        # 57600 link for 25 Hz streams and a PARAM_REQUEST_LIST flood. A pin is
+        # the operator saying what is really downstream. It also survives a
+        # reopen, which a derived value must not.
+        self._budget_pin = budget_bps
+        self.link_budget_bps = budget_bps or link_budget_bps(mavlink_endpoint, baud)
         # The endpoint actually opened (differs from mavlink_endpoint under
         # `auto`, and can change across a reopen).
         self.active_endpoint = mavlink_endpoint
@@ -814,7 +870,8 @@ class Bridge:
             # 57600 radio for 25 Hz is the fault H2 fixed.
             self._on_reopen()
             self.active_endpoint = endpoint
-            self.link_budget_bps = link_budget_bps(endpoint, self.baud)
+            if self._budget_pin is None:
+                self.link_budget_bps = link_budget_bps(endpoint, self.baud)
             print(f"[gs] listening for MAVLink on {endpoint} "
                   f"({self.link_budget_bps:.0f} B/s budget)")
             return conn
@@ -1026,6 +1083,8 @@ class Bridge:
                     self._flush_param_batch()  # every value precedes the done marker
                 self._broadcast({"type": "param_progress", "received": got,
                                  "count": self._param_count, "done": True})
+            elif self._param_paced:
+                self._service_param_paced(conn, now, got)
             elif now - self._param_last_rx_ms > PARAM_GAP_QUIET_MS:
                 self._param_gap_sweeps += 1
                 if self._param_gap_sweeps > PARAM_GAP_MAX_SWEEPS:
@@ -1063,6 +1122,57 @@ class Bridge:
                 continue
             self._send_param_set(conn, job)
 
+    def _paced_read(self, conn: Any, idx: int) -> None:
+        try:
+            conn.mav.param_request_read_send(self.tsys, self.tcomp, b"", idx)
+        except Exception as exc:
+            print(f"[gs] param_request_read({idx}) failed: {exc}")
+            return
+        self._param_req_at[idx] = _mono_ms()
+
+    def _service_param_paced(self, conn: Any, now: int, got: int) -> None:
+        """Walk the param indices at a rate the link can spare.
+
+        The alternative, PARAM_REQUEST_LIST, hands the pacing to the autopilot,
+        which sends as fast as the link allows and starves everything else --
+        including the COMMAND_ACK for an arm the operator just pressed. Here gs
+        issues the reads, so the rate is ours to choose."""
+        if now - self._param_last_rx_ms > PARAM_PACED_STALL_MS:
+            # Asking and getting nothing: fail loudly rather than poll forever.
+            self._param_refresh_active = False
+            if self._param_batch:
+                self._flush_param_batch()
+            self._broadcast({"type": "param_progress", "received": got,
+                             "count": self._param_count, "done": True,
+                             "error": "timeout"})
+            return
+        if self._param_count == 0:
+            # Still bootstrapping: re-read index 0 until it answers.
+            if now - self._param_req_at.get(0, 0) >= PARAM_READ_RETRY_MS:
+                self._paced_read(conn, 0)
+            return
+        # How many reads this tick is allowed, from the elapsed time and the rate.
+        # The first tick after the count arrives gets a full burst: the budget
+        # has been idle through the bootstrap, and making this tick wait out one
+        # interval meant the walk did not start at all until the next one.
+        interval_ms = 1000.0 / param_read_hz(self.link_budget_bps)
+        allowed = (PARAM_READ_BURST if self._param_paced_at == 0
+                   else int((now - self._param_paced_at) / interval_ms))
+        if allowed <= 0:
+            return
+        sent = 0
+        for idx in range(self._param_count):
+            if sent >= min(allowed, PARAM_READ_BURST):
+                break
+            if idx in self._param_received:
+                continue
+            if now - self._param_req_at.get(idx, 0) < PARAM_READ_RETRY_MS:
+                continue          # already asked recently; wait for the answer
+            self._paced_read(conn, idx)
+            sent += 1
+        if sent:
+            self._param_paced_at = now
+
     def _start_param_refresh(self, conn: Any) -> None:
         self._param_received.clear()
         self._param_count = 0
@@ -1071,6 +1181,20 @@ class Bridge:
         self._param_last_progress = 0
         self._param_gap_sweeps = 0
         self._param_last_rx_ms = _mono_ms()
+        self._param_req_at.clear()
+        self._param_paced_at = 0
+        # Strategy follows the transport, like the stream rates do. A fat pipe
+        # gets the fast path it has always had; a radio gets paced reads so a
+        # refresh cannot starve the commands (see PARAM_PACED_BELOW_BPS).
+        self._param_paced = self.link_budget_bps < PARAM_PACED_BELOW_BPS
+        if self._param_paced:
+            print(f"[gs] param refresh: paced "
+                  f"({param_read_hz(self.link_budget_bps):.0f}/s, "
+                  f"{PARAM_LINK_SHARE:.0%} of a {self.link_budget_bps:.0f} B/s link)")
+            # One read of index 0 bootstraps the total: PARAM_VALUE carries
+            # param_count, so we learn the size without asking for the flood.
+            self._paced_read(conn, 0)
+            return
         try:
             conn.mav.param_request_list_send(self.tsys, self.tcomp)
         except Exception as exc:
@@ -1864,7 +1988,7 @@ class Bridge:
                 # froze the HUD for the length of the step. Monotonic ms since
                 # the daemon started cannot step, cannot go backward, and
                 # doubles as a daemon-uptime readout.
-                frame["upMs"] = mono
+                frame["upMs"] = mono - _MONO_ORIGIN_MS
                 frame["linkState"] = state
                 frame["connected"] = (state == "alive")
                 # How old the newest vehicle data actually is, so the UI can say

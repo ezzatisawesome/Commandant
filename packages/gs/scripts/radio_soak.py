@@ -181,7 +181,15 @@ def soak(bps, latency_s, loss, n_items, seed, budget_s=120.0):
     mav_p, ws_p, json_p = (_free_port(socket.SOCK_DGRAM), _free_port(socket.SOCK_STREAM),
                            _free_port(socket.SOCK_DGRAM))
     px4 = SimAutopilot(mav_p, (bps, latency_s, loss)).start()
-    b = Bridge(mavlink_endpoint=f"udpin:127.0.0.1:{mav_p}", json_port=json_p, ws_port=ws_p)
+    # budget_bps matters: the simulated radio sits between us and the autopilot,
+    # but the socket gs opens is UDP, so an inferred budget would read a fat pipe
+    # and gs would make every fat-pipe choice -- 25 Hz stream requests and a
+    # PARAM_REQUEST_LIST flood. Pinning it is what a real serial endpoint, or a
+    # `--link-budget` behind mavlink-router, would have told it. Without this the
+    # tool silently measures the wrong configuration; it did, until it was caught
+    # measuring a contention fix that could not possibly have engaged.
+    b = Bridge(mavlink_endpoint=f"udpin:127.0.0.1:{mav_p}",
+               json_port=json_p, ws_port=ws_p, budget_bps=bps)
     threading.Thread(target=b._mav_loop, daemon=True).start()
     out = {}
 

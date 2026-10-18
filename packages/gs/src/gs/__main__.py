@@ -26,6 +26,12 @@ def main() -> int:
                              "or bare /dev/… device")
     parser.add_argument("--baud", type=int, default=57600,
                         help="serial baud when --mavlink is a serial device")
+    parser.add_argument("--link-budget", type=float, default=None, metavar="BYTES_PER_SEC",
+                        help="pin the MAVLink link's usable goodput instead of inferring "
+                             "it from the endpoint. Needed when a proxy (mavlink-router) "
+                             "makes a telemetry radio look like a UDP socket: gs would "
+                             "otherwise ask a 57600 link for fat-pipe stream rates and a "
+                             "PARAM_REQUEST_LIST flood. A 57600 SiK link is about 3456.")
     parser.add_argument("--json-port", type=int, default=14555,
                         help="UDP port for the sim's flightlink JSON telemetry")
     parser.add_argument("--ws-host", default="0.0.0.0", help="WebSocket bind host")
@@ -62,6 +68,7 @@ def main() -> int:
         ws_port=args.ws_port,
         baud=args.baud,
         relay=relay,
+        budget_bps=args.link_budget,
     ).run()
     return 0
 

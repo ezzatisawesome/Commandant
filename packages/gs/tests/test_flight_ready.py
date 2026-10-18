@@ -76,6 +76,25 @@ def _bridge(**kw):
     return b
 
 
+def _capturing_loop(sink: list):
+    """A stand-in for the asyncio loop that records whatever the mav thread
+    schedules. `_broadcast` hands over a JSON string; the ack emitters hand over
+    a dict -- decode the former so a test can treat both as dicts."""
+    import json as _json
+
+    class Loop:
+        def call_soon_threadsafe(self, fn, *a):
+            if a and isinstance(a[0], str):
+                try:
+                    sink.append(_json.loads(a[0]))
+                    return
+                except ValueError:
+                    pass
+            if a:
+                sink.append(a[0])
+    return Loop()
+
+
 # --- H1: gs never identifies itself to PX4 as a ground station --------------
 
 def test_h1_gs_sends_a_gcs_heartbeat():
@@ -861,3 +880,178 @@ def test_h13_a_valid_fence_and_a_mission_are_both_unaffected():
                           "rtype": "mission", "ack_type": "mission_ack"})
     b._service_missions(conn)
     assert acks == [] and b._mission is not None, "a 1-item mission was rejected"
+
+
+# --- H14: a param refresh starved the commands on a narrow link ------------
+
+def _param_value(idx, count, name=None, value=1.0):
+    return _msg("PARAM_VALUE", param_id=(name or f"P_{idx:03d}").encode(),
+                param_value=value, param_type=m.MAV_PARAM_TYPE_REAL32,
+                param_index=idx, param_count=count)
+
+
+def _names(conn):
+    return [s[0] for s in conn.mav.sent]
+
+
+def test_h14_a_narrow_link_paces_the_param_fetch_instead_of_flooding():
+    """PARAM_REQUEST_LIST hands the pacing to the autopilot, which then sends
+    ~1000 values as fast as the link will carry. On localhost that is free. On a
+    3.4 kB/s SiK link it is the whole link for ten seconds, and MEASURED: an
+    `arm` issued one second into a refresh took 3.02 s and came back ok=False --
+    it exhausted its retries and reported `timeout` on a healthy link. The same
+    sequence on UDP acks in 0.09 s, which is why this never showed.
+
+    On a narrow link gs issues the reads itself, so the rate is its own."""
+    b = _bridge(mavlink_endpoint="serial:/dev/ttyUSB0:57600")
+    conn = RecordingConn()
+    b._param_queue.put({"kind": "refresh"})
+    b._service_params(conn)
+    assert "param_request_list_send" not in _names(conn), \
+        "flooded a telemetry radio with PARAM_REQUEST_LIST"
+    assert _names(conn) == ["param_request_read_send"], _names(conn)
+    assert conn.mav.sent[0][1][3] == 0, "the bootstrap read should be index 0"
+
+
+def test_h14_a_fat_pipe_still_uses_the_fast_path():
+    """The flood is the right answer when the link can carry it: it is one
+    message out and the autopilot streams at full speed. SITL, HITL and PX4 over
+    USB must be untouched."""
+    for endpoint in ("udpin:0.0.0.0:14550", "tcp:127.0.0.1:5760",
+                     "serial:/dev/ttyACM0:921600"):
+        b = _bridge(mavlink_endpoint=endpoint)
+        conn = RecordingConn()
+        b._param_queue.put({"kind": "refresh"})
+        b._service_params(conn)
+        assert _names(conn) == ["param_request_list_send"], (endpoint, _names(conn))
+
+
+def test_h14_paced_mode_learns_the_count_then_walks_the_indices(monkeypatch):
+    monkeypatch.setattr(bridgemod, "PARAM_READ_RETRY_MS", 0)
+    b = _bridge(mavlink_endpoint="serial:/dev/ttyUSB0:57600")
+    b._loop = type("L", (), {"call_soon_threadsafe": lambda *a: None})()
+    conn = RecordingConn()
+    b._param_queue.put({"kind": "refresh"})
+    b._service_params(conn)                       # bootstrap read of index 0
+    assert b._param_count == 0
+
+    # Index 0 answers, carrying the total.
+    b._on_mav_protocol(conn, bridgemod._mono_ms(), "PARAM_VALUE", _param_value(0, 12))
+    assert b._param_count == 12
+    conn.mav.sent.clear()
+
+    # Now it walks the rest, a bounded burst per tick.
+    b._param_paced_at = 0
+    b._service_params(conn)
+    reads = [s[1][3] for s in conn.mav.sent if s[0] == "param_request_read_send"]
+    assert reads, "paced mode stopped asking"
+    assert len(reads) <= bridgemod.PARAM_READ_BURST, f"burst of {len(reads)}"
+    assert 0 not in reads, "re-requested an index already received"
+    assert all(1 <= i < 12 for i in reads), reads
+
+
+def test_h14_paced_mode_completes_and_marks_done(monkeypatch):
+    monkeypatch.setattr(bridgemod, "PARAM_READ_RETRY_MS", 0)
+    events = []
+    b = _bridge(mavlink_endpoint="serial:/dev/ttyUSB0:57600")
+    b._loop = _capturing_loop(events)
+    conn = RecordingConn()
+    b._param_queue.put({"kind": "refresh"})
+    b._service_params(conn)
+    for idx in range(6):
+        b._on_mav_protocol(conn, bridgemod._mono_ms(), "PARAM_VALUE", _param_value(idx, 6))
+        b._param_paced_at = 0
+        b._service_params(conn)
+    done = [e for e in events if e.get("type") == "param_progress" and e.get("done")]
+    assert done, f"never emitted a done marker: {events}"
+    assert done[-1]["received"] == 6 and done[-1].get("error") is None
+    assert b._param_refresh_active is False
+    values = [it["name"] for e in events if e.get("type") == "params" for it in e["items"]]
+    assert len(values) == 6, values
+
+
+def test_h14_paced_mode_gives_up_loudly_if_nothing_answers(monkeypatch):
+    """A refresh that gets no answers must fail with an error marker, not poll
+    the radio forever."""
+    monkeypatch.setattr(bridgemod, "PARAM_PACED_STALL_MS", 0)
+    events = []
+    b = _bridge(mavlink_endpoint="serial:/dev/ttyUSB0:57600")
+    b._loop = _capturing_loop(events)
+    conn = RecordingConn()
+    b._param_queue.put({"kind": "refresh"})
+    b._service_params(conn)
+    for _ in range(3):
+        b._param_last_rx_ms = 0        # deterministic stall, no sleeping
+        b._service_params(conn)
+    err = [e for e in events if e.get("error")]
+    assert err, f"polled forever instead of failing: {events}"
+    assert err[-1]["error"] == "timeout"
+    assert b._param_refresh_active is False
+
+
+def test_h14_param_read_rate_comes_from_the_budget():
+    slow = bridgemod.param_read_hz(3456)        # 57600 SiK
+    fast = bridgemod.param_read_hz(1_000_000)   # UDP
+    assert 10 < slow < 60, slow
+    assert fast > slow
+    # It must leave most of the link alone.
+    pv = bridgemod.message_bytes(m.MAVLINK_MSG_ID_PARAM_VALUE)
+    assert slow * pv <= 3456 * bridgemod.PARAM_LINK_SHARE + 1
+
+
+def test_h14_a_pinned_link_budget_survives_a_reopen(monkeypatch):
+    """mavlink-router in front of a radio makes the link look like UDP, so an
+    inferred budget says "fat pipe" and gs makes every fat-pipe choice. The pin
+    is the operator correcting that, and a reopen must not discard it."""
+    monkeypatch.setattr(bridgemod, "open_connection", lambda *a, **k: RecordingConn())
+    b = Bridge(mavlink_endpoint="udpin:0.0.0.0:14550", budget_bps=3456)
+    assert b.link_budget_bps == 3456
+    b._open_with_retry()
+    assert b.link_budget_bps == 3456, "a reopen threw the pin away"
+    conn = RecordingConn()
+    b._param_queue.put({"kind": "refresh"})
+    b._service_params(conn)
+    assert "param_request_list_send" not in _names(conn)
+    # And the stream rates follow the pin too.
+    b._request_message(conn, 1, 1, bridgemod.MSG_ACTUATOR_OUTPUT_STATUS)
+    hz = 1e6 / next(s for s in conn.mav.sent if s[0] == "command_long_send")[1][5]
+    assert hz <= 5.0, hz
+
+
+def test_h8b_a_zero_watermark_still_means_long_ago(monkeypatch):
+    """A bug the monotonic switch introduced, caught by the H14 pin test.
+
+    `0` is the "never happened" sentinel for every watermark here. Under the
+    wall clock `now - 0` was ~1.7e12 ms, so "never" always read as "long ago"
+    and every `now - last >= TIMEOUT` test fired. Measured from daemon start,
+    `now - 0` is just the uptime -- so for the daemon's first second "never"
+    reads as "just now" and everything is suppressed: no first GCS heartbeat,
+    a command queued at startup not transmitted, the stream requests skipped.
+
+    Everything below is what a daemon does in its first few milliseconds."""
+    assert bridgemod._mono_ms() >= bridgemod._MONO_ORIGIN_MS
+    for timeout in (bridgemod.GCS_HEARTBEAT_MS, bridgemod.CMD_RETRY_MS,
+                    bridgemod.PARAM_BATCH_MS, bridgemod.PARAM_SET_TIMEOUT_MS,
+                    bridgemod.MISSION_OP_TIMEOUT_MS, bridgemod.PARAM_GAP_QUIET_MS,
+                    bridgemod.PARAM_READ_RETRY_MS, bridgemod.PARAM_PACED_STALL_MS):
+        assert bridgemod._mono_ms() - 0 >= timeout, timeout
+
+    b = _bridge()
+    conn = RecordingConn()
+    # The first heartbeat goes out now, not a second from now.
+    b._service_heartbeat(conn)
+    assert [s[0] for s in conn.mav.sent] == ["heartbeat_send"]
+
+    # A command queued in the first instants is transmitted in the first instants.
+    conn.mav.sent.clear()
+    b._cmd_queue.put({"id": "c1", "mav_cmd": m.MAV_CMD_COMPONENT_ARM_DISARM,
+                      "params": [1, 0, 0, 0, 0, 0, 0]})
+    b._service_commands(conn)
+    assert [s[0] for s in conn.mav.sent] == ["command_long_send"], \
+        "a command queued at startup was not sent"
+
+    # And a stream request is not throttled as though it had just been made.
+    conn.mav.sent.clear()
+    b._request_message(conn, 1, 1, bridgemod.MSG_WIND_COV)
+    assert [s[0] for s in conn.mav.sent] == ["command_long_send"], \
+        "the startup stream request was throttled against a never-sent watermark"

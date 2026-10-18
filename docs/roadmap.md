@@ -72,6 +72,42 @@ fixed (`packages/gs/tests/test_flight_ready.py`, 14 tests).
    the EKF wind estimate are simply never populated, with no error. The dialect
    is now rebound explicitly.
 
+**A param refresh starved the commands (2026-10-18):** `PARAM_REQUEST_LIST`
+hands the pacing to the autopilot, which sends all ~1000 values as fast as the
+link will carry. MEASURED on a 3.4 kB/s / 120 ms SiK link with a 400-param set:
+
+| | idle link | 1 s into a refresh |
+|---|---|---|
+| **before** | arm acked 0.71 s | **arm 3.02 s, `ok=false`** — retries exhausted, reported `timeout` on a healthy link |
+| **after** | arm acked 0.70 s | arm acked **0.33 s, `ok=true`** |
+| localhost UDP | 0.08 s | 0.09 s — the contention is invisible at 1 MB/s, which is why this never showed |
+
+On a narrow link gs now walks the indices with `PARAM_REQUEST_READ` at a rate it
+chooses (30 % of the budget), so the refresh cannot monopolise the downlink. For
+1000 params on that radio the trade is 10.7 s using 100 % of the link, commands
+failing, against 35.7 s using 30 %, commands working — not a close call for a
+ground station. A fat pipe (SITL, HITL, PX4 over USB) keeps the flood unchanged.
+
+`--link-budget BYTES_PER_SEC` pins the budget, because a UDP socket says "fat
+pipe" and that is a lie exactly when mavlink-router sits between gs and a radio
+— the deferred-router case in this document. Without the pin gs would ask a
+57600 link for 25 Hz streams and a param flood. The pin survives a reopen.
+
+**Found in the tool, not the daemon:** `radio_soak.py` opens a UDP socket to
+reach its simulated radio, so gs inferred a fat pipe and made every fat-pipe
+choice. The tool was measuring the wrong configuration, and only got caught
+because it reported no improvement from a fix that could not possibly have
+engaged. It now pins the budget.
+
+**A regression this pass introduced, and the test that caught it:** moving
+durations onto a monotonic clock broke the `0` = "never happened" sentinel.
+Under the wall clock `now - 0` was ~1.7e12 ms, so "never" read as "long ago"
+and every `now - last >= TIMEOUT` test fired. Measured from daemon start,
+`now - 0` is just the uptime — so for the daemon's **first second** everything
+was suppressed: no first GCS heartbeat, a command queued at startup not
+transmitted, the stream requests skipped. `_mono_ms` now counts from an origin
+an hour above zero, which restores the old meaning without the wall clock.
+
 **Mission upload over a real radio (2026-10-17):** a seventh fault, found by
 building the thing that could find it — `packages/gs/scripts/radio_soak.py`,
 which runs the real command/param/mission state machines across a simulated
