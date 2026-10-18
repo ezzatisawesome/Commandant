@@ -107,6 +107,7 @@ class SimAutopilot:
         self.mission: dict[int, object] = {}
         self.mission_expect: int | None = None
         self.kickoffs = 0
+        self.stored: dict[int, dict] = {}   # the mission the vehicle holds
         self.params = {f"P_{i:03d}": float(i) for i in range(n_params)}
         self._stop = threading.Event()
 
@@ -151,6 +152,17 @@ class SimAutopilot:
                     n = names[msg.param_index]
                     self.radio.send("param_value_send", n.encode(), self.params[n],
                                     m.MAV_PARAM_TYPE_REAL32, len(names), msg.param_index)
+            elif t == "MISSION_REQUEST_LIST":
+                # A download: answer with the count, then items on request.
+                self.radio.send("mission_count_send", 255, 190,
+                                len(self.stored), msg.mission_type)
+            elif t in ("MISSION_REQUEST_INT", "MISSION_REQUEST"):
+                it = self.stored.get(msg.seq)
+                if it is not None:
+                    self.radio.send("mission_item_int_send", 255, 190, msg.seq,
+                                    it["frame"], it["command"], it["current"],
+                                    it["autocontinue"], 0.0, 0.0, 0.0, 0.0,
+                                    it["x"], it["y"], it["z"], msg.mission_type)
             elif t == "MISSION_COUNT":
                 # A MISSION_COUNT mid-transfer discards everything and restarts,
                 # per the MAVLink mission protocol. This is the behaviour that
@@ -162,6 +174,11 @@ class SimAutopilot:
             elif t == "MISSION_ITEM_INT":
                 self.mission[msg.seq] = msg
                 if len(self.mission) >= (self.mission_expect or 0):
+                    # Keep it, so a subsequent download has something to serve.
+                    self.stored = {
+                        s_: {"frame": v.frame, "command": v.command, "current": v.current,
+                             "autocontinue": v.autocontinue, "x": v.x, "y": v.y, "z": v.z}
+                        for s_, v in self.mission.items()}
                     self.radio.send("mission_ack_send", 255, 190, 0, msg.mission_type)
                 else:
                     nxt = next(s for s in range(self.mission_expect)
@@ -226,6 +243,19 @@ def soak(bps, latency_s, loss, n_items, seed, budget_s=120.0):
             out["mission"] = (bool(got and got.get("ok")), dt,
                               got.get("text") if got else "NO REPLY AT ALL")
 
+            await ws.send(json.dumps({"type": "mission_pull"}))
+            # Watch for EITHER outcome. A download that fails must say so; the
+            # distinction that matters is a reported failure versus silence,
+            # which is the lesson the upload livelock taught.
+            got, dt = await wait(
+                lambda g: g.get("type") in ("mission", "mission_ack"), budget_s)
+            if got is None:
+                out["pull"] = (False, dt, "SILENT")
+            elif got.get("type") == "mission":
+                out["pull"] = (got.get("count") == n_items, dt, got.get("count"))
+            else:
+                out["pull"] = (False, dt, f"failed: {got.get('text')}")
+
             await ws.send(json.dumps({"type": "param_refresh"}))
             got, dt = await wait(
                 lambda g: g.get("type") == "param_progress" and g.get("done"), budget_s)
@@ -256,12 +286,13 @@ def main() -> int:
 
     print(f"link: {a.bps:.0f} B/s, {a.latency * 1000:.0f} ms one-way, {a.loss:.0%} loss; "
           f"{a.items}-item mission\n")
-    print("seed  arm          mission                              params")
+    print("seed  arm          mission upload                       mission download      params")
     bad = 0
     for seed in [int(s) for s in a.seeds.split(",")]:
         r = soak(a.bps, a.latency, a.loss, a.items, seed, a.budget)
         arm_ok, arm_t = r["arm"]
         mok, mt, mtext = r["mission"]
+        dok, dt_, dcount = r["pull"]
         pr, pc, pt, perr = r["params"]
         # A completed upload is not enough. Every MISSION_COUNT past the first
         # is the autopilot being told to discard the transfer and restart from
@@ -269,10 +300,11 @@ def main() -> int:
         # -- that is the shape of the livelock this tool was written to find,
         # and on an unlucky seed the same code never completes at all.
         restarting = r["kickoffs"] > MISSION_MAX_TRIES + 1
-        bad += (not arm_ok) + (not mok) + (pr != pc) + restarting
+        bad += (not arm_ok) + (not mok) + (pr != pc) + restarting + (not dok)
         print(f"{seed:<5} {str(arm_ok):5s} {arm_t:5.1f}s  "
               f"{str(mok):5s} {mt:6.1f}s {r['kickoffs']:2d} kickoff(s)"
               f"{'!' if restarting else ' '} {mtext:<18s}  "
+              f"{str(dok):5s} {dt_:6.1f}s {dcount}  "
               f"{pr}/{pc} {pt:6.1f}s {perr or ''}")
     print(f"\n{'FAILURES: ' + str(bad) if bad else 'all operations completed'}"
           + ("   (! = the upload was restarted, not resumed)" if bad else ""))

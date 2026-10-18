@@ -787,6 +787,9 @@ class Bridge:
         self._param_paced = False
         self._param_req_at: dict[int, int] = {}   # index -> last request (mono ms)
         self._param_paced_at = 0                  # last paced request tick
+        # Set by _on_mav_state when the vehicle's uptime clock jumps backward
+        # (a reboot); acted on in _on_mav_protocol, which may transmit.
+        self._reboot_pending: int | None = None
         self._tasks: set[asyncio.Task[Any]] = set()    # keep ack-delivery tasks alive
         self.link_reopens = 0                          # diagnostics: transport reopen count
         self._hb_at = 0                                # last GCS heartbeat tx (mav thread)
@@ -1122,6 +1125,60 @@ class Bridge:
                 continue
             self._send_param_set(conn, job)
 
+    def _on_vehicle_reboot(self, now: int, boot_ms: int) -> None:
+        """The vehicle restarted. Abandon everything addressed to the instance
+        that is gone, and say so.
+
+        Every in-flight handshake was a conversation with a process that no
+        longer exists: the autopilot will not answer a PARAM_SET it never
+        received, or ask for the next item of an upload it has forgotten. Left
+        alone they each sit until their own timeout and then report `timeout`,
+        which tells the operator the link is bad when the truth is that the
+        vehicle rebooted -- a much more useful thing to know, and a different
+        action.
+
+        Clients also hold state a reboot invalidates. Params are the dangerous
+        one: PX4 reverts anything that was not saved, so a console that keeps
+        showing the pre-reboot values will show an edit as applied when the
+        vehicle has dropped it. gs holds no param cache of its own, so this is
+        broadcast rather than handled here."""
+        print(f"[gs] vehicle rebooted (uptime restarted at {boot_ms} ms)")
+        aborted = []
+        if self._param_refresh_active:
+            self._param_refresh_active = False
+            if self._param_batch:
+                self._flush_param_batch()
+            self._broadcast({"type": "param_progress",
+                             "received": len(self._param_received),
+                             "count": self._param_count, "done": True,
+                             "error": "vehicle rebooted"})
+            aborted.append("param refresh")
+        for name, job in list(self._param_set_pending.items()):
+            del self._param_set_pending[name]
+            self._report_param_ack(job, ok=False, text="vehicle rebooted")
+            aborted.append(f"param set {name}")
+        op = self._mission
+        if op is not None:
+            self._mission = None
+            text = "vehicle rebooted"
+            if op["op"] == "upload":
+                self._report_mission_ack(op.get("id"), ok=False, result=-1,
+                                         text=text, ack_type=op["ack_type"])
+            else:
+                self._broadcast({"type": op["ack_type"], "ok": False,
+                                 "result": -1, "text": text})
+            aborted.append(f"{op['rtype']} {op['op']}")
+        # Commands in flight are addressed to a vehicle that never saw them.
+        for cid in list(self._pending):
+            del self._pending[cid]
+            self._report(cid, ok=False, result=-1, text="vehicle rebooted")
+            aborted.append("command")
+        # The extra streams have to be re-requested: the new instance is back on
+        # PX4's defaults and never saw our SET_MESSAGE_INTERVALs.
+        self._last_req_at.clear()
+        self._broadcast({"type": "vehicle_reboot", "bootMs": boot_ms, "t": _now_ms(),
+                         "aborted": aborted})
+
     def _paced_read(self, conn: Any, idx: int) -> None:
         try:
             conn.mav.param_request_read_send(self.tsys, self.tcomp, b"", idx)
@@ -1445,6 +1502,15 @@ class Bridge:
             boot = msg.time_boot_ms
             if boot <= self._last_pos_boot_ms and self._last_pos_boot_ms - boot < REBOOT_GAP_MS:
                 return
+            # A big backward jump in the VEHICLE's own uptime clock is a reboot.
+            # It was already tolerated here (the frame is accepted rather than
+            # dropped as reordered), but nothing was told about it -- and a
+            # reboot invalidates things the operator is looking at. On the bench
+            # and in HITL this happens constantly: every restart, every flash.
+            # Flagged here, acted on in _on_mav_protocol, because reacting means
+            # transmitting and this runs under the lock.
+            if self._last_pos_boot_ms >= 0 and boot < self._last_pos_boot_ms:
+                self._reboot_pending = boot
             self._last_pos_boot_ms = boot
             # PX4's own uptime clock, surfaced for diagnostics: when the
             # simulator stalls this is the value PX4's clock stops at, which
@@ -1597,6 +1663,9 @@ class Bridge:
         """The protocol state machines (statustext, param, command-ack, mission)
         and every message request. Called with the lock RELEASED, because all of
         these transmit, and a transmit can block on a real serial link."""
+        if self._reboot_pending is not None:
+            self._on_vehicle_reboot(now, self._reboot_pending)
+            self._reboot_pending = None
         if t == "STATUSTEXT":
             raw = msg.text
             text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)

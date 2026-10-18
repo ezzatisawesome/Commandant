@@ -23,6 +23,8 @@ import { pushFrame } from "@/stores/aircraft.store";
 import { $viewerStore } from "@/stores/cesium.store";
 import { $linkState, $commander } from "@/stores/link.store";
 import { pushStatus } from "@/stores/statustext.store";
+/** MAV_SEVERITY_WARNING — what gs uses for its own operator notices. */
+const SEVERITY_WARNING = 4;
 import { upsertParam, upsertParams, setParamProgress, clearParams } from "@/stores/params.store";
 import {
 	$missionCurrent,
@@ -199,6 +201,21 @@ export class TelemetryClient {
 				this.resolveGeoAck(this.pendingFence, msg as FenceAckMessage);
 			} else if (type === "rally_ack") {
 				this.resolveGeoAck(this.pendingRally, msg as RallyAckMessage);
+			} else if (type === "vehicle_reboot") {
+				// The autopilot restarted (on a bench or in HITL, constantly: every
+				// restart, every flash). Params are the dangerous leftover — PX4
+				// reverts anything that was not saved, so keeping the pre-reboot
+				// values on screen shows an edit as applied when the vehicle has
+				// dropped it. Drop the cache rather than show a value we cannot
+				// vouch for, and say so in the log the operator is already reading.
+				const r = msg as { bootMs?: number; t?: number };
+				clearParams();
+				$missionCurrent.set(null);
+				$missionReached.set(null);
+				$missionProgress.set(null);
+				pushStatus(SEVERITY_WARNING,
+					"vehicle rebooted — parameters cleared, re-read them before trusting any value",
+					r.t ?? Date.now());
 			} else if (type === "telemetry" || type === undefined) {
 				this.onTelemetry(msg as TelemetryFrame & { type?: string });
 			} else {

@@ -63,6 +63,31 @@ past 3 s.
 { "type": "link", "state": "stale", "lastMsgMs": 1730000000000 }
 ```
 
+### `vehicle_reboot` (on the autopilot restarting)
+```json
+{ "type": "vehicle_reboot", "bootMs": 120, "t": 1730000000000,
+  "aborted": ["command", "param refresh", "mission upload"] }
+```
+The vehicle's own uptime clock jumped backward — it restarted. On a bench or in
+HITL this happens constantly: every restart, every flash. It is **not** a lost
+link (telemetry keeps flowing) and gs keeps tracking the vehicle.
+
+gs abandons every in-flight handshake first and names them in `aborted`. Each
+was a conversation with a process that no longer exists, and left alone they
+would each sit until their own timeout and report `timeout` — which tells the
+operator the link is bad when the truth is that the vehicle rebooted, a
+different problem with a different action. The individual `ack` / `param_ack` /
+`mission_ack` carry `text: "vehicle rebooted"`. gs also re-requests the extra
+streams, since the new instance is back on PX4's defaults.
+
+**A client must treat its cached params as unusable.** PX4 reverts anything that
+was not saved, so a value read before the reboot can no longer be vouched for,
+and showing it tells the operator an edit was applied when the vehicle has
+dropped it. The console clears the cache and logs the reason. Mission execution
+state (`mission_current`, `mission_reached`) belongs to the run that ended and
+goes too; the stored plan itself usually survives in the autopilot, so it is
+left alone — pull it to be sure.
+
 ### `ack` (response to a command)
 ```json
 { "type": "ack", "id": "<command id>", "ok": true, "result": 0, "text": "accepted" }

@@ -1055,3 +1055,100 @@ def test_h8b_a_zero_watermark_still_means_long_ago(monkeypatch):
     b._request_message(conn, 1, 1, bridgemod.MSG_WIND_COV)
     assert [s[0] for s in conn.mav.sent] == ["command_long_send"], \
         "the startup stream request was throttled against a never-sent watermark"
+
+
+# --- H16: a PX4 reboot was silent, and left stale state on screen ----------
+
+def _gpi(boot_ms, lat=374000000):
+    return _msg("GLOBAL_POSITION_INT", time_boot_ms=boot_ms, lat=lat,
+                lon=-1221000000, alt=120000, hdg=9000, vx=0, vy=0, vz=0)
+
+
+def _rebooted_bridge(events):
+    b = _bridge(mavlink_endpoint="serial:/dev/ttyUSB0:57600")
+    b._loop = _capturing_loop(events)
+    conn = RecordingConn()
+    b._vehicle = (1, 1)
+    b._on_mav(conn, _gpi(600_000))        # ten minutes of uptime
+    return b, conn
+
+
+def _reboot(b, conn):
+    b._on_mav(conn, _gpi(120))            # uptime restarts
+
+
+def test_h16_a_vehicle_reboot_is_announced():
+    """On the bench and in HITL this happens constantly -- every restart, every
+    flash. The backward uptime jump was already tolerated (the frame is kept
+    rather than dropped as reordered) but nothing was told about it, so a
+    console went on showing pre-reboot state."""
+    events = []
+    b, conn = _rebooted_bridge(events)
+    _reboot(b, conn)
+    reboots = [e for e in events if e.get("type") == "vehicle_reboot"]
+    assert reboots, f"a reboot went unannounced: {[e.get('type') for e in events]}"
+    assert reboots[0]["bootMs"] == 120
+    # Still tracking the vehicle afterwards -- a reboot is not a lost link.
+    b._on_mav(conn, _gpi(400))
+    assert b.latest["bootMs"] == 400
+
+
+def test_h16_a_reboot_does_not_fire_on_ordinary_forward_time():
+    events = []
+    b, conn = _rebooted_bridge(events)
+    for boot in (600_100, 600_200, 700_000, 1_000_000):
+        b._on_mav(conn, _gpi(boot))
+    assert not [e for e in events if e.get("type") == "vehicle_reboot"]
+
+
+def test_h16_in_flight_work_is_abandoned_with_the_real_reason():
+    """Every in-flight handshake was a conversation with a process that no
+    longer exists. Left alone each sits until its own timeout and reports
+    `timeout`, which tells the operator the link is bad when the truth is that
+    the vehicle rebooted -- a different problem with a different action."""
+    events = []
+    b, conn = _rebooted_bridge(events)
+
+    b._cmd_queue.put({"id": "c1", "mav_cmd": m.MAV_CMD_COMPONENT_ARM_DISARM,
+                      "params": [1, 0, 0, 0, 0, 0, 0]})
+    b._service_commands(conn)
+    b._param_queue.put({"kind": "refresh"})
+    b._param_queue.put({"kind": "set", "id": "p1", "name": "FW_AIRSPD_TRIM",
+                        "value": 15.0, "ptype": m.MAV_PARAM_TYPE_REAL32})
+    b._service_params(conn)
+    _upload(b, conn, n=4)
+    assert b._pending and b._param_refresh_active and b._param_set_pending and b._mission
+
+    _reboot(b, conn)
+
+    assert b._pending == {}, "a command stayed pending against a vehicle that rebooted"
+    assert b._param_refresh_active is False
+    assert b._param_set_pending == {}
+    assert b._mission is None
+
+    texts = [e.get("text") or e.get("error") for e in events]
+    assert texts.count("vehicle rebooted") >= 4, texts
+    assert "timeout" not in texts, "reported a timeout for a reboot"
+    reboot = next(e for e in events if e.get("type") == "vehicle_reboot")
+    assert "command" in reboot["aborted"]
+    assert "param refresh" in reboot["aborted"]
+    assert "mission upload" in reboot["aborted"]
+
+
+def test_h16_the_extra_streams_are_re_requested_after_a_reboot():
+    """The new instance is back on PX4's defaults and never saw our
+    SET_MESSAGE_INTERVALs, so the throttle that stops us re-asking has to be
+    cleared or the actuator and wind streams never come back."""
+    events = []
+    b, conn = _rebooted_bridge(events)
+    b._request_message(conn, 1, 1, bridgemod.MSG_WIND_COV)
+    assert bridgemod.MSG_WIND_COV in b._last_req_at
+    conn.mav.sent.clear()
+    b._request_message(conn, 1, 1, bridgemod.MSG_WIND_COV)
+    assert conn.mav.sent == [], "the per-message throttle is not working"
+
+    _reboot(b, conn)
+    conn.mav.sent.clear()
+    b._request_message(conn, 1, 1, bridgemod.MSG_WIND_COV)
+    assert [s[0] for s in conn.mav.sent] == ["command_long_send"], \
+        "the stream request stayed throttled across a reboot"

@@ -188,6 +188,15 @@ export interface AckMessage {
     text: string,           // human-readable ("accepted" | "timeout" | "not commander" | …)
 }
 export interface LinkMessage { type: "link", state: LinkState, lastMsgMs: number }
+/** The autopilot restarted: its uptime clock jumped backward. Not a lost link —
+ *  telemetry keeps flowing — but anything the vehicle did not persist is gone,
+ *  so a cached param value can no longer be vouched for. */
+export interface VehicleRebootMessage {
+    type: "vehicle_reboot",
+    bootMs: number,         // the vehicle's uptime after the restart
+    t: number,              // wall-clock ms, for the log
+    aborted: string[],      // in-flight work gs gave up on, for the log
+}
 export interface StatusTextMessage {
     type: "statustext",
     severity: number,       // MAV_SEVERITY (0 emergency … 7 debug)
@@ -250,4 +259,5 @@ export type ServerMessage =
     | ParamValueMessage | ParamsBatchMessage | ParamProgressMessage | ParamAckMessage
     | MissionMessage | MissionProgressMessage | MissionAckMessage
     | MissionCurrentMessage | MissionReachedMessage
-    | FenceMessage | RallyMessage | FenceAckMessage | RallyAckMessage;
+    | FenceMessage | RallyMessage | FenceAckMessage | RallyAckMessage
+    | VehicleRebootMessage;

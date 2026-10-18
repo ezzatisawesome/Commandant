@@ -28,7 +28,8 @@ import { TelemetryClient } from "@/services/telemetry";
 import { $aircraftStore, $trailStore, pushFrame } from "@/stores/aircraft.store";
 import { $linkState, $commander } from "@/stores/link.store";
 import { $params } from "@/stores/params.store";
-import { $missionCurrent } from "@/stores/mission.store";
+import { $missionCurrent, $missionProgress, $missionReached } from "@/stores/mission.store";
+import { $statusTexts, clearStatus } from "@/stores/statustext.store";
 
 let client: TelemetryClient;
 beforeEach(() => {
@@ -36,6 +37,8 @@ beforeEach(() => {
 	FakeWS.instances = [];
 	FakeWS.throwOnConstruct = false;
 	$aircraftStore.set(null); $trailStore.set([]); $params.set({});
+	$missionCurrent.set(null); $missionReached.set(null); $missionProgress.set(null);
+	clearStatus();
 	client = new TelemetryClient("ws://test:8790");
 });
 afterEach(() => { client.disconnect(); vi.useRealTimers(); });
@@ -169,5 +172,52 @@ describe("pushFrame integration", () => {
 		pushFrame({ t: 1, connected: true, lat: 1, lon: 2, alt: 3 });
 		pushFrame({ t: 2, connected: true });
 		expect($aircraftStore.get()?.lat).toBeUndefined(); // latest is latest; overlays hide
+	});
+});
+
+
+describe("a vehicle reboot clears what it invalidates (gs fault H16)", () => {
+	// On a bench or in HITL the autopilot restarts constantly — every restart,
+	// every flash. Telemetry keeps flowing, so this is not a lost link, but PX4
+	// reverts anything that was not saved: a cached param value can no longer be
+	// vouched for, and showing it tells the operator an edit was applied when the
+	// vehicle has dropped it.
+	const reboot = (over = {}) =>
+		({ type: "vehicle_reboot", bootMs: 120, t: 1_700_000_000_000, aborted: [], ...over });
+
+	it("drops the param cache", () => {
+		client.connect(); ws().open();
+		ws().recv({ type: "params", items: [{ name: "FW_AIRSPD_TRIM", value: 15, ptype: 9, index: 3 }] });
+		expect(Object.keys($params.get())).toHaveLength(1);
+		ws().recv(reboot());
+		expect($params.get()).toEqual({});
+	});
+
+	it("says so in the log the operator is already reading", () => {
+		client.connect(); ws().open();
+		ws().recv(reboot());
+		const texts = $statusTexts.get().map((e) => e.text);
+		expect(texts.some((t) => /rebooted/i.test(t))).toBe(true);
+		expect(texts.some((t) => /re-read/i.test(t))).toBe(true);
+	});
+
+	it("clears mission execution state, which belongs to the run that ended", () => {
+		client.connect(); ws().open();
+		ws().recv({ type: "mission_current", seq: 4 });
+		ws().recv({ type: "mission_reached", seq: 3 });
+		expect($missionCurrent.get()).toBe(4);
+		ws().recv(reboot());
+		expect($missionCurrent.get()).toBeNull();
+		expect($missionReached.get()).toBeNull();
+		expect($missionProgress.get()).toBeNull();
+	});
+
+	it("is not treated as telemetry, and does not blank the HUD", () => {
+		client.connect(); ws().open();
+		ws().recv({ type: "telemetry", t: 1, connected: true, lat: 37.4, lon: -122.1, alt: 100 });
+		expect($aircraftStore.get()?.lat).toBe(37.4);
+		ws().recv(reboot());
+		expect($aircraftStore.get()?.lat).toBe(37.4);
+		expect($linkState.get()).not.toBe("lost");
 	});
 });
