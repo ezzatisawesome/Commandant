@@ -108,7 +108,11 @@ export class TelemetryClient {
 	private pendingMissions = new Map<string, PendingMission>();
 	// One in-flight status request. There is no id on the wire because there is
 	// never more than one outstanding: it is a human asking a question.
-	private pendingStatus: { resolve: (s: StatusMessage) => void; timer: ReturnType<typeof setTimeout> } | null = null;
+	private pendingStatus: {
+		resolve: (s: StatusMessage) => void;
+		reject: (e: Error) => void;
+		timer: ReturnType<typeof setTimeout>;
+	} | null = null;
 	// fence_push / rally_push requests awaiting their ack, keyed by id.
 	private pendingFence = new Map<string, PendingGeo>();
 	private pendingRally = new Map<string, PendingGeo>();
@@ -444,7 +448,7 @@ export class TelemetryClient {
 				this.pendingStatus = null;
 				reject(new Error("timeout"));
 			}, COMMAND_TIMEOUT_MS);
-			this.pendingStatus = { resolve, timer };
+			this.pendingStatus = { resolve, reject, timer };
 			this.send({ type: "status" });
 		});
 	}
@@ -659,6 +663,16 @@ export class TelemetryClient {
 				p.reject(new Error(reason));
 			}
 			m.clear();
+		}
+		// A status request outstanding when the link goes is not in `pending`
+		// (there is no id on the wire for it), so without this it would sit
+		// unsettled until its own 5 s timeout — or forever, on disconnect, where
+		// no timer fires because the socket is gone. Every other request type is
+		// settled here; this one has to be too.
+		if (this.pendingStatus) {
+			clearTimeout(this.pendingStatus.timer);
+			this.pendingStatus.reject(new Error(reason));
+			this.pendingStatus = null;
 		}
 	}
 

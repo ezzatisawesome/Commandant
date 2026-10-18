@@ -109,6 +109,20 @@ cd packages/console && npm test           # 356 — stores, WS client, validatio
 cd packages/console && npm run typecheck
 ```
 
+Everything checkable without an aircraft, in one command — this is the gate to
+run before a SITL session, a HITL session, or a flight:
+
+```sh
+npm run preflight           # suites, typecheck, production build, frame diff
+npm run preflight:soak      # and the simulated-radio rehearsals (~2 min)
+```
+
+It stops at the first failure and prints that stage's tail. It exists because
+the gate was seven commands, and a seven-command gate gets run as two — and
+because checking a suite by grepping its summary line misses a suite that passes
+every test and still exits non-zero, which is how two unhandled rejections hid
+in the console suite until this script checked the exit code.
+
 Two things the unit suites cannot ask, both against a simulated autopilot behind
 a simulated telemetry radio (bandwidth, latency, packet loss) — which is where
 the timeout and retry constants actually get exercised. Both are stochastic and

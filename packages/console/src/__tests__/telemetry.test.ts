@@ -238,7 +238,7 @@ describe("command authority can actually be taken (gs fault H20)", () => {
 	it("forces only when the operator pressed Take command", () => {
 		client.connect();
 		ws().open();
-		void client.takeCommand();
+		client.takeCommand().catch(() => {});
 		const claim = ws().lastSent();
 		expect(claim.type).toBe("claim");
 		expect(claim.force).toBe(true);
@@ -271,7 +271,10 @@ describe("stream control is a write to the vehicle, not a display preference (gs
 	// clamp was invisible and the operator just saw nothing happen.
 	it("carries an id so the outcome comes back", () => {
 		client.connect(); ws().open();
-		void client.setStream(375, 25);
+		// Swallow the rejection: teardown fails every outstanding request, and
+		// an unhandled one makes the whole suite exit non-zero while still
+		// reporting every test as passed.
+		client.setStream(375, 25).catch(() => {});
 		const sent = ws().lastSent();
 		expect(sent.type).toBe("stream");
 		expect(typeof sent.id).toBe("string");
@@ -381,5 +384,27 @@ describe("plan readback state across a reconnect", () => {
 		expect($planRead.get()).toMatchObject({ mission: false, fence: true, rally: false });
 		ws().recv({ type: "rally", count: 0, items: [] });
 		expect($planRead.get()).toMatchObject({ fence: true, rally: true });
+	});
+});
+
+
+describe("teardown settles every kind of outstanding request", () => {
+	// A request left unsettled is not a failing test — it is a suite that passes
+	// 349 tests and still exits non-zero, which is exactly how this went
+	// unnoticed until one command checked the exit code instead of grepping the
+	// count. `status` has no id on the wire, so it is not in `pending` and had
+	// to be settled explicitly.
+	it("rejects an in-flight status request when the link goes", async () => {
+		client.connect(); ws().open();
+		const p = client.status();
+		ws().close();
+		await expect(p).rejects.toThrow(/link closed/);
+	});
+
+	it("rejects an in-flight status request on disconnect, where no timer fires", async () => {
+		client.connect(); ws().open();
+		const p = client.status();
+		client.disconnect();
+		await expect(p).rejects.toThrow(/disconnected/);
 	});
 });
