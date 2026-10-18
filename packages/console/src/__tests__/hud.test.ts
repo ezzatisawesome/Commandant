@@ -6,6 +6,7 @@ import {
 	quantize, HUD_STEP,
 } from "@/lib/hud";
 import { FIELD_CATALOG } from "@/stores/displayConfig.store";
+import { GROUP_STALE_MS, groupAgeMs, isNum } from "@/lib/flightGeometry";
 
 // An instrument that is wrong is worse than no instrument: the operator reads it
 // instead of thinking. So the symbology is pinned numerically — sign conventions
@@ -316,5 +317,37 @@ describe("every cell knows which stream it depends on (gs fault H19, completed)"
 		for (const d of FIELD_CATALOG) {
 			if (d.group !== undefined) expect(reported).toContain(d.group);
 		}
+	});
+});
+
+describe("the attitude ball blanks when ATTITUDE stops, not only when the link does", () => {
+	// Hud.tsx already says "a HUD frozen at the last attitude is a lie" and
+	// blanks the ball for a dead link. The same lie is available with the link
+	// alive: the frame keeps arriving at 25 Hz carrying the last roll and pitch,
+	// so linkState stays `alive` and the ball shows a confident attitude that is
+	// minutes old. Pinned as the decision the component makes.
+	const ballBlanked = (linkState: string, connected: boolean,
+		ages: Record<string, number> | undefined) => {
+		const age = groupAgeMs(ages, "attitude");
+		const cold = isNum(age) && age > GROUP_STALE_MS;
+		return linkState !== "alive" || !connected || cold;
+	};
+
+	it("blanks for a dead link, as it always did", () => {
+		expect(ballBlanked("lost", false, { attitude: 40 })).toBe(true);
+	});
+
+	it("blanks when only the attitude stream has stopped", () => {
+		// The link is fine — position is 40 ms old — and the attitude is four
+		// minutes stale. This is the case that used to draw a confident ball.
+		expect(ballBlanked("alive", true, { position: 40, attitude: 240_000 })).toBe(true);
+	});
+
+	it("draws normally when the attitude stream is live", () => {
+		expect(ballBlanked("alive", true, { position: 40, attitude: 45 })).toBe(false);
+	});
+
+	it("draws normally when the daemon reports no ages (an older gs)", () => {
+		expect(ballBlanked("alive", true, undefined)).toBe(false);
 	});
 });

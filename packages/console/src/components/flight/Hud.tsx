@@ -6,7 +6,7 @@ import { useStore } from "@nanostores/react";
 import { $hudFrame } from "@/stores/aircraft.store";
 import { $derived } from "@/stores/derived.store";
 import { $linkState } from "@/stores/link.store";
-import { isNum } from "@/lib/flightGeometry";
+import { isNum, GROUP_STALE_MS, groupAgeMs } from "@/lib/flightGeometry";
 import {
 	headingTicks, tapeTicks, wrap360, ballPitchMarks, BALL_BANK_TICKS,
 	bankMajor, rollLabel, pitchLabel, quantize, HUD_STEP,
@@ -106,7 +106,15 @@ export default function Hud() {
 	const cx = w / 2;
 	const cy = h / 2;
 
-	const dead = linkState !== "alive" || !f?.connected;
+	// "A HUD frozen at the last attitude is a lie" (above) is also true when the
+	// LINK is fine and only the ATTITUDE stream has stopped — the frame keeps
+	// arriving at 25 Hz carrying the last roll and pitch, so linkState stays
+	// `alive` and the ball shows a confident attitude that is minutes old. The
+	// comment above anticipated this; the per-group ages are what make it
+	// detectable.
+	const attitudeAge = groupAgeMs(f?.ages, "attitude");
+	const attitudeCold = isNum(attitudeAge) && attitudeAge > GROUP_STALE_MS;
+	const dead = linkState !== "alive" || !f?.connected || attitudeCold;
 	const rollDeg = quantize(isNum(f?.roll) ? (f!.roll * 180) / Math.PI : null,
 		HUD_STEP.attitudeDeg);
 	const pitchDeg = quantize(isNum(f?.pitch) ? (f!.pitch * 180) / Math.PI : null,
