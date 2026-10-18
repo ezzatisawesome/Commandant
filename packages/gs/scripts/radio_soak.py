@@ -111,6 +111,7 @@ class SimAutopilot:
         self.planes: dict[int, dict] = {}        # mission_type -> {seq: item}
         self.custom_mode = 1 << 16               # MANUAL
         self.gcs_heartbeats = 0                  # proof gs identifies itself (H1)
+        self.reboot_now = False                  # set to restart the uptime clock
         self.mission_seq = 0
         self.params = {f"P_{i:03d}": float(i) for i in range(n_params)}
         self._stop = threading.Event()
@@ -126,6 +127,16 @@ class SimAutopilot:
     def _tx(self):
         boot = 0
         while not self._stop.is_set():
+            if self.reboot_now:
+                # What a restart looks like from the GCS side: the uptime clock
+                # starts over, and everything the old instance was mid-way
+                # through is simply gone.
+                self.reboot_now = False
+                boot = 0
+                self.armed = False
+                self.custom_mode = 1 << 16
+                self.planes.clear()
+                self.stored = {}
             boot += 200
             self.radio.send("heartbeat_send", m.MAV_TYPE_FIXED_WING, m.MAV_AUTOPILOT_PX4,
                             128 if self.armed else 0, self.custom_mode,

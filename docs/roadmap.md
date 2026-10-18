@@ -81,6 +81,40 @@ fixed (`packages/gs/tests/test_flight_ready.py`, 14 tests).
    the EKF wind estimate are simply never populated, with no error. The dialect
    is now rebound explicitly.
 
+**A quick reboot froze the aircraft permanently (2026-10-18):** found by the
+day-in-the-life rehearsal the moment a reboot was injected into it — and
+pre-existing, not introduced by this pass.
+
+A backward `time_boot_ms` jump is either a reordered frame or a reboot, and the
+rule was "a gap of at least `REBOOT_GAP_MS` is a reboot, anything smaller is a
+reorder". So a vehicle that had been up 1.6 s and restarts at 0.2 s gives a
+1.4 s gap, and **every post-reboot frame is dropped as reordered**:
+`_last_pos_boot_ms` never advances, the position freezes permanently, and
+heartbeats keep `linkState` green the whole time. The
+stale-aircraft-shown-as-live failure yet again, and it takes a bench
+power-cycle or a HITL restart to hit — which is to say it happens constantly.
+
+| vehicle up | restarts at | gap | before |
+|---|---|---|---|
+| 600 s | 0.2 s | 599.8 s | reboot seen |
+| 6 s | 0.2 s | 5.8 s | reboot seen |
+| 3.5 s | 0.2 s | 3.3 s | **dropped, frozen forever** |
+| 1.6 s | 0.2 s | 1.4 s | **dropped, frozen forever** |
+| 1.6 s | 1.4 s | 0.2 s | dropped — correct, a real reorder |
+
+Below `REBOOT_GAP_MS` the two are now told apart by two further signals, because
+one frame genuinely is not enough: a reorder moves the clock back by a fraction
+of the uptime while a reboot takes it to near zero (so a candidate must have
+lost more than half of it), and a reorder is a blip in an ascending stream while
+after a reboot the stream **ascends from the new low value** (so a candidate is
+held for one frame and confirmed only when the next continues from it). A lone
+low outlier, and runs of reorders, both stay dropped.
+
+The unit tests missed this because they all used ten minutes of uptime. The
+rehearsal caught it because its fat-pipe run finishes in 3.5 s, so the injected
+reboot landed inside the window — the argument for having a test that walks the
+real sequence at real speeds rather than only poking state machines.
+
 **A plan that leaves its own geofence (2026-10-18):** `missionCheck.ts` already
 predicts the one refusal PX4 announces only through STATUSTEXT — a plan missing
 the takeoff/landing items `MIS_TKO_LAND_REQ` demands. It did not predict the

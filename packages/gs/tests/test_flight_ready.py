@@ -1692,3 +1692,89 @@ def test_h22_param_refresh_stays_open_to_any_client(ports):
 
     import asyncio
     asyncio.run(scenario())
+
+
+def test_h23_an_id_less_param_set_is_not_filed_under_none():
+    """`_pending_clients` routes a verdict back to the socket that asked. An
+    id-less param_set was filed under the key `None`, so two clients sending one
+    would cross-deliver each other's verdicts. Commander-only means one client
+    in practice, but the mission path already guarded this and the two should
+    not differ."""
+    import asyncio
+    b = _bridge()
+
+    async def scenario():
+        b._loop = asyncio.get_running_loop()
+        ws = object()
+        b._commander = ws
+        await b._on_ws_message(ws, json.dumps({"type": "param_set", "name": "FW_AIRSPD_TRIM",
+                                               "value": 15.0, "ptype": 9}))
+        assert None not in b._pending_clients, "filed an ack route under None"
+        # With an id it is routed, as it must be.
+        await b._on_ws_message(ws, json.dumps({"type": "param_set", "id": "p1",
+                                               "name": "FW_AIRSPD_TRIM",
+                                               "value": 16.0, "ptype": 9}))
+        assert b._pending_clients.get("p1") is ws
+
+    asyncio.run(scenario())
+
+
+# --- H24: a reboot inside 5 s of the last report froze the aircraft --------
+
+def _boot_run(boots):
+    """Feed a sequence of GLOBAL_POSITION_INT uptimes; return (bootMs seen by
+    clients, number of reboot events)."""
+    events: list = []
+    b = _bridge()
+    b._loop = _capturing_loop(events)
+    conn = RecordingConn()
+    b._vehicle = (1, 1)
+    for i, boot in enumerate(boots):
+        b._on_mav(conn, _gpi(boot, lat=374000000 + i))
+    return b, [e for e in events if e.get("type") == "vehicle_reboot"]
+
+
+def test_h24_a_reboot_within_five_seconds_of_the_last_report_is_not_dropped():
+    """The reorder guard dropped any backward uptime jump smaller than
+    REBOOT_GAP_MS. A vehicle that had been up 1.6 s and restarts at 0.2 s gives
+    a 1.4 s gap, so EVERY post-reboot frame was dropped, `_last_pos_boot_ms`
+    never advanced, and the position froze permanently while heartbeats kept
+    linkState green -- the stale-aircraft-shown-as-live failure yet again. It
+    takes a bench power-cycle or a HITL restart to hit, which is to say it
+    happens constantly. Found by the day-in-the-life rehearsal, whose fat-pipe
+    run finishes in ~3.5 s and so rebooted inside the window; the unit tests had
+    all used ten minutes of uptime."""
+    b, reboots = _boot_run([800, 1200, 1600, 200, 400, 600])
+    assert reboots, "a reboot inside the window went unnoticed"
+    assert b.latest["bootMs"] == 600, \
+        f"position froze after the reboot (bootMs stuck at {b.latest['bootMs']})"
+    assert b._last_pos_boot_ms == 600
+
+
+def test_h24_a_genuinely_reordered_frame_is_still_dropped():
+    """The guard exists for a reason: on a lossy link frames arrive out of
+    order, and a late one must not drag the position backwards."""
+    b, reboots = _boot_run([1000, 1200, 1400, 1300, 1600])
+    assert reboots == [], "a reordered frame was reported as a reboot"
+    assert b.latest["bootMs"] == 1600
+    # Several reorders in a row must not accumulate into a false reboot either.
+    b2, reboots2 = _boot_run([2000, 1800, 1900, 1850, 2100])
+    assert reboots2 == [], "repeated reorders were mistaken for a reboot"
+    assert b2.latest["bootMs"] == 2100
+
+
+def test_h24_a_single_low_frame_is_not_enough_to_declare_a_reboot():
+    """One frame cannot tell the two apart, so a candidate is held and only
+    confirmed when the stream continues from the new low value. A lone outlier
+    followed by the old baseline resuming was a glitch, not a restart."""
+    b, reboots = _boot_run([3000, 3200, 100, 3400, 3600])
+    assert reboots == [], "declared a reboot from one low frame"
+    assert b.latest["bootMs"] == 3600
+
+
+def test_h24_a_long_uptime_reboot_is_still_unambiguous():
+    """The original path: a gap of at least REBOOT_GAP_MS needs no confirming,
+    and must still fire on the very first post-reboot frame."""
+    b, reboots = _boot_run([600_000, 200])
+    assert len(reboots) == 1
+    assert b.latest["bootMs"] == 200

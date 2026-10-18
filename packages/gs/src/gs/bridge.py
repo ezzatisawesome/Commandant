@@ -61,6 +61,24 @@ REBOOT_GAP_MS = 5000     # a backward time_boot_ms jump bigger than this = PX4 r
 # warning saying the aircraft restarted, 49.7 days into a healthy flight.
 BOOT_MS_WRAP = 2 ** 32
 BOOT_WRAP_MARGIN_MS = 60_000   # "near" either end of the counter
+# A backward uptime jump is either a REORDERED frame or a REBOOT, and the old
+# rule -- "a gap of at least REBOOT_GAP_MS is a reboot, anything smaller is a
+# reorder" -- gets it wrong whenever the vehicle reboots within 5 s of its last
+# report. MEASURED: up 1.6 s and restarting at 0.2 s gives a 1.4 s gap, so every
+# post-reboot frame is dropped as reordered, `_last_pos_boot_ms` never advances,
+# and the position freezes PERMANENTLY while heartbeats keep linkState green --
+# the stale-aircraft-shown-as-live failure again. It takes a bench power-cycle or
+# a HITL restart to hit, which is to say it happens constantly.
+#
+# Below REBOOT_GAP_MS the two are told apart by two further signals, because one
+# frame is not enough to decide:
+#   * a reorder moves the clock back by a fraction of the uptime (frames in
+#     flight), while a reboot takes it back to near zero -- so a candidate must
+#     have lost more than half of it;
+#   * a reorder is a blip in an otherwise ascending stream, while after a reboot
+#     the stream ASCENDS FROM THE NEW LOW VALUE. So a candidate is dropped and
+#     remembered, and confirmed only when the next frame continues from it.
+BOOT_REBOOT_RATIO = 2          # candidate must be < last/2 to be a reboot at all
 TARGET_SOURCE_TTL_MS = 2000   # JSON setpoint wins over PX4's for this long after it arrives
 BATTERY_SOURCE_TTL_MS = 3000  # JSON battery wins over PX4's dummy for this long
 TARGET_STALE_MS = 3000        # re-request msg 87 once the setpoint stream goes quiet
@@ -836,6 +854,9 @@ class Bridge:
         # Set by _on_mav_state when the vehicle's uptime clock jumps backward
         # (a reboot); acted on in _on_mav_protocol, which may transmit.
         self._reboot_pending: int | None = None
+        # A backward uptime jump too small to be unambiguous, held for one frame
+        # so the next one can say whether it was a reorder or a reboot.
+        self._boot_suspect: int | None = None
         # Per-message-group freshness; see _AGE_GROUPS. Mav-thread writes under
         # the lock, the broadcast loop reads it there too.
         self._src_at: dict[str, int] = {}
@@ -884,6 +905,7 @@ class Bridge:
             print(f"[gs] link reopened: releasing vehicle lock on sysid {self._vehicle[0]}")
         self._vehicle = None
         self._last_pos_boot_ms = -1
+        self._boot_suspect = None
         self._src_at.clear()        # the new link's streams have their own ages
         self._last_req_at.clear()   # re-request the extra streams on the new link
 
@@ -1553,8 +1575,26 @@ class Bridge:
         if t == "GLOBAL_POSITION_INT":
             # Drop stale/reordered frames; a large backward jump is a reboot.
             boot = msg.time_boot_ms
-            if boot <= self._last_pos_boot_ms and self._last_pos_boot_ms - boot < REBOOT_GAP_MS:
-                return
+            last = self._last_pos_boot_ms
+            if last >= 0 and boot <= last and last - boot < REBOOT_GAP_MS:
+                # Ambiguous: a reordered frame, or a reboot that happened within
+                # REBOOT_GAP_MS of the last report. See BOOT_REBOOT_RATIO.
+                suspect = self._boot_suspect
+                confirmed = (suspect is not None
+                             and suspect <= boot < suspect + REBOOT_GAP_MS)
+                if not confirmed:
+                    # Only a jump that loses most of the uptime is even a
+                    # candidate; a true reorder is a small blip. Remember it and
+                    # wait for the next frame to say which this was.
+                    self._boot_suspect = (boot if boot * BOOT_REBOOT_RATIO < last
+                                          else None)
+                    return
+                # The stream is ascending from the low value: it rebooted.
+                self._boot_suspect = None
+                self._reboot_pending = boot
+                self._last_pos_boot_ms = boot
+            else:
+                self._boot_suspect = None
             # A big backward jump in the VEHICLE's own uptime clock is a reboot.
             # It was already tolerated here (the frame is accepted rather than
             # dropped as reordered), but nothing was told about it -- and a
@@ -1562,14 +1602,14 @@ class Bridge:
             # and in HITL this happens constantly: every restart, every flash.
             # Flagged here, acted on in _on_mav_protocol, because reacting means
             # transmitting and this runs under the lock.
-            if self._last_pos_boot_ms >= 0 and boot < self._last_pos_boot_ms:
+            if last >= 0 and boot < last:
                 # ...unless the counter simply wrapped: it was about to overflow
                 # and has come back around. See BOOT_MS_WRAP.
-                wrapped = (self._last_pos_boot_ms >= BOOT_MS_WRAP - BOOT_WRAP_MARGIN_MS
+                wrapped = (last >= BOOT_MS_WRAP - BOOT_WRAP_MARGIN_MS
                            and boot <= BOOT_WRAP_MARGIN_MS)
                 if wrapped:
                     print(f"[gs] vehicle uptime counter wrapped at 49.7 days "
-                          f"({self._last_pos_boot_ms} -> {boot} ms); not a reboot")
+                          f"({last} -> {boot} ms); not a reboot")
                 else:
                     self._reboot_pending = boot
             self._last_pos_boot_ms = boot
@@ -2024,7 +2064,13 @@ class Bridge:
                 await self._send(ws, {"type": "param_ack", "id": cid, "name": msg.get("name"),
                                       "value": msg.get("value"), "ok": False, "text": "not commander"})
                 return
-            self._pending_clients[cid] = ws
+            # Only route an ack back when there is an id to route it under. An
+            # id-less param_set used to be filed under the key `None`, so two
+            # clients sending one would cross-deliver each other's verdicts.
+            # (Commander-only, so one client in practice; the mission path
+            # already guards this and the two should not differ.)
+            if cid is not None:
+                self._pending_clients[cid] = ws
             self._param_queue.put({"kind": "set", "id": cid, "name": msg.get("name"),
                                    "value": msg.get("value"), "ptype": msg.get("ptype")})
 

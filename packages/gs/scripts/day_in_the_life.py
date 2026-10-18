@@ -179,6 +179,23 @@ async def fly(args):
                          lambda g: g.get("type") == "ack" and g.get("id") == "r1",
                          lambda g: g["text"])
 
+            if args.reboot:
+                print(" the autopilot restarts mid-mission")
+                px4.reboot_now = True
+                await r.step("gs reports the reboot", None,
+                             lambda g: g.get("type") == "vehicle_reboot",
+                             lambda g: f"bootMs {g['bootMs']}, aborted {g['aborted']}")
+                await r.step("telemetry resumes on its own", None,
+                             lambda g: (g.get("type") == "telemetry"
+                                        and g.get("linkState") == "alive"
+                                        and (g.get("bootMs") or 10 ** 9) < 5000),
+                             lambda g: f"bootMs {g.get('bootMs')}, "
+                                       f"dataAge {g.get('dataAgeMs')} ms")
+                await r.step("still commandable after the reboot",
+                             {"type": "command", "id": "a2", "name": "arm"},
+                             lambda g: g.get("type") == "ack" and g.get("id") == "a2",
+                             lambda g: g["text"])
+
             print(" come home")
             await r.step("RTL", {"type": "command", "id": "h1", "name": "rtl"},
                          lambda g: g.get("type") == "ack" and g.get("id") == "h1",
@@ -229,6 +246,8 @@ def main() -> int:
     ap.add_argument("--items", type=int, default=12, help="mission items")
     ap.add_argument("--seed", type=int, default=3)
     ap.add_argument("--budget", type=float, default=45.0, help="per-step budget, seconds")
+    ap.add_argument("--reboot", action="store_true",
+                    help="restart the autopilot mid-mission and check the recovery")
     ap.add_argument("--net", action="store_true",
                     help="run on a fat pipe instead of the radio model")
     return asyncio.run(fly(ap.parse_args()))
