@@ -68,6 +68,16 @@ lat/lon/alt/roll, only the frame timestamp advancing. So:
 
 - once any MAVLink vehicle has been seen, **only** MAVLink freshness sets
   `linkState` and `dataAgeMs`;
+- once any MAVLink vehicle has been seen, MAVLink also owns **flight state**
+  (position, attitude, air data, mode, armed). The JSON feed keeps only what
+  MAVLink has no carrier for — the solar/power model, the sim's own modelled
+  wind — plus PX4 SITL's dummy battery and the commanded-path target;
+- the **target** is arbitrated separately and more strictly: PX4's
+  `POSITION_TARGET_GLOBAL_INT` owns `targetLat/Lon/Alt` whenever it is
+  streaming one, because the sim projects its setpoint about its *own* home and
+  that measured a 2310 m constant offset against PX4's origin. JSON draws the
+  overlay only when no autopilot setpoint has arrived — which is the
+  flightdyn-only run, where there is no PX4 at all;
 - on a pure flightlink run (no PX4), the JSON feed is genuinely the only source
   and drives both.
 

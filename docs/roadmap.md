@@ -87,8 +87,20 @@ fixed (`packages/gs/tests/test_flight_ready.py`, 14 tests).
    with no arbitration. The two interleave, the aircraft jitters between
    estimate and truth, and `armed` from the sim can contradict the autopilot the
    operator is commanding. Once a vehicle is locked MAVLink owns flight state;
-   JSON keeps `JSON_ONLY_KEYS` (the power model, the sim's own wind, the two PX4
-   SITL fakes already TTL-arbitrated). With no vehicle locked, nothing changes.
+   JSON keeps `JSON_ONLY_KEYS` — the power model, the sim's own wind, PX4 SITL's
+   dummy battery, and the commanded-path target. With no vehicle locked, nothing
+   changes.
+
+   *Amended after merging `origin/main`:* the target keys are in that list
+   because JSON must still draw the overlay on a flightdyn-only run, where no
+   vehicle ever locks — **not** because JSON outranks PX4 for them. It does not:
+   a separate gate gives PX4 ownership whenever it is streaming a setpoint, which
+   is the fix for the 2310 m commanded-path offset the sim's own origin produced.
+   Both gates apply, and neither subsumes the other — `_json_owns` decides
+   whether JSON may speak at all, `mav_owns_target` decides who wins when both
+   can. A reader following the original sentence alone would conclude JSON holds
+   the target, which was true of the code this entry was written against and is
+   not true now.
 5. **The vehicle lock never released.** `_vehicle` locks onto the first
    autopilot heartbeat — right on a live link, a trap across a reopen: swap the
    USB autopilot for a radio to an aircraft with a different `MAV_SYS_ID` and
