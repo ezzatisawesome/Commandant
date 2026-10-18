@@ -96,11 +96,25 @@ cd packages/console && npm test           # 308 — stores, WS client, validatio
 cd packages/console && npm run typecheck
 ```
 
-The protocol state machines are also soak-tested across a simulated telemetry
-radio — bandwidth, latency and packet loss — which is where their timeout and
-retry constants actually get exercised. Stochastic and minutes per run, so it is
-not part of the suite; run it after touching a state machine or a timing
-constant:
+Two things the unit suites cannot ask, both against a simulated autopilot behind
+a simulated telemetry radio (bandwidth, latency, packet loss) — which is where
+the timeout and retry constants actually get exercised. Both are stochastic and
+slow, so neither is in the suite; run them after touching a state machine or a
+timing constant.
+
+**Does the whole day work?** Walks the operator's own sequence once, in order —
+link up, take command, read params, write one, upload a geofence and read it
+back, upload a mission and read it back, arm, AUTO.MISSION, progress,
+fly-to-here, RTL, disarm — and reports what each step cost. Exits non-zero if
+any step fails, so it can gate a release.
+
+```sh
+cd packages/gs && uv run python scripts/day_in_the_life.py          # 57600 SiK
+uv run python scripts/day_in_the_life.py --net                      # fat pipe
+uv run python scripts/day_in_the_life.py --loss 0.08                # a worse day
+```
+
+**Where does it break?** Hammers one operation at a time to find the boundary.
 
 ```sh
 cd packages/gs && uv run python scripts/radio_soak.py        # 57600 SiK, 5% loss

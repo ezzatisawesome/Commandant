@@ -107,7 +107,11 @@ class SimAutopilot:
         self.mission: dict[int, object] = {}
         self.mission_expect: int | None = None
         self.kickoffs = 0
-        self.stored: dict[int, dict] = {}   # the mission the vehicle holds
+        self.stored: dict[int, dict] = {}        # the MISSION plane
+        self.planes: dict[int, dict] = {}        # mission_type -> {seq: item}
+        self.custom_mode = 1 << 16               # MANUAL
+        self.gcs_heartbeats = 0                  # proof gs identifies itself (H1)
+        self.mission_seq = 0
         self.params = {f"P_{i:03d}": float(i) for i in range(n_params)}
         self._stop = threading.Event()
 
@@ -124,10 +128,19 @@ class SimAutopilot:
         while not self._stop.is_set():
             boot += 200
             self.radio.send("heartbeat_send", m.MAV_TYPE_FIXED_WING, m.MAV_AUTOPILOT_PX4,
-                            128 if self.armed else 0, (4 << 16) | (4 << 24),
+                            128 if self.armed else 0, self.custom_mode,
                             m.MAV_STATE_ACTIVE)
+            # Executing a mission: report progress, as PX4 does.
+            if self.armed and self.stored and ((self.custom_mode >> 16) & 0xFF) == 4:
+                self.radio.send("mission_current_send", self.mission_seq)
+                if boot % 1000 < 250 and self.mission_seq < len(self.stored) - 1:
+                    self.radio.send("mission_item_reached_send", self.mission_seq)
+                    self.mission_seq += 1
             self.radio.send("global_position_int_send", boot, 374000000, -1221000000,
                             120000, 9000, 1500, 0, 0, 9000)
+            self.radio.send("attitude_send", boot, 0.02, 0.05, 1.57, 0.0, 0.0, 0.0)
+            self.radio.send("gps_raw_int_send", boot * 1000, 3, 374000000,
+                            -1221000000, 120000, 120, 150, 1400, 9000, 14)
             time.sleep(0.2)
 
     def _rx(self):
@@ -136,11 +149,27 @@ class SimAutopilot:
             if msg is None or random.random() < self.loss:   # uplink loss
                 continue
             t = msg.get_type()
-            if t == "COMMAND_LONG":
+            if t == "HEARTBEAT" and msg.type == m.MAV_TYPE_GCS:
+                self.gcs_heartbeats += 1
+            elif t == "PARAM_SET":
+                # Accept the write and echo it, as PX4 does. Without this gs
+                # retried and reported `timeout` -- the harness lying about the
+                # daemon, which the day-in-the-life rehearsal caught on its
+                # first run.
+                name = (msg.param_id.decode() if isinstance(msg.param_id, bytes)
+                        else str(msg.param_id)).rstrip("\x00")
+                self.params[name] = msg.param_value
+                self.radio.send("param_value_send", name.encode(), msg.param_value,
+                                msg.param_type, len(self.params), 65535)
+            elif t == "COMMAND_LONG":
                 if msg.command == m.MAV_CMD_SET_MESSAGE_INTERVAL:
                     continue
                 if msg.command == m.MAV_CMD_COMPONENT_ARM_DISARM:
                     self.armed = bool(msg.param1)
+                elif msg.command == m.MAV_CMD_DO_SET_MODE:
+                    self.custom_mode = (int(msg.param2) << 16) | (int(msg.param3) << 24)
+                elif msg.command == m.MAV_CMD_NAV_RETURN_TO_LAUNCH:
+                    self.custom_mode = (4 << 16) | (5 << 24)      # AUTO.RTL
                 self.radio.send("command_ack_send", msg.command, m.MAV_RESULT_ACCEPTED)
             elif t == "PARAM_REQUEST_LIST":
                 for i, (n, v) in enumerate(sorted(self.params.items())):
@@ -155,13 +184,15 @@ class SimAutopilot:
             elif t == "MISSION_REQUEST_LIST":
                 # A download: answer with the count, then items on request.
                 self.radio.send("mission_count_send", 255, 190,
-                                len(self.stored), msg.mission_type)
+                                len(self.planes.get(msg.mission_type, {})),
+                                msg.mission_type)
             elif t in ("MISSION_REQUEST_INT", "MISSION_REQUEST"):
-                it = self.stored.get(msg.seq)
+                it = self.planes.get(msg.mission_type, {}).get(msg.seq)
                 if it is not None:
                     self.radio.send("mission_item_int_send", 255, 190, msg.seq,
                                     it["frame"], it["command"], it["current"],
-                                    it["autocontinue"], 0.0, 0.0, 0.0, 0.0,
+                                    it["autocontinue"], it["p1"], it["p2"],
+                                    it["p3"], it["p4"],
                                     it["x"], it["y"], it["z"], msg.mission_type)
             elif t == "MISSION_COUNT":
                 # A MISSION_COUNT mid-transfer discards everything and restarts,
@@ -175,10 +206,21 @@ class SimAutopilot:
                 self.mission[msg.seq] = msg
                 if len(self.mission) >= (self.mission_expect or 0):
                     # Keep it, so a subsequent download has something to serve.
-                    self.stored = {
+                    kept = {
                         s_: {"frame": v.frame, "command": v.command, "current": v.current,
-                             "autocontinue": v.autocontinue, "x": v.x, "y": v.y, "z": v.z}
+                             "autocontinue": v.autocontinue,
+                             # param1..4 carry the fence vertex counts and the
+                             # waypoint radii; a real autopilot preserves them,
+                             # and dropping them made a fence read back with no
+                             # vertexCount at all.
+                             "p1": v.param1, "p2": v.param2,
+                             "p3": v.param3, "p4": v.param4,
+                             "x": v.x, "y": v.y, "z": v.z}
                         for s_, v in self.mission.items()}
+                    self.planes[msg.mission_type] = kept
+                    if msg.mission_type == m.MAV_MISSION_TYPE_MISSION:
+                        self.stored = kept
+                        self.mission_seq = 0
                     self.radio.send("mission_ack_send", 255, 190, 0, msg.mission_type)
                 else:
                     nxt = next(s for s in range(self.mission_expect)

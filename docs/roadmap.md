@@ -72,6 +72,37 @@ fixed (`packages/gs/tests/test_flight_ready.py`, 14 tests).
    the EKF wind estimate are simply never populated, with no error. The dialect
    is now rebound explicitly.
 
+**A day in the life, rehearsed (2026-10-18):** `scripts/day_in_the_life.py`
+walks the sequence an operator actually walks — link up, take command, read
+params, write one, upload a geofence and read it back, upload a mission and read
+it back, arm, AUTO.MISSION, watch progress, fly-to-here, RTL, disarm — once, in
+order, against a simulated autopilot behind a simulated radio. `radio_soak.py`
+hammers one operation to find where a state machine breaks; this asks whether
+the whole day works, and the two find different things, because most of these
+steps only interact when done in order on one link.
+
+| link | result |
+|---|---|
+| fat pipe (SITL / HITL / USB) | **17/17 ok, 3.5 s** |
+| 3.4 kB/s SiK, 120 ms, 3 % loss | **17/17 ok, 32.3 s** |
+| same at 8 % loss | **17/17 ok, 44.4 s** |
+| same at 15 % loss | 16/17 — only the param refresh outran its 25 s budget (it takes 20–22 s at 3–8 %); every *flight* operation still completed |
+
+Every fix from these passes shows up in that run, in sequence: autodetect brings
+the link up with no configuration, PX4 receives GCS heartbeats (33 of them),
+the paced refresh takes 20 s and the param write immediately after it still acks
+in **0.20 s** — which is the contention fix working rather than asserted — the
+fence reads back with the vertex count gs derived, and arm / mode / reposition /
+RTL / disarm all ack under 350 ms on the radio.
+
+**It also caught itself being wrong twice**, which is the argument for having
+it. Its first run reported `ok` for a param write whose ack said `timeout`,
+because arriving was all it checked — a rehearsal that passes a failed flight is
+worse than none, so a step is now judged on the reply's `ok`/`error`. And the
+failure it then surfaced was the harness: the stand-in autopilot had no
+`PARAM_SET` handler, and dropped `param1..4` through a mission round trip, which
+is why the fence came back with no vertex count at all.
+
 **Stream control was not authority-gated (2026-10-18):** `stream` is labelled a
 display preference, and is not one: it sends `SET_MESSAGE_INTERVAL`, which
 changes what the *vehicle* transmits, for every client, out of a shared and
