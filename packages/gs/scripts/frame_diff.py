@@ -53,7 +53,8 @@ def msg(t, **f):
     return ns
 
 def sequence():
-    m = __import__("pymavlink.mavutil", fromlist=["mavutil"]).mavlink
+    # Field values are literals on purpose: the point is that both versions see
+    # byte-identical input, so nothing here may depend on the module under test.
     return [
         msg("HEARTBEAT", type=1, autopilot=12, base_mode=128,
             custom_mode=(4<<16)|(4<<24), system_status=4),
