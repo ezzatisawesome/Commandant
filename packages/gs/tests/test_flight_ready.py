@@ -2028,3 +2028,78 @@ def test_no_instance_attribute_is_written_but_never_read():
     assert unread == [], (
         f"written but never read: {unread}. Either something reads it and this "
         f"test is wrong, or it is dead and should go.")
+
+
+# --- status from a terminal: a field hub has ssh, not a browser ------------
+
+def test_status_cli_reads_a_running_daemon(ports, capsys):
+    """The same WS verb the console uses, asked from a shell. Deliberately a
+    client of that verb rather than a second code path: a diagnostic that reads
+    the daemon's state by a different route than the UI can disagree with the
+    UI, and then you are debugging the diagnostic."""
+    import asyncio
+    import threading
+
+    from gs.__main__ import print_status
+
+    b = _bridge(mavlink_endpoint="serial:/dev/ttyUSB0:57600",
+                json_port=ports["json"], ws_port=ports["ws"])
+    conn = RecordingConn()
+    b._vehicle = (1, 1)
+    b._on_mav(conn, _gpi(600_000))
+    b.link_reopens = 2
+
+    ready = threading.Event()
+
+    async def serve():
+        task = asyncio.ensure_future(b._serve())
+        await asyncio.sleep(0.4)
+        ready.set()
+        await asyncio.sleep(4)
+        task.cancel()
+
+    t = threading.Thread(target=lambda: asyncio.run(serve()), daemon=True)
+    t.start()
+    assert ready.wait(5)
+
+    rc = print_status("0.0.0.0", ports["ws"])     # a bind address, dialled as localhost
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "serial:/dev/ttyUSB0:57600" in out
+    assert "3456 B/s" in out and "pinned" not in out.split("budget")[1][:40]
+    assert "paced" in out                          # the strategy the budget implies
+    assert "[1, 1]" in out                         # the vehicle it locked onto
+    assert "link reopens" in out and "2" in out
+    assert "the link has been dropping" in out     # a nonzero count says so
+
+
+def test_status_cli_fails_clearly_when_nothing_is_listening(capsys):
+    """The likeliest outcome in the field is that the daemon is not up, or is on
+    another port. That has to read as a diagnosis, not a traceback."""
+    from gs.__main__ import print_status
+    import socket as _s
+    with _s.socket(_s.AF_INET, _s.SOCK_STREAM) as sk:
+        sk.bind(("127.0.0.1", 0))
+        free = sk.getsockname()[1]
+    rc = print_status("127.0.0.1", free)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "cannot reach a daemon" in out
+    assert "--ws-port" in out, "say what to check next"
+
+
+def test_status_cli_formats_a_relay_uplink_when_there_is_one(capsys):
+    from gs.__main__ import _print_status
+    _print_status({"version": "0.1.0", "upMs": 9000, "endpoint": "udpin:0.0.0.0:14550",
+                   "configuredEndpoint": "auto", "linkBudgetBps": 1000000,
+                   "linkBudgetPinned": False, "paramFetch": "flood",
+                   "linkState": "alive", "dataAgeMs": 40, "vehicle": [1, 1],
+                   "streamAges": {}, "clients": 2, "commanderHeld": True,
+                   "pendingCommands": 0, "pendingParamSets": 0,
+                   "paramRefresh": None, "missionOp": None,
+                   "linkReopens": 0, "handlerErrors": 0,
+                   "relay": {"connected": True, "sent": 1200, "dropped": 3}})
+    out = capsys.readouterr().out
+    assert "relay uplink" in out and "1200 / 3" in out
+    assert "asked for auto" in out, "say when the endpoint was not the one configured"
+    assert "nothing" in out          # nothing in flight

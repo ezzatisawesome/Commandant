@@ -27,6 +27,19 @@ uv venv && uv pip install -e ".[dev]"        # first time
 uv run python -m gs                           # autodetect in, ws://0.0.0.0:8790 out
 ```
 
+Ask a running daemon what it decided — the field question, answered over ssh
+rather than needing a browser:
+
+```sh
+uv run python -m gs --status          # or --ws-port, if it serves another
+```
+
+It prints the transport autodetect found, the budget derived from it, the param
+strategy that follows, the vehicle sysid it locked onto, per-stream ages, what
+is in flight, and the two things it survives silently: how often it has reopened
+the link and how many handler exceptions it has swallowed. Both mean it is
+working *and* telling you something.
+
 `--mavlink` defaults to `auto`: gs probes the serial devices an autopilot shows
 up on (PX4 over USB, then a telemetry radio), then `udp:14550` and `tcp:5760`,
 and takes the first that heartbeats as an autopilot. **It cannot tell, and does
@@ -90,9 +103,9 @@ split dev setup. The console↔gs message contract is `docs/ws-contract.md`.
 ## Tests
 
 ```sh
-cd packages/gs      && uv run pytest -q   # 128 — protocol state machines vs a fake PX4
+cd packages/gs      && uv run pytest -q   # 141 — protocol state machines vs a fake PX4
 cd packages/relay   && uv run pytest -q   # 17 — fan-out, slow-viewer shedding, read-only guarantee
-cd packages/console && npm test           # 314 — stores, WS client, validation (vitest)
+cd packages/console && npm test           # 356 — stores, WS client, validation (vitest)
 cd packages/console && npm run typecheck
 ```
 
