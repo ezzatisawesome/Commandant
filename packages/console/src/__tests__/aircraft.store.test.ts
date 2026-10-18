@@ -115,3 +115,54 @@ describe("stale vehicle data", () => {
 		expect($hudFrame.get()?.dataAgeMs).toBeUndefined();
 	});
 });
+
+describe("a clock step on the hub must not freeze the HUD (gs fault H8, console half)", () => {
+	it("throttles on the monotone upMs, not on the hub's wall clock", () => {
+		// gs stamps `t` from the wall clock. The field hub is a Pi with no RTC, so
+		// `t` can jump backward by an hour the moment NTP lands. The HUD throttle
+		// used `frame.t - lastHudAt`, which then stays negative for the whole step
+		// -- so the HUD stops updating until the clock catches up. `upMs` is gs's
+		// monotonic uptime and cannot step.
+		pushFrame(base({ t: 1_000_000, upMs: 10_000 }));
+		expect($hudFrame.get()?.upMs).toBe(10_000);
+
+		// NTP steps the hub back an hour; upMs keeps counting.
+		pushFrame(base({ t: 1_000_000 - 3_600_000, upMs: 10_200, lat: 11 }));
+		expect($hudFrame.get()?.lat).toBe(11);
+		pushFrame(base({ t: 1_000_000 - 3_600_000 + 50, upMs: 10_400, lat: 12 }));
+		expect($hudFrame.get()?.lat).toBe(12);
+	});
+
+	it("still throttles: frames inside the interval do not reach the HUD", () => {
+		pushFrame(base({ t: 1, upMs: 50_000, lat: 1 }));
+		expect($hudFrame.get()?.lat).toBe(1);
+		pushFrame(base({ t: 2, upMs: 50_040, lat: 2 }));   // 40 ms < 100 ms
+		expect($hudFrame.get()?.lat).toBe(1);
+		pushFrame(base({ t: 3, upMs: 50_150, lat: 3 }));   // 150 ms
+		expect($hudFrame.get()?.lat).toBe(3);
+	});
+
+	it("falls back to t when a frame carries no upMs (an older daemon)", () => {
+		pushFrame(base({ t: 90_000, lat: 1 }));
+		expect($hudFrame.get()?.lat).toBe(1);
+		pushFrame(base({ t: 90_500, lat: 2 }));
+		expect($hudFrame.get()?.lat).toBe(2);
+	});
+
+	it("a backward jump in whichever clock is used cannot stall the HUD", () => {
+		pushFrame(base({ t: 500_000, lat: 1 }));
+		expect($hudFrame.get()?.lat).toBe(1);
+		// No upMs, and `t` goes backward: the next frame must still land rather
+		// than wait out the step.
+		pushFrame(base({ t: 100, lat: 2 }));
+		expect($hudFrame.get()?.lat).toBe(2);
+	});
+
+	it("history sampling is on the same monotone clock", () => {
+		pushFrame(base({ t: 1_000_000, upMs: 1_000 }));
+		const n = $historyStore.get().length;
+		// A backward wall-clock step with upMs advancing past the sample interval.
+		pushFrame(base({ t: 1_000_000 - 3_600_000, upMs: 1_300 }));
+		expect($historyStore.get().length).toBe(n + 1);
+	});
+});

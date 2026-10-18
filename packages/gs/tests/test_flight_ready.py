@@ -593,3 +593,170 @@ def test_h7_a_restart_loop_cannot_run_forever(monkeypatch):
     assert acks[-1]["text"] == "timeout (restart loop)"
     kickoffs = len([s for s in conn.mav.sent if s[0] == "mission_count_send"])
     assert kickoffs <= bridgemod.MISSION_MAX_TRIES + 1, kickoffs
+
+
+# --- H8: every duration was computed from the wall clock --------------------
+
+class SteppedClock:
+    """A `time.time` that jumps, the way NTP does on a machine with no RTC."""
+
+    def __init__(self, delta_s: float):
+        self.delta_s = delta_s
+        self.real = time.time
+
+    def __call__(self):
+        return self.real() + self.delta_s
+
+
+def test_h8_a_wall_clock_step_cannot_make_a_dead_link_look_alive(ports, monkeypatch):
+    """The field hub is a Raspberry Pi with no RTC: it boots with a stale or
+    zero clock and steps the moment it gets NTP, a GPS fix, or the operator sets
+    the date. Every duration in gs was a wall-clock subtraction, so a BACKWARD
+    step made `now - last_mav_at` negative, which is `< STALE_MS`, which is
+    `alive`. MEASURED pre-fix on a frame that had just arrived: a 1 h backward
+    step gave `linkState="alive", dataAgeMs=-3600000`, and it would keep saying
+    so for an hour -- the stale-aircraft-shown-as-live failure this daemon
+    exists to prevent, reintroduced through the clock.
+
+    Here the autopilot goes silent AND the clock steps back an hour. Real
+    elapsed time is what must decide, so the link has to go `lost`."""
+    monkeypatch.setattr(bridgemod, "STALE_MS", 200)
+    monkeypatch.setattr(bridgemod, "LOST_MS", 400)
+    b = _bridge(json_port=ports["json"], ws_port=ports["ws"])
+    conn = RecordingConn()
+
+    async def scenario():
+        import asyncio
+        import json as _json
+
+        import websockets
+        serve = asyncio.create_task(b._serve())
+        await asyncio.sleep(0.3)
+        async with websockets.connect(f"ws://127.0.0.1:{ports['ws']}") as ws:
+            b._on_mav(conn, _heartbeat())            # one frame, then silence
+            got = await _recv_telemetry(ws, lambda g: g.get("linkState") == "alive")
+            assert got is not None, "never reported alive"
+
+            monkeypatch.setattr(time, "time", SteppedClock(-3600.0))
+            await asyncio.sleep(0.8)                 # real time well past LOST_MS
+            seen = []
+            for _ in range(20):
+                f = _json.loads(await asyncio.wait_for(ws.recv(), timeout=1.0))
+                if f.get("type") == "telemetry":
+                    seen.append(f)
+            assert seen, "no frames after the step"
+            for f in seen:
+                assert f["dataAgeMs"] is None or f["dataAgeMs"] >= 0, \
+                    f"negative data age: {f['dataAgeMs']}"
+            assert seen[-1]["linkState"] == "lost", \
+                f"a dead link reported {seen[-1]['linkState']!r} after a backward clock step"
+            assert seen[-1]["connected"] is False
+        serve.cancel()
+
+    import asyncio
+    asyncio.run(scenario())
+
+
+async def _recv_telemetry(ws, pred, tries=60):
+    import asyncio
+    import json as _json
+    for _ in range(tries):
+        try:
+            got = _json.loads(await asyncio.wait_for(ws.recv(), timeout=1.0))
+        except asyncio.TimeoutError:
+            continue
+        if got.get("type") == "telemetry" and pred(got):
+            return got
+    return None
+
+
+def test_h8_a_wall_clock_step_does_not_expire_in_flight_commands(monkeypatch):
+    """The other direction, and measured rather than assumed.
+
+    A forward step -- the usual one, since a hub without an RTC boots in the
+    past and catches up -- makes `now - last_send_ms` huge, so the retry fires
+    immediately. It does NOT abort the command: the retry re-bases
+    `last_send_ms` to the new clock, after which everything is consistent
+    again. MEASURED pre-fix: a single step (1 h, 1 day, either sign) costs
+    exactly ONE spurious retransmit on the command path and then self-heals.
+
+    So this is the minor half of H8 -- a duplicate COMMAND_LONG on a link whose
+    bandwidth is already the constraint, and a duplicate `arm` is idempotent.
+    The serious half is link health, which never re-bases; see the test above.
+    Worth pinning anyway: a retry budget should be spent on real seconds, and a
+    clock that steps repeatedly (a slewing or flapping ntpd) multiplies it."""
+    acks = []
+    b = _bridge()
+
+    class Loop:
+        def call_soon_threadsafe(self, fn, *a):
+            acks.append(a[0])
+    b._loop = Loop()
+    conn = RecordingConn()
+    b._cmd_queue.put({"id": "c1", "mav_cmd": m.MAV_CMD_COMPONENT_ARM_DISARM,
+                      "params": [1, 0, 0, 0, 0, 0, 0]})
+    b._service_commands(conn)                        # first send
+    assert len([s for s in conn.mav.sent if s[0] == "command_long_send"]) == 1
+
+    monkeypatch.setattr(time, "time", SteppedClock(3600.0))
+    for _ in range(5):
+        b._service_commands(conn)
+    assert acks == [], f"a clock step expired a live command: {acks}"
+    assert "c1" in b._pending
+    # And it is still only one send: no retry is due either, since no real time
+    # has passed. The retry budget is real seconds, not clock seconds.
+    assert len([s for s in conn.mav.sent if s[0] == "command_long_send"]) == 1
+
+
+def test_h8_mission_and_param_retries_are_also_real_seconds(monkeypatch):
+    """Same shape on the param and mission paths: a clock step must not spend a
+    retry. (It did not abort them pre-fix either -- their watermarks re-base on
+    the first retry too -- so what is pinned here is the spurious retransmit,
+    which over a radio is the part that costs something.)"""
+    b = _bridge()
+    b._loop = type("L", (), {"call_soon_threadsafe": lambda *a: None})()
+    conn = RecordingConn()
+    _upload(b, conn, n=5)
+    b._param_queue.put({"kind": "set", "id": "p1", "name": "FW_AIRSPD_TRIM",
+                        "value": 15.0, "ptype": m.MAV_PARAM_TYPE_REAL32})
+    b._service_params(conn)
+    assert "FW_AIRSPD_TRIM" in b._param_set_pending
+    baseline = len(conn.mav.sent)
+
+    monkeypatch.setattr(time, "time", SteppedClock(86400.0))   # a full day
+    for _ in range(5):
+        b._service_missions(conn)
+        b._service_params(conn)
+    assert len(conn.mav.sent) == baseline, \
+        f"a clock step cost {len(conn.mav.sent) - baseline} spurious retransmit(s)"
+    assert b._mission is not None and "FW_AIRSPD_TRIM" in b._param_set_pending
+
+
+def test_h8_frame_carries_a_wall_timestamp_and_a_monotone_one(ports):
+    """`t` stays the wall clock -- that is the contract, and it is what a human
+    and a log read. `upMs` is the clock a client should difference."""
+    b = _bridge(json_port=ports["json"], ws_port=ports["ws"])
+
+    async def scenario():
+        import asyncio
+        import json as _json
+
+        import websockets
+        serve = asyncio.create_task(b._serve())
+        await asyncio.sleep(0.3)
+        async with websockets.connect(f"ws://127.0.0.1:{ports['ws']}") as ws:
+            frames = []
+            for _ in range(8):
+                f = _json.loads(await asyncio.wait_for(ws.recv(), timeout=1.0))
+                if f.get("type") == "telemetry":
+                    frames.append(f)
+            assert len(frames) >= 4
+            wall_now = int(time.time() * 1000)
+            assert abs(frames[-1]["t"] - wall_now) < 5000, "`t` is not a wall clock"
+            ups = [f["upMs"] for f in frames]
+            assert ups == sorted(ups), f"upMs is not monotone: {ups}"
+            assert ups[0] < 60_000, "upMs should be ms since the daemon started"
+        serve.cancel()
+
+    import asyncio
+    asyncio.run(scenario())

@@ -21,6 +21,26 @@ from the Phase 0 frame remain unchanged (`lat`, `lon`, `alt`, `roll`, `pitch`,
 - `connected` (bool) is kept for back-compat; `connected == (linkState === "alive")`.
 - `dataAgeMs` (int | null): age of the newest **vehicle** data. `null` before any
   arrives.
+- `t` (int): wall-clock ms since the epoch — a timestamp to **display or log**.
+- `upMs` (int): monotonic ms since the gs daemon started.
+
+**Two clocks, and clients must difference the right one.** `t` is the wall
+clock. The field hub is a Raspberry Pi with no RTC: it boots with a stale or
+zero clock and steps — by an hour, or by decades — the moment it gets NTP, a GPS
+fix, or the operator sets the date. Anything a client derives by subtracting two
+`t` values therefore goes negative and *stays* negative for the length of the
+step. The console's HUD throttle did exactly that and stopped updating for the
+duration. So:
+
+- **display or log a time** → `t`;
+- **difference two frames, or decide a rate** → `upMs`, which cannot step or go
+  backward. It doubles as a daemon-uptime readout.
+
+Older daemons send no `upMs`; a client that needs to interoperate should fall
+back to `t` and treat a backward move as "act now" rather than waiting it out.
+gs's own durations (link health, retries, timeouts, TTLs) are all on the
+monotonic clock for the same reason — a backward step used to make a dead link
+report `alive` with a negative `dataAgeMs` for as long as the step lasted.
 
 **Link health is attributed per source, and this matters.** gs takes two feeds:
 MAVLink from the autopilot, and the sim's flightlink JSON. Only MAVLink speaks

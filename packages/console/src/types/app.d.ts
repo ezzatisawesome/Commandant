@@ -55,6 +55,11 @@ export interface TelemetryFrame {
     // frame with a large dataAgeMs means gs is re-serving a stale fix, which is
     // what a frozen simulator or a dead autopilot looks like from here.
     dataAgeMs?: number | null,
+    // Monotonic ms since the gs daemon started. THIS is the clock to difference
+    // for anything rate-related; `t` is a wall-clock timestamp for display and
+    // the field hub is a Pi with no RTC, so `t` can step backward by an hour
+    // the moment NTP lands. Absent from frames served by an older daemon.
+    upMs?: number,
 
     // --- straight from the autopilot's estimator, not reconstructed here -----
     // EKF velocity in NED (m/s), from GLOBAL_POSITION_INT vx/vy/vz. Doppler

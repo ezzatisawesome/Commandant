@@ -540,8 +540,42 @@ JSON_ONLY_KEYS = {
 }
 
 
+_MONO_EPOCH = time.monotonic()   # daemon start, for _mono_ms
+
+
 def _now_ms() -> int:
+    """WALL-CLOCK ms since the epoch. For TIMESTAMPS a human or a log reads.
+    Never for a duration -- see _mono_ms."""
     return int(time.time() * 1000)
+
+
+def _mono_ms() -> int:
+    """MONOTONIC ms. For every duration: link health, retries, timeouts, TTLs.
+
+    The field hub is a Raspberry Pi with no RTC. It boots with a stale or zero
+    clock and then steps -- by hours, or by decades -- the moment it gets NTP, a
+    GPS fix, or the operator sets the date. That is not an edge case on a hub;
+    it is what every cold boot without a network does.
+
+    Computing a duration from the wall clock then goes wrong in both directions,
+    and the backward one is unsafe. MEASURED on the pre-fix code, with a frame
+    that had just arrived: a 1 h backward step produced
+    `linkState="alive", dataAgeMs=-3600000` -- gs telling the console the
+    aircraft is live, and continuing to say so for an hour, which is precisely
+    the "stale aircraft shown as live" failure this daemon is built to prevent.
+    A forward step is merely loud: the link goes `lost` and every in-flight
+    command, param set and mission handshake expires in the same tick.
+
+    time.monotonic() cannot step and cannot go backward, so every comparison
+    below is against elapsed real time regardless of what the clock does.
+
+    Measured from daemon start rather than raw, for two reasons. It makes the
+    value a readable uptime (the `upMs` a client sees). And `0` is the "never
+    saw any traffic" sentinel for last_mav_at / last_json_at, while a raw
+    time.monotonic() is since-BOOT on Linux -- on a hub whose systemd unit
+    starts gs at boot that is a single-digit number of seconds, uncomfortably
+    close to the sentinel. The +1 guarantees the two can never collide."""
+    return int((time.monotonic() - _MONO_EPOCH) * 1000) + 1
 
 
 def _json_safe(obj: Any) -> Any:
@@ -786,7 +820,7 @@ class Bridge:
         MAV_AUTOPILOT_INVALID -- the same identity QGC uses, and the identity
         our own _on_mav ignores, so a second gs on the link can never be
         mistaken for the vehicle."""
-        now = _now_ms()
+        now = _mono_ms()
         if now - self._hb_at < GCS_HEARTBEAT_MS:
             return
         self._hb_at = now
@@ -800,7 +834,7 @@ class Bridge:
     def _service_commands(self, conn: Any) -> None:
         """Mav-thread: accept newly queued commands, (re)send due ones, and time
         out those that never got a COMMAND_ACK. Never fire-and-forget."""
-        now = _now_ms()
+        now = _mono_ms()
         # 1. Admit new commands from the WS thread.
         while True:
             try:
@@ -900,7 +934,7 @@ class Bridge:
 
     # --- param protocol (hand-rolled, mav thread) ----------------------------
     def _service_params(self, conn: Any) -> None:
-        now = _now_ms()
+        now = _mono_ms()
         # 1. Admit new param jobs from the WS thread.
         while True:
             try:
@@ -972,7 +1006,7 @@ class Bridge:
         self._param_gap_requested = False
         self._param_last_progress = 0
         self._param_gap_sweeps = 0
-        self._param_last_rx_ms = _now_ms()
+        self._param_last_rx_ms = _mono_ms()
         try:
             conn.mav.param_request_list_send(self.tsys, self.tcomp)
         except Exception as exc:
@@ -1009,11 +1043,11 @@ class Bridge:
             self._report_param_ack(job, ok=False, text=f"send error: {exc}")
             return
         job["tries"] += 1
-        job["last_send_ms"] = _now_ms()
+        job["last_send_ms"] = _mono_ms()
 
     # --- mission protocol (hand-rolled, mav thread) --------------------------
     def _service_missions(self, conn: Any) -> None:
-        now = _now_ms()
+        now = _mono_ms()
         # 1. Admit queued mission jobs (one active op at a time).
         while True:
             try:
@@ -1112,7 +1146,7 @@ class Bridge:
             self._report_mission_ack(job.get("id"), ok=False, result=-1, text=str(exc), ack_type=ack_type)
             return
         self._mission = {"op": "upload", "id": job.get("id"), "items": fields,
-                         "count": len(fields), "last": _now_ms(), "tries": 0,
+                         "count": len(fields), "last": _mono_ms(), "tries": 0,
                          "last_seq": None, "kickoffs": 1,
                          "mtype": job["mtype"], "rtype": job["rtype"], "ack_type": ack_type}
         try:
@@ -1124,7 +1158,7 @@ class Bridge:
 
     def _start_mission_download(self, conn: Any, job: dict[str, Any]) -> None:
         self._mission = {"op": "download", "id": job.get("id"), "count": None,
-                         "items": {}, "next": 0, "last": _now_ms(), "tries": 0,
+                         "items": {}, "next": 0, "last": _mono_ms(), "tries": 0,
                          "mtype": job["mtype"], "rtype": job["rtype"], "ack_type": job["ack_type"]}
         try:
             conn.mav.mission_request_list_send(
@@ -1168,7 +1202,7 @@ class Bridge:
             self._do_broadcast(dumps(payload))
 
     def _request_message(self, conn: Any, tsys: int, tcomp: int, msg_id: int) -> None:
-        now = _now_ms()
+        now = _mono_ms()
         if now - self._last_req_at.get(msg_id, 0) < 1000:  # throttle retries per msg
             return
         self._last_req_at[msg_id] = now
@@ -1186,7 +1220,7 @@ class Bridge:
         t = msg.get_type()
         if t == "BAD_DATA":
             return  # corrupted bytes are not "traffic" for link-health purposes
-        now = _now_ms()
+        now = _mono_ms()   # a duration clock; see _mono_ms
         src = (msg.get_srcSystem(), msg.get_srcComponent())
         if t == "HEARTBEAT":
             m = mavutil.mavlink
@@ -1374,8 +1408,10 @@ class Bridge:
         if t == "STATUSTEXT":
             raw = msg.text
             text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+            # `now` here is monotonic (a duration clock); a statustext carries a
+            # timestamp an operator reads, so stamp it off the wall clock.
             self._broadcast({"type": "statustext", "severity": msg.severity,
-                             "text": text.rstrip("\x00").strip(), "t": now})
+                             "text": text.rstrip("\x00").strip(), "t": _now_ms()})
 
         elif t == "PARAM_VALUE":
             pid = msg.param_id
@@ -1547,7 +1583,7 @@ class Bridge:
                 continue
             if not isinstance(obj, dict):
                 continue
-            now = _now_ms()
+            now = _mono_ms()
             with self._lock:
                 self.last_json_at = now
                 for k, v in obj.items():
@@ -1738,7 +1774,9 @@ class Bridge:
             interval = 1.0 / BROADCAST_HZ
             while True:
                 await asyncio.sleep(interval)
-                now = _now_ms()
+                # Two clocks, deliberately: `mono` for freshness (it cannot step),
+                # `wall` for the timestamp the console and the logs display.
+                mono, wall = _mono_ms(), _now_ms()
                 with self._lock:
                     mav_at, json_at = self.last_mav_at, self.last_json_at
                     frame = dict(self.latest)
@@ -1747,21 +1785,34 @@ class Bridge:
                 # A pure flightlink run (no PX4) falls back to the JSON feed, which
                 # is then genuinely the only source there is.
                 last = mav_at if mav_at else json_at
-                state = self._link_state(now, last)
+                state = self._link_state(mono, last)
                 frame["type"] = "telemetry"
-                frame["t"] = now
+                # `t` stays the wall clock: it is the timestamp a human and a log
+                # read, and the contract has always said so.
+                frame["t"] = wall
+                # `upMs` is new, and is the clock a CLIENT should difference.
+                # The console was throttling its HUD and sampling its history on
+                # `t` -- i.e. on this hub's wall clock -- so a backward NTP step
+                # froze the HUD for the length of the step. Monotonic ms since
+                # the daemon started cannot step, cannot go backward, and
+                # doubles as a daemon-uptime readout.
+                frame["upMs"] = mono
                 frame["linkState"] = state
                 frame["connected"] = (state == "alive")
                 # How old the newest vehicle data actually is, so the UI can say
                 # "frozen 42 s ago" instead of quietly showing a stale position.
-                frame["dataAgeMs"] = (now - last) if last else None
+                # Both sides monotonic, so a clock step cannot make it negative.
+                frame["dataAgeMs"] = (mono - last) if last else None
                 payload = dumps(frame)
                 if self._clients:
                     websockets.broadcast(self._clients, payload)
                 if self.relay is not None:
                     self.relay.offer(payload, "telemetry")
                 if state != self._last_link_state:
-                    link = dumps({"type": "link", "state": state, "lastMsgMs": last})
+                    # lastMsgMs is documented as a wall-clock figure, so convert
+                    # the monotonic watermark back rather than leak uptime into it.
+                    link = dumps({"type": "link", "state": state,
+                                  "lastMsgMs": (wall - (mono - last)) if last else 0})
                     if self._clients:
                         websockets.broadcast(self._clients, link)
                     if self.relay is not None:
