@@ -29,10 +29,19 @@ fixed (`packages/gs/tests/test_flight_ready.py`, 14 tests).
    transmitted, ever. PX4 decides a datalink exists by *receiving* heartbeats
    from a GCS (`telemetry_status.heartbeat_type_gcs` → commander's
    `data_link_check`), so to PX4 our GCS was never there: it reports "Data link
-   lost" and, with `NAV_DLL_ACT` set — the norm past line of sight — runs the
-   datalink-loss failsafe mid-mission while the operator watches telemetry flow.
-   gs now emits 1 Hz as `MAV_TYPE_GCS`/`MAV_AUTOPILOT_INVALID`, serviced before
-   anything else on the mav thread.
+   lost" while the operator watches telemetry flow. **Checked against the PX4
+   metadata this repo already bundles** rather than assumed: `COM_DL_LOSS_T`
+   defaults to 10 s (the threshold exists for exactly this) and `NAV_DLL_ACT`
+   defaults to **0, "Disabled"** — so on a stock airframe the consequence is a
+   wrong and visible commander state, not an automatic failsafe. Set
+   `NAV_DLL_ACT` to Hold/Return/Land/Terminate, which a BVLOS operator may well
+   do, and the failsafe does run, on a healthy link. (An earlier draft of this
+   entry called that configuration "the norm". It is not the default, and
+   finding that out is the argument for reading the bundled metadata instead of
+   asserting.) Either way a GCS that never heartbeats is lying to the autopilot
+   about its own presence, and every real one emits 1 Hz. gs now emits 1 Hz as
+   `MAV_TYPE_GCS`/`MAV_AUTOPILOT_INVALID`, serviced before anything else on the
+   mav thread.
 2. **Stream requests ignored the link's bandwidth.** The three messages PX4
    omits from the GCS stream were requested at a hardcoded 25 Hz. MEASURED:
    6675 B/s, **133 % of a 57600 SiK link's usable goodput**, before PX4's own

@@ -35,9 +35,9 @@ sys.path.insert(0, os.path.dirname(__file__))
 os.environ.setdefault("MAVLINK20", "1")
 
 import websockets  # noqa: E402
+from radio_soak import SIK_57600_BPS, SimAutopilot, _free_port  # noqa: E402
 
 from gs.bridge import Bridge  # noqa: E402
-from radio_soak import SIK_57600_BPS, SimAutopilot, _free_port  # noqa: E402
 
 HOME_LAT, HOME_LON = 37.3985511, -122.148853
 

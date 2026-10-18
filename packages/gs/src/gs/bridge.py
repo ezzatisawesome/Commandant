@@ -144,10 +144,20 @@ DEFAULT_SERIAL_BAUD = 57600  # typical SiK/telemetry-radio rate on the real hub
 # PX4 decides whether a ground station is connected by RECEIVING heartbeats from
 # one: MavlinkReceiver::handle_message_heartbeat sets telemetry_status
 # .heartbeat_type_gcs, and commander's data_link_check() watches it. A GCS that
-# only listens is, to PX4, a GCS that was never there -- it reports "Data link
-# lost" and, with NAV_DLL_ACT set (the norm for anything past line of sight),
-# runs the datalink-loss failsafe while the operator is sitting right there
-# watching telemetry flow. Every real GCS emits 1 Hz; so do we.
+# only listens is, to PX4, a GCS that was never there.
+#
+# What follows from that, checked against the PX4 parameter metadata this repo
+# already bundles (console/public/px4-params.json) rather than assumed:
+#   COM_DL_LOSS_T  default 10   -- the threshold exists precisely for this
+#   NAV_DLL_ACT    default 0    -- "Disabled"
+# So on a STOCK airframe the consequence is the commander reporting the data
+# link lost while the operator sits there watching telemetry flow: wrong, and
+# visible, but not an automatic failsafe. Set NAV_DLL_ACT to any of its other
+# values (Hold / Return / Land / Terminate) -- which is a configuration a BVLOS
+# operator may well choose -- and the failsafe does run, on a healthy link.
+#
+# Either way a GCS that never heartbeats is lying to the autopilot about its own
+# presence, and every real one (QGC, MAVProxy, MP) emits 1 Hz. So do we.
 GCS_HEARTBEAT_MS = 1000
 
 # --- Link budget (H2) -------------------------------------------------------

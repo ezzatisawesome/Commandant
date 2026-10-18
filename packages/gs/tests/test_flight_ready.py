@@ -102,10 +102,18 @@ def test_h1_gs_sends_a_gcs_heartbeat():
     """PX4 decides a GCS is connected by receiving HEARTBEATs from it
     (MavlinkReceiver::handle_message_heartbeat -> telemetry_status
     .heartbeat_type_gcs -> commander's data_link_check). A GCS that never
-    heartbeats is, to PX4, a GCS that was never there: it logs "Data link
-    lost", and with NAV_DLL_ACT set -- which is the norm for any flight past
-    line of sight -- it runs the datalink-loss failsafe mid-mission. Every
-    real GCS (QGC, MAVProxy, MP) emits 1 Hz. gs must too."""
+    heartbeats is, to PX4, a GCS that was never there.
+
+    Checked against the PX4 parameter metadata this repo bundles rather than
+    assumed: COM_DL_LOSS_T defaults to 10 s (the threshold exists for exactly
+    this) and NAV_DLL_ACT defaults to 0, "Disabled". So on a stock airframe the
+    consequence is the commander reporting the data link lost while the operator
+    watches telemetry flow -- wrong and visible, not an automatic failsafe. Set
+    NAV_DLL_ACT to Hold / Return / Land / Terminate, which a BVLOS operator may
+    well do, and the failsafe runs on a healthy link.
+
+    Either way a GCS that never heartbeats is lying to the autopilot about its
+    own presence, and every real one emits 1 Hz. gs must too."""
     b = _bridge()
     conn = RecordingConn()
     b._service_heartbeat(conn)
@@ -430,7 +438,8 @@ def test_plug_and_play_end_to_end(ports, monkeypatch):
             assert frame["dataAgeMs"] is not None and frame["dataAgeMs"] < 2000
 
             # (2) PX4 is hearing from us. Without this it declares "Data link
-            #     lost" and, with NAV_DLL_ACT set, failsafes out of the mission.
+            #     lost" and, if NAV_DLL_ACT has been set away from its
+            #     default of 0, failsafes out of the mission.
             for _ in range(40):
                 if px4.gcs_heartbeats >= 2:
                     break
