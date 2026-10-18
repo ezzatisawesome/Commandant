@@ -142,6 +142,28 @@ fixed (`packages/gs/tests/test_flight_ready.py`, 14 tests).
    the EKF wind estimate are simply never populated, with no error. The dialect
    is now rebound explicitly.
 
+**The hub installer would have failed on a real Pi (2026-10-18):**
+`packages/cli` provisions the field deployment, had never been run on hardware,
+and had no tests. Two faults, both decided before any command is issued:
+
+- `_as_user` had its condition inverted relative to the `_sudo` beside it, so
+  the documented flow (`commandant install` as `pi`, with sudo) ran the build
+  steps as the **invoker** — immediately after
+  `chown -R commandant:commandant` had handed the repo to the service user.
+  `python -m venv` wrote into a tree it no longer owned and the install died at
+  the build step, every time. Also missing `-H`, so an npm build would populate
+  the wrong user's cache.
+- **`Restart=always` does not mean always.** systemd's default start limit is 5
+  starts per 10 s and both units use `RestartSec=2`, which hits exactly that: a
+  service that crash-loops for ten seconds at boot enters `failed` and stays
+  there. On a hub whose premise is "turn it on and open the page", the likeliest
+  cause is transient — the radio enumerating late, a stale instance on the port
+  — and permanently failing on it is the worst answer available.
+
+And the five lifecycle verbs the package description and this document both
+already promised (`status`/`up`/`down`/`logs`/`uninstall`) existed in neither:
+`commandant status` was an argparse error.
+
 **PX4 over USB was budgeted as a radio (2026-10-18):** a USB CDC-ACM device —
 which is what a flight controller plugged into a laptop is, on the bench and in
 HITL — ignores the baud rate entirely. Line coding is a no-op over USB: both
@@ -641,8 +663,11 @@ Decisions:
   `commandant.local`, systemd units autostarting `gs` + the served console),
   `commandant update` re-runs the installer, plus `status` / `up` / `down` /
   `logs` / `uninstall`. AP/mDNS/systemd configs ship as templates inside the CLI
-  package; it's the single interface to the hub. Untestable without the Pi —
-  correct, idempotent, validated on real hardware.
+  package; it's the single interface to the hub. **Still not validated on real
+  hardware** — but no longer untested: 19 tests now cover everything decided
+  before a command is issued, and two faults they caught would each have broken
+  a real install (see the CLI entry dated 2026-10-18). "Untestable without the
+  Pi" turned out to be true only of apt and systemd themselves.
 
 ---
 
