@@ -53,13 +53,16 @@ def msg(t, **f):
     return ns
 
 def sequence():
+    # Every field a real message carries, including the ones only one side of a
+    # comparison may read: a fixture missing one makes the diff crash rather
+    # than report, which is how this one found its own gap.
     # Field values are literals on purpose: the point is that both versions see
     # byte-identical input, so nothing here may depend on the module under test.
     return [
         msg("HEARTBEAT", type=1, autopilot=12, base_mode=128,
             custom_mode=(4<<16)|(4<<24), system_status=4),
         msg("GLOBAL_POSITION_INT", time_boot_ms=600000, lat=373985511, lon=-1221488530,
-            alt=233400, hdg=9130, vx=1420, vy=110, vz=-30),
+            alt=233400, relative_alt=124400, hdg=9130, vx=1420, vy=110, vz=-30),
         msg("ATTITUDE", roll=0.012, pitch=0.08, yaw=1.59),
         msg("VFR_HUD", airspeed=15.1, groundspeed=14.2, heading=91, throttle=62, alt=233.4, climb=0.3),
         msg("BATTERY_STATUS", voltages=[24310]+[65535]*9, current_battery=412, battery_remaining=78),
@@ -72,7 +75,7 @@ def sequence():
         msg("POSITION_TARGET_GLOBAL_INT", coordinate_frame=6, type_mask=0,
             lat_int=373991000, lon_int=-1221480000, alt=240.0),
         msg("GLOBAL_POSITION_INT", time_boot_ms=600100, lat=373985600, lon=-1221488400,
-            alt=233500, hdg=9140, vx=1425, vy=112, vz=-28),
+            alt=233500, relative_alt=124500, hdg=9140, vx=1425, vy=112, vz=-28),
     ]
 
 class Conn:

@@ -103,6 +103,13 @@ def test_mavlink_to_ws_decode():
     assert abs(got["lat"] - 37.4) < 1e-4
     assert abs(got["lon"] - (-122.1)) < 1e-4
     assert abs(got["alt"] - 1000.0) < 1e-3
+    # Height above HOME, which is NOT the same number: the frame above carries
+    # alt 1000 m MSL and relative_alt 50 m. Mission items upload as
+    # GLOBAL_RELATIVE_ALT_INT, so this is the one the plan is authored in —
+    # seeding a waypoint from `alt` put it 950 m higher than intended here, and
+    # that is exactly the bug that flew authored altitudes wrong.
+    assert abs(got["relativeAlt"] - 50.0) < 1e-3
+    assert got["alt"] != got["relativeAlt"]
     assert abs(got["roll"] - 0.1) < 1e-3
     assert abs(got["pitch"] - (-0.2)) < 1e-3
     assert abs(got["airspeed"] - 14.2) < 1e-2

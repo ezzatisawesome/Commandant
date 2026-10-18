@@ -21,6 +21,10 @@ export interface TelemetryFrame {
     lat?: number,           // deg   (GLOBAL_POSITION_INT)
     lon?: number,           // deg
     alt?: number,           // m MSL
+    // Height above HOME. Not the same number as `alt`, and the one the mission
+    // protocol speaks: items upload as GLOBAL_RELATIVE_ALT_INT. Authoring from
+    // `alt` instead meant the altitude you set was not the altitude flown.
+    relativeAlt?: number,   // m above home
     roll?: number,          // rad   (ATTITUDE)
     pitch?: number,         // rad
     yaw?: number,           // rad

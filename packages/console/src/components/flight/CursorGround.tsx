@@ -19,6 +19,7 @@ import {
 } from "cesium";
 
 import { $viewerStore } from "@/stores/cesium.store";
+import { isOverHandle } from "@/lib/pickTag";
 
 // Where is the mouse, in the world?
 //
@@ -33,6 +34,13 @@ import { $viewerStore } from "@/stores/cesium.store";
 // orange=commanded, white=plan, yellow=active item, green/red=fence,
 // aqua=radius grabbers; the cursor's vector is thin translucent white, so it
 // reads as chrome rather than as data.
+//
+// It yields to the handles. Hovering a waypoint marker, an altitude chevron, a
+// radius rim or a fence corner hides the whole cursor: its plumb line and ground
+// ring would otherwise sit on top of the very 9 px handle the operator is aiming
+// at, hiding it and making the click look like it will land on the terrain
+// instead. The handle is the thing being pointed at, so the pointer's own
+// decoration gets out of the way.
 //
 // Cost: one pick per mouse-move and three entities driven by callback
 // properties, so nothing is created or destroyed as the mouse travels. The
@@ -123,8 +131,10 @@ export default function CursorGround() {
 			},
 		}));
 
-		const setShown = (shown: boolean) => {
-			for (const e of ents) e.show = shown;
+		let shown = false;
+		const setShown = (next: boolean) => {
+			shown = next;
+			for (const e of ents) e.show = next;
 		};
 		setShown(false);
 
@@ -132,6 +142,18 @@ export default function CursorGround() {
 
 		handler.setInputAction((m: { endPosition: Cartesian2 }) => {
 			const scene = $viewer.scene;
+			// Over a draggable handle? Then stand down, so the handle is visible
+			// and obviously the thing the click will hit. drillPick with a small
+			// limit: the handles sit inside and behind translucent geometry, so
+			// the topmost primitive is routinely not one of them.
+			if (isOverHandle(scene.drillPick(m.endPosition, 6))) {
+				if (ground !== null || shown) {
+					ground = null;
+					setShown(false);
+					scene.requestRender();
+				}
+				return;
+			}
 			// Terrain first: globe.pick follows the loaded tiles, so the stem
 			// stands on the hill the operator is actually looking at. The
 			// ellipsoid is the honest fallback while those tiles stream in.
@@ -149,7 +171,7 @@ export default function CursorGround() {
 			// not a flagpole seen from fifty metres up.
 			const dist = Cartesian3.distance(scene.camera.positionWC, hit);
 			stem = Math.max(STEM_MIN_M, dist * STEM_FRAC);
-			if (!was) setShown(true);
+			if (!was || !shown) setShown(true);
 			scene.requestRender();
 		}, ScreenSpaceEventType.MOUSE_MOVE);
 

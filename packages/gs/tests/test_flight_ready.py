@@ -207,8 +207,8 @@ def test_h4_json_feed_cannot_overwrite_a_live_autopilots_flight_state(ports):
     conn = RecordingConn()
     b._on_mav(conn, _heartbeat(base_mode=128, custom_mode=(4 << 16) | (4 << 24)))
     b._on_mav(conn, _msg("GLOBAL_POSITION_INT", time_boot_ms=1000,
-                         lat=374000000, lon=-1221000000, alt=120000, hdg=9000,
-                         vx=1500, vy=0, vz=0))
+                         lat=374000000, lon=-1221000000, alt=120000,
+                         relative_alt=11000, hdg=9000, vx=1500, vy=0, vz=0))
     assert b.latest["mode"] == "AUTO.MISSION" and b.latest["armed"] is True
 
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1072,7 +1072,8 @@ def test_h8b_a_zero_watermark_still_means_long_ago(monkeypatch):
 
 def _gpi(boot_ms, lat=374000000):
     return _msg("GLOBAL_POSITION_INT", time_boot_ms=boot_ms, lat=lat,
-                lon=-1221000000, alt=120000, hdg=9000, vx=0, vy=0, vz=0)
+                lon=-1221000000, alt=120000, relative_alt=11000,
+                hdg=9000, vx=0, vy=0, vz=0)
 
 
 def _rebooted_bridge(events):

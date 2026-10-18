@@ -14,13 +14,14 @@ import {
 	updateItem,
 	clearMission,
 } from "@/stores/mission.store";
+import { $fenceItems } from "@/stores/geo.store";
 import { $linkState, $commander } from "@/stores/link.store";
 import { telemetryClient } from "@/services/telemetry";
 import { Button } from "@/components/ui/button";
 import { radiusParamKey } from "@/lib/grabbers";
 import { $params } from "@/stores/params.store";
-import { TKO_LAND_REQ_PARAM, planProblem } from "@/lib/missionCheck";
-import { $fenceItems } from "@/stores/geo.store";
+import { blockersForSeq, lookupFrom, missionBlockers } from "@/lib/missionCheck";
+import { MissionReadiness, RowFlag } from "@/components/flight/MissionReadiness";
 import type { MissionKind } from "@/types/app";
 
 const KINDS: MissionKind[] = [
@@ -82,12 +83,11 @@ export default function MissionPanel() {
 	const blocked = uploadBlockedReason({ live, commander, count: items.length });
 	// Will PX4 actually fly this once uploaded? It validates at the mode change,
 	// not the upload, so without this the operator gets a green tick here and a
-	// silent refusal later. Quiet until the param list has been downloaded.
-	// ...and will it stay inside the fence? PX4 enforces the geofence in flight,
-	// not at upload, so a plan that leaves it is accepted and then breaches
-	// mid-mission — GF_ACTION defaults to Hold, so the aircraft stops out there.
+	// silent refusal later. Returns structured findings, so the chip can be two
+	// words, the offending row can carry a flag, and the globe can draw the
+	// constraint — rather than all three being one paragraph of amber text.
 	const fence = useStore($fenceItems);
-	const wontRun = planProblem(items, params[TKO_LAND_REQ_PARAM]?.value, fence);
+	const blockers = missionBlockers(items, lookupFrom(params), fence);
 
 	async function upload() {
 		setBusy(true);
@@ -155,35 +155,10 @@ export default function MissionPanel() {
 				</div>
 			) : null}
 
-			{/* PX4 will take this plan and then decline to fly it. Said here,
-			    before the upload, rather than left to a STATUSTEXT line that
-			    scrolls past at the moment the mode change is refused. */}
-			{wontRun ? (
-				<div className="pt-2 text-[10px] leading-relaxed text-amber-300/80">
-					⚠ {wontRun}
-				</div>
-			) : null}
-
-			{/* The check above can only speak once the parameter list has been
-			    read, and nothing otherwise gives the operator a reason to read it.
-			    So when a plan exists and PX4's requirement is still unknown, say
-			    so and offer the download, rather than staying silent and letting
-			    the mode change fail later for an unexplained reason. */}
-			{!wontRun && items.length > 0 && params[TKO_LAND_REQ_PARAM] === undefined ? (
-				<div className="flex items-center justify-between gap-2 pt-2 text-[9px] text-white/40">
-					<span>
-						Whether PX4 requires a takeoff or landing item in a plan is
-						unknown until its parameters are read.
-					</span>
-					<Button size="sm" variant="outline"
-						onClick={() => telemetryClient.refreshParams()}
-						disabled={!live}
-						className="h-5 shrink-0 px-2 text-[9px]"
-						title="Download PX4's parameters so the plan can be checked against them">
-						Check
-					</Button>
-				</div>
-			) : null}
+			{/* Readiness, in two words. The detail is in the tooltip and behind
+			    one click; the offending row carries a flag; and the globe draws
+			    the approach. Three short signals beat one long one. */}
+			<MissionReadiness blockers={blockers} count={items.length} />
 
 			{/* Upload/download progress. */}
 			{progress ? (
@@ -216,8 +191,23 @@ export default function MissionPanel() {
 					<div className="py-4 text-center text-white/30">
 						no items — turn on “Edit map” and click the globe, or Download
 					</div>
-				) : (
-					items.map((it) => {
+				) : (<>
+					{/* Header row. Four unlabelled numeric columns is a guessing
+					    game: the altitude and radius boxes are indistinguishable
+					    once the kind column changes width. */}
+					<div className="flex items-center gap-1 border-b border-white/10 pb-1 text-[9px] uppercase tracking-wide text-white/40">
+						<span className="w-4" title="Sequence — the order PX4 flies them">#</span>
+						<span className="w-[7.5rem]">Type</span>
+						<span className="w-14 text-right"
+						title="Altitude in metres ABOVE HOME — the frame mission items upload in (GLOBAL_RELATIVE_ALT_INT), not height above sea level. The HUD's altitude tape reads MSL, so the two differ by home's elevation.">
+						Alt ▲home
+					</span>
+						<span className="w-12 text-right" title="Radius, seconds or turns, depending on the type">Radius</span>
+						<span className="flex-1" />
+						<span className="w-3" title="Warnings about this item" />
+						<span className="w-[5.5rem] text-right">Actions</span>
+					</div>
+					{items.map((it) => {
 						const extra = extraParam(it.kind);
 						const isCurrent = current === it.seq;
 						return (
@@ -226,8 +216,18 @@ export default function MissionPanel() {
 								<span className="w-4 text-white/40">{it.seq}</span>
 								<select
 									value={it.kind}
-									onChange={(e) => updateItem(it.seq, { kind: e.target.value as MissionKind })}
-									className="h-6 rounded border border-white/15 bg-transparent px-1 text-white"
+									onChange={(e) => {
+										const kind = e.target.value as MissionKind;
+										// A landing is where the aircraft touches DOWN, so it
+										// belongs at ground level. Inheriting the cruise
+										// altitude of the waypoint it was converted from is
+										// what put a "landing" 50 m in the air and made PX4
+										// reject the approach as impossibly steep.
+										updateItem(it.seq, kind === "land" && (it.alt ?? 0) > 0
+											? { kind, alt: 0 }
+											: { kind });
+									}}
+									className="h-6 w-[7.5rem] rounded border border-white/15 bg-transparent px-1 text-white"
 								>
 									{KINDS.map((k) => <option key={k} value={k} className="bg-black">{k}</option>)}
 								</select>
@@ -237,7 +237,7 @@ export default function MissionPanel() {
 										value={it.alt ?? 0}
 										onChange={(e) => updateItem(it.seq, { alt: Number(e.target.value) })}
 										className="h-6 w-14 rounded border border-white/15 bg-transparent px-1 text-right text-white"
-										title="alt (m) — or drag the ▲ handle on the globe"
+										title="Altitude in metres above HOME (the upload frame) — or drag the ▲ handle on the globe"
 									/>
 								) : <span className="w-14" />}
 								{extra ? (
@@ -250,6 +250,9 @@ export default function MissionPanel() {
 									/>
 								) : <span className="w-12" />}
 								<span className="flex-1" />
+								{/* The flag puts the problem ON the item, so "approach too
+								    steep" points at the landing rather than at the plan. */}
+								<RowFlag blockers={blockersForSeq(blockers, it.seq)} />
 								<button onClick={() => reorderItem(it.seq, -1)} className="px-1 text-white/50 hover:text-white" title="up">↑</button>
 								<button onClick={() => reorderItem(it.seq, 1)} className="px-1 text-white/50 hover:text-white" title="down">↓</button>
 								<button onClick={() => live && telemetryClient.setCurrentMissionItem(it.seq)}
@@ -257,8 +260,8 @@ export default function MissionPanel() {
 								<button onClick={() => removeItem(it.seq)} className="px-1 text-red-400/70 hover:text-red-400" title="delete">✕</button>
 							</div>
 						);
-					})
-				)}
+					})}
+				</>)}
 			</div>
 
 			{items.length > 0 ? (

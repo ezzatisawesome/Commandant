@@ -51,7 +51,13 @@ import {
 // and the globe still drags and zooms underneath.
 
 const STROKE = "rgba(126,255,166,0.92)";      // HUD green, the aviation default
-const STROKE_DIM = "rgba(126,255,166,0.45)";
+const STROKE_DIM = "rgba(126,255,166,0.45)";  // minor ticks and spines only
+// Unit captions under each tape. These were STROKE_DIM, which is right for a
+// tick mark and wrong for text: a 12 px glyph at 45 % alpha over bright terrain
+// is genuinely unreadable, and the caption is what says whether the tape is
+// airspeed or groundspeed — the one distinction on a solar aircraft in wind that
+// must never be guessed at.
+const STROKE_UNIT = "rgba(150,255,180,0.95)";
 const FONT = "600 12px ui-monospace, SFMono-Regular, Menlo, monospace";
 
 /** Attitude ball: radius, and degrees of pitch per pixel inside it. 1.7 px/deg
@@ -144,7 +150,7 @@ export default function Hud() {
 					// aircraft clears the hill, which MSL alone does not answer.
 					sub={aglM !== null ? `${aglM.toFixed(0)} AGL` : undefined}
 					subTone={d.clearance === "critical" ? "rgba(255,110,110,0.95)"
-						: d.clearance === "low" ? "rgba(255,190,110,0.95)" : STROKE_DIM}
+						: d.clearance === "low" ? "rgba(255,190,110,0.95)" : STROKE_UNIT}
 				/>
 				{/* ---- attitude ball, top right ---- */}
 				<AttitudeBall
@@ -285,12 +291,12 @@ const Tape = memo(function Tape({
 				</text>
 			</g>
 			<text x={0} y={spec.halfPx + 16} textAnchor="middle"
-				style={{ font: FONT }} fill={STROKE_DIM}>
+				style={{ font: FONT }} fill={STROKE_UNIT}>
 				{caption}
 			</text>
 			{sub ? (
 				<text x={0} y={spec.halfPx + 31} textAnchor="middle"
-					style={{ font: FONT }} fill={subTone ?? STROKE_DIM}>
+					style={{ font: FONT }} fill={subTone ?? STROKE_UNIT}>
 					{sub}
 				</text>
 			) : null}

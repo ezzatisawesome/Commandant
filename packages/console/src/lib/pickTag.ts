@@ -57,3 +57,23 @@ export function tagSeq(id: string | null, prefix: string): number | null {
 	const n = Number(tail);
 	return Number.isSafeInteger(n) ? n : null;
 }
+
+/**
+ * Every tagged id prefix that is GRABBABLE — a marker or handle the operator
+ * can press and drag.
+ *
+ * Shared so the cursor overlay can ask "is the mouse over something draggable?"
+ * with the same answer the drag handlers will give. The cursor draws a plumb
+ * line and a ground ring under the pointer, which is exactly the wrong thing to
+ * have on top of a 9 px handle the operator is trying to aim at: it hides the
+ * handle and reads as though the click will land on the terrain instead.
+ */
+export const GRAB_PREFIXES = [
+	"mission-alt-", "mission-rad-", "mission-wp-",
+	"geo-circle-r-", "geo-rally-alt-", "geo-mid-", "geo-rally-", "geo-fence-",
+] as const;
+
+/** Is one of the grabbable handles under this pick list? */
+export function isOverHandle(picks: readonly (PickLike | null | undefined)[]): boolean {
+	return firstTaggedId(picks, GRAB_PREFIXES) !== null;
+}
