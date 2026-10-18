@@ -152,6 +152,11 @@ class SimAutopilot:
             self.radio.send("attitude_send", boot, 0.02, 0.05, 1.57, 0.0, 0.0, 0.0)
             self.radio.send("gps_raw_int_send", boot * 1000, 3, 374000000,
                             -1221000000, 120000, 120, 150, 1400, 9000, 14)
+            # An estimator report and a health word, so a rehearsal that waits
+            # for the vehicle to be armable has something to wait for here too.
+            self.radio.send("ekf_status_report_send", 0xFFFF, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1)
+            self.radio.send("sys_status_send", 0x3F, 0x3F, 0x3F, 250, 24300, 400, 78,
+                            0, 0, 0, 0, 0, 0)
             time.sleep(0.2)
 
     def _rx(self):

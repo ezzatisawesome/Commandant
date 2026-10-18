@@ -173,6 +173,19 @@ async def fly(args):
                          lambda g: f"{g['count']} items")
 
             print(" fly")
+            if args.wait_ready:
+                # Real PX4 refuses to arm until its estimator has a position and
+                # a home, which takes tens of seconds into a fresh SITL run.
+                # Without this the first --attach run reports FAIL for `arm` and
+                # looks like a Commandant bug, when the honest reading is "the
+                # aircraft was not ready yet". Waits for what the autopilot
+                # itself says, rather than sleeping a guessed interval.
+                await r.step("wait until the vehicle is armable", None,
+                             lambda g: (g.get("type") == "telemetry"
+                                        and g.get("ekfOk") is True
+                                        and (g.get("gpsFix") or 0) >= 3),
+                             lambda g: f"ekfOk, gps fix {g.get('gpsFix')} "
+                                       f"({g.get('gpsSats')} sats)")
             await r.step("arm", {"type": "command", "id": "a1", "name": "arm"},
                          lambda g: g.get("type") == "ack" and g.get("id") == "a1",
                          lambda g: g["text"])
@@ -278,6 +291,12 @@ def main() -> int:
     ap.add_argument("--items", type=int, default=12, help="mission items")
     ap.add_argument("--seed", type=int, default=3)
     ap.add_argument("--budget", type=float, default=45.0, help="per-step budget, seconds")
+    ap.add_argument("--wait-ready", action="store_true",
+                    help="before arming, wait for the autopilot to report a valid "
+                         "EKF and a 3D GPS fix. Use this with --attach against a "
+                         "real PX4, which refuses to arm for tens of seconds into "
+                         "a fresh run -- otherwise `arm` fails and reads as a "
+                         "Commandant bug rather than an aircraft that is not ready.")
     ap.add_argument("--attach", default="", metavar="ENDPOINT",
                     help="drive a REAL autopilot instead of the stand-in: an "
                          "endpoint gs understands (`auto`, udpin:0.0.0.0:14550 for "

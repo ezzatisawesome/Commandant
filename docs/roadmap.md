@@ -105,6 +105,23 @@ fixed (`packages/gs/tests/test_flight_ready.py`, 14 tests).
    the EKF wind estimate are simply never populated, with no error. The dialect
    is now rebound explicitly.
 
+**Measured, and left alone (2026-10-18):** three performance questions this
+pass asked and answered in the negative, recorded so the next person does not
+re-ask them.
+
+- **The mav loop.** The four servicers are 72 % of a loop iteration, which
+  sounds alarming until the iteration is **4.89 µs** — so at 200 msg/s they are
+  0.07 % of a core here, ~0.5 % on a Pi 4. The plan had been to gate them behind
+  a time budget; the numbers say that would complicate the hot path for nothing.
+- **Memory over a long run.** A days-long flight is a process that must not
+  grow. MEASURED over a sustained run with a client attached: **RSS flat at
+  47456 KB, +0 KB in 50 s, extrapolating to 0 MB/day**, with `latest` at 22
+  keys, `_src_at` at 3 and `_last_req_at` at 3 throughout. The largest
+  allocation deltas are ~10 KB of import machinery. The H18 bookkeeping audit
+  said the registries were bounded; this says the process is.
+- **The 25 Hz broadcast**, from the earlier pass: 861 B/frame, 11.5 µs to
+  serialise, ~6 % of a Pi's WiFi at six clients.
+
 **Self-review of this pass's own code (2026-10-18):** the paced param walk
 rescanned all ~1000 indices from zero on every tick, to issue at most 8 reads —
 and it runs once per mav-loop iteration, i.e. once per received message, so at
