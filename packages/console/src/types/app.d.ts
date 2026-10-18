@@ -60,6 +60,17 @@ export interface TelemetryFrame {
     // the field hub is a Pi with no RTC, so `t` can step backward by an hour
     // the moment NTP lands. Absent from frames served by an older daemon.
     upMs?: number,
+    // Age in ms of each MESSAGE GROUP behind this frame, keyed by group
+    // ("position", "attitude", "airdata", "wind", "gps", "battery",
+    // "actuators", "health", "ekf"). `dataAgeMs` says whether the aircraft is
+    // still talking; this says whether a particular NUMBER is still true,
+    // which is not the same question: the fields arrive on different messages
+    // at different rates, and three of them are messages gs had to ask for and
+    // which a rebooted autopilot stops sending. A stopped stream's last value
+    // keeps being re-broadcast, so without this it is indistinguishable from a
+    // live one. A group that has never been seen is ABSENT rather than 0 —
+    // "no estimate yet" and "an estimate from four minutes ago" differ.
+    ages?: Record<string, number>,
 
     // --- straight from the autopilot's estimator, not reconstructed here -----
     // EKF velocity in NED (m/s), from GLOBAL_POSITION_INT vx/vy/vz. Doppler

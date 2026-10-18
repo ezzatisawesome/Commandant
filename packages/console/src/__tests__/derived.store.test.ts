@@ -6,6 +6,7 @@ import {
 } from "@/stores/derived.store";
 import { $hudFrame, pushFrame } from "@/stores/aircraft.store";
 import { $fenceItems, setFenceItems } from "@/stores/geo.store";
+import { GROUP_STALE_MS, groupAgeMs } from "@/lib/flightGeometry";
 import type { TelemetryFrame } from "@/types/app";
 
 const LAT = 37.3985511, LON = -122.148853, GROUND = 111;
@@ -83,6 +84,39 @@ describe("wind and track come from the autopilot, not from here", () => {
 		// old code invented a number here.
 		pushFrame(frame({ t: 22_000, trackDeg: 90, yaw: 1.57, airspeed: 13, groundspeed: 13 }));
 		expect($derived.get().wind).toBeNull();
+	});
+
+	it("carries the estimate's age through, so a stopped WIND_COV can be shown as cold", () => {
+		// `dataAgeMs` says whether the aircraft is still talking. It cannot say
+		// whether THIS number is still true: lose the airspeed sensor and EKF2
+		// stops producing a wind estimate, WIND_COV stops, and gs goes on
+		// re-broadcasting the last value in every frame — indistinguishable from
+		// a live reading. On an aircraft that stays up on wind and sun that is
+		// the worst number on the panel to be quietly wrong.
+		pushFrame(frame({
+			t: 23_000, trackDeg: 0, yaw: 0,
+			windSpeed: 4.2, windFromDeg: 270,
+			dataAgeMs: 40,                                   // the LINK is fine
+			ages: { position: 40, wind: 240_000 },           // the stream is not
+		}));
+		const w = $derived.get().wind!;
+		expect(w.ageMs).toBe(240_000);
+		expect(w.speedMps).toBeCloseTo(4.2, 6);              // the value is kept
+		expect(w.ageMs!).toBeGreaterThan(GROUP_STALE_MS);
+	});
+
+	it("leaves the age undefined when the daemon does not report one", () => {
+		// An older gs sends no `ages`. Absent must not read as zero, which would
+		// claim the estimate is fresh.
+		pushFrame(frame({ t: 24_000, trackDeg: 0, yaw: 0, windSpeed: 4.2, windFromDeg: 270 }));
+		expect($derived.get().wind!.ageMs).toBeUndefined();
+	});
+
+	it("groupAgeMs tells 'never seen' apart from 'seen a while ago'", () => {
+		expect(groupAgeMs(undefined, "wind")).toBeNull();        // older daemon
+		expect(groupAgeMs({ position: 10 }, "wind")).toBeNull();  // never seen
+		expect(groupAgeMs({ wind: 0 }, "wind")).toBe(0);          // seen just now
+		expect(groupAgeMs({ wind: 240_000 }, "wind")).toBe(240_000);
 	});
 
 	it("still computes drift, which is geometry rather than an estimate", () => {

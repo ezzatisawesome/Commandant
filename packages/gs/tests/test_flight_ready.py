@@ -1152,3 +1152,257 @@ def test_h16_the_extra_streams_are_re_requested_after_a_reboot():
     b._request_message(conn, 1, 1, bridgemod.MSG_WIND_COV)
     assert [s[0] for s in conn.mav.sent] == ["command_long_send"], \
         "the stream request stayed throttled across a reboot"
+
+
+# --- H17: the vehicle's uptime counter wraps on a long flight --------------
+
+BOOT_WRAP = 2 ** 32   # time_boot_ms is uint32 ms
+
+
+def test_h17_a_uptime_wrap_is_not_a_reboot():
+    """`time_boot_ms` is uint32 milliseconds, so it wraps at 49.7 days. This
+    airframe is a solar aircraft meant to stay up for days to weeks, so the
+    wrap is a flight event, not a theoretical one.
+
+    At the wrap the counter jumps from ~2^32 to near zero, which is exactly what
+    a reboot looks like to the H16 detector -- and the reboot handler abandons
+    every in-flight handshake and tells the console to throw away its param
+    cache. Doing that to a healthy aircraft 49.7 days into a flight, with a
+    warning saying it rebooted, is worse than saying nothing."""
+    events = []
+    b = _bridge()
+    b._loop = _capturing_loop(events)
+    conn = RecordingConn()
+    b._vehicle = (1, 1)
+
+    b._on_mav(conn, _gpi(BOOT_WRAP - 20, lat=374000000))
+    assert b.latest["bootMs"] == BOOT_WRAP - 20
+    b._on_mav(conn, _gpi(30, lat=374100000))        # wrapped
+
+    assert not [e for e in events if e.get("type") == "vehicle_reboot"], \
+        "an uptime wrap was reported as a reboot"
+    # The frame itself must still be taken: the aircraft is flying.
+    assert b.latest["bootMs"] == 30
+    assert b.latest["lat"] == pytest.approx(37.41)
+
+
+def test_h17_a_wrap_does_not_abandon_in_flight_work():
+    events = []
+    b = _bridge()
+    b._loop = _capturing_loop(events)
+    conn = RecordingConn()
+    b._vehicle = (1, 1)
+    b._on_mav(conn, _gpi(BOOT_WRAP - 20))
+    b._cmd_queue.put({"id": "c1", "mav_cmd": m.MAV_CMD_COMPONENT_ARM_DISARM,
+                      "params": [1, 0, 0, 0, 0, 0, 0]})
+    b._service_commands(conn)
+    _upload(b, conn, n=3)
+
+    b._on_mav(conn, _gpi(30))
+    assert "c1" in b._pending, "a wrap cancelled a live command"
+    assert b._mission is not None, "a wrap cancelled a live mission upload"
+
+
+def test_h17_a_real_reboot_near_the_wrap_is_still_a_reboot():
+    """The discriminator must not become a blanket excuse: a vehicle that
+    reboots while its uptime happens to be mid-range still has to be caught."""
+    events = []
+    b = _bridge()
+    b._loop = _capturing_loop(events)
+    conn = RecordingConn()
+    b._vehicle = (1, 1)
+    b._on_mav(conn, _gpi(BOOT_WRAP // 2))     # ~25 days of uptime
+    b._on_mav(conn, _gpi(30))                 # restarted, not wrapped
+    assert [e for e in events if e.get("type") == "vehicle_reboot"], \
+        "a reboot at 25 days of uptime was mistaken for a wrap"
+
+
+# --- H18: does a long-lived daemon accumulate? ------------------------------
+
+def test_h18_per_session_bookkeeping_stays_bounded(monkeypatch):
+    """This daemon is meant to run for the length of a flight, and the flights
+    are measured in days. Every registry it keeps per command / param / mission
+    / client has to come back to empty, or a week of ordinary operation is a
+    leak. Driven here with 400 rounds of churn."""
+    monkeypatch.setattr(bridgemod, "CMD_RETRY_MS", 0)
+    monkeypatch.setattr(bridgemod, "MISSION_OP_TIMEOUT_MS", 0)
+    monkeypatch.setattr(bridgemod, "PARAM_SET_TIMEOUT_MS", 0)
+    sink: list = []
+    b = _bridge()
+    b._loop = _capturing_loop(sink)
+    conn = RecordingConn()
+    b._vehicle = (1, 1)
+
+    for i in range(400):
+        # a command that gets answered
+        b._cmd_queue.put({"id": f"c{i}", "mav_cmd": m.MAV_CMD_COMPONENT_ARM_DISARM,
+                          "params": [1, 0, 0, 0, 0, 0, 0]})
+        b._service_commands(conn)
+        b._on_mav_protocol(conn, bridgemod._mono_ms(), "COMMAND_ACK",
+                           _msg("COMMAND_ACK", command=m.MAV_CMD_COMPONENT_ARM_DISARM,
+                                result=m.MAV_RESULT_ACCEPTED))
+        # a command that never gets answered, so it has to expire
+        b._cmd_queue.put({"id": f"x{i}", "mav_cmd": m.MAV_CMD_NAV_LAND,
+                          "params": [0] * 7})
+        for _ in range(bridgemod.CMD_MAX_TRIES + 1):
+            b._service_commands(conn)
+        # a param set that is echoed, and one that is not
+        b._param_queue.put({"kind": "set", "id": f"p{i}", "name": "FW_AIRSPD_TRIM",
+                            "value": float(i), "ptype": m.MAV_PARAM_TYPE_REAL32})
+        b._service_params(conn)
+        b._on_mav_protocol(conn, bridgemod._mono_ms(), "PARAM_VALUE",
+                           _param_value(65535, 1, "FW_AIRSPD_TRIM", float(i)))
+        b._param_queue.put({"kind": "set", "id": f"q{i}", "name": "MIS_TAKEOFF_ALT",
+                            "value": float(i), "ptype": m.MAV_PARAM_TYPE_REAL32})
+        for _ in range(bridgemod.PARAM_SET_MAX_TRIES + 1):
+            b._service_params(conn)
+        # a mission upload that times out
+        _upload(b, conn, n=3)
+        for _ in range(bridgemod.MISSION_MAX_TRIES + 2):
+            if b._mission is not None:
+                b._mission["last"] = 0
+            b._service_missions(conn)
+        # a telemetry frame, so `latest` is exercised too
+        b._on_mav(conn, _gpi(1000 + i * 100))
+
+    assert b._pending == {}, f"{len(b._pending)} commands left pending"
+    assert b._param_set_pending == {}, f"{len(b._param_set_pending)} param sets left"
+    assert b._mission is None
+    # A partial batch awaiting its flush is correct, not a leak: the invariant
+    # is that it is bounded by the batch size, not that it is empty.
+    assert len(b._param_batch) <= bridgemod.PARAM_BATCH_MAX, len(b._param_batch)
+    assert len(b._last_req_at) <= 8, b._last_req_at
+    assert len(b._param_req_at) <= 1024, len(b._param_req_at)
+    # `latest` is a fixed set of telemetry fields, not a per-event accumulator.
+    assert len(b.latest) < 80, sorted(b.latest)
+
+
+def test_h18_a_client_that_vanishes_does_not_leak_its_ack_route(monkeypatch):
+    """`_pending_clients` maps a command id to the socket that asked, so the
+    verdict goes back to the right tab. A tab that closes mid-command (a phone
+    going to sleep on the hub's WiFi, constantly) must not leave its entry
+    behind -- over a week of reconnects that is the registry growing without
+    anything to flush it."""
+    monkeypatch.setattr(bridgemod, "CMD_RETRY_MS", 0)
+    sink: list = []
+    b = _bridge()
+    b._loop = _capturing_loop(sink)
+    conn = RecordingConn()
+    class DeadWS:
+        async def send(self, _payload):
+            raise ConnectionError("tab closed")
+
+    for i in range(200):
+        b._pending_clients[f"c{i}"] = DeadWS()
+        b._cmd_queue.put({"id": f"c{i}", "mav_cmd": m.MAV_CMD_NAV_LAND,
+                          "params": [0] * 7})
+        for _ in range(bridgemod.CMD_MAX_TRIES + 1):
+            b._service_commands(conn)
+    # The mav thread resolved every one (as a timeout) and handed the asyncio
+    # side a verdict per id. Run the real delivery -- the send fails, because the
+    # tab is gone, and the route must still be released.
+    assert b._pending == {}
+    assert len(b._pending_clients) == 200
+    import asyncio as _aio
+
+    async def drain():
+        for event in sink:
+            await b._deliver_ack(event)
+    _aio.run(drain())
+    assert b._pending_clients == {}, \
+        f"{len(b._pending_clients)} ack routes left behind by closed tabs"
+
+
+# --- H19: a stopped stream kept being redrawn as a live reading ------------
+
+def test_h19_each_message_group_carries_its_own_age(ports):
+    """`dataAgeMs` answers "is the aircraft still talking". It cannot answer "is
+    this number still true", because a frame's fields arrive on different
+    messages at different rates -- and three of them are messages gs had to ASK
+    for, which a rebooted or reconfigured autopilot just stops sending.
+
+    When a stream stops, its last value stays in `latest` and is re-broadcast in
+    every frame, indistinguishable from a live one. An airspeed sensor failure
+    takes EKF2's wind estimate with it, and the operator goes on being shown the
+    last wind the aircraft ever saw as the current wind. On an aircraft that
+    stays up on wind and sun, that is the worst number on the panel to be
+    quietly wrong."""
+    b = _bridge(json_port=ports["json"], ws_port=ports["ws"])
+    conn = RecordingConn()
+    b._vehicle = (1, 1)
+
+    async def scenario():
+        import asyncio
+        import json as _json
+
+        import websockets
+        serve = asyncio.create_task(b._serve())
+        await asyncio.sleep(0.3)
+        async with websockets.connect(f"ws://127.0.0.1:{ports['ws']}") as ws:
+            # Position and wind both arrive; then the wind stream stops while
+            # position keeps coming -- a live link with one dead stream.
+            b._on_mav(conn, _msg("WIND_COV", wind_x=3.0, wind_y=1.0, wind_z=0.1,
+                                 var_horiz=0.08, var_vert=0.05))
+            b._on_mav(conn, _gpi(1000))
+            got = await _recv_telemetry(ws, lambda g: "ages" in g)
+            assert got is not None, "no frame carried per-group ages"
+            assert set(got["ages"]) >= {"wind", "position"}, got["ages"]
+            assert got["ages"]["wind"] < 2000
+            first_wind_age = got["ages"]["wind"]
+
+            await asyncio.sleep(0.6)
+            for boot in (1100, 1200, 1300):          # position only
+                b._on_mav(conn, _gpi(boot))
+            later = await _recv_telemetry(
+                ws, lambda g: g.get("ages", {}).get("position", 9e9) < 400
+                and g.get("ages", {}).get("wind", 0) > first_wind_age + 400)
+            assert later is not None, "the wind age never grew while position stayed fresh"
+            # The value is still there -- gs does not invent a gap -- but it is
+            # now explicitly old, which is what a client needs to say so.
+            assert later["windSpeed"] == pytest.approx(math.hypot(3.0, 1.0))
+            assert later["linkState"] == "alive"
+            assert later["dataAgeMs"] < 1000, "the LINK is fine; only one stream stopped"
+        serve.cancel()
+
+    import asyncio
+    import math
+    asyncio.run(scenario())
+
+
+def test_h19_a_group_never_seen_is_absent_not_zero(ports):
+    """"no wind estimate yet" and "a wind estimate from four minutes ago" are
+    different things, and a client has to be able to tell which it has."""
+    b = _bridge(json_port=ports["json"], ws_port=ports["ws"])
+    conn = RecordingConn()
+    b._vehicle = (1, 1)
+
+    async def scenario():
+        import asyncio
+
+        import websockets
+        serve = asyncio.create_task(b._serve())
+        await asyncio.sleep(0.3)
+        async with websockets.connect(f"ws://127.0.0.1:{ports['ws']}") as ws:
+            b._on_mav(conn, _gpi(1000))
+            got = await _recv_telemetry(ws, lambda g: "ages" in g)
+            assert got is not None
+            assert "position" in got["ages"]
+            assert "wind" not in got["ages"], "reported an age for a stream never seen"
+            assert "gps" not in got["ages"]
+        serve.cancel()
+
+    import asyncio
+    asyncio.run(scenario())
+
+
+def test_h19_ages_reset_when_the_link_is_reopened():
+    """A reopen may be a different aircraft (H5). Its streams have their own
+    history, and carrying the old one over would date the new vehicle's data to
+    the previous one's."""
+    b = _bridge()
+    conn = RecordingConn()
+    b._vehicle = (1, 1)
+    b._on_mav(conn, _msg("GPS_RAW_INT", fix_type=3, satellites_visible=14))
+    assert "gps" in b._src_at
+    b._on_reopen()
+    assert b._src_at == {}

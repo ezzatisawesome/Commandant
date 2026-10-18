@@ -10,6 +10,7 @@ import { atom } from "nanostores";
 import {
 	sunPosition, fenceProximity, aglM, clearanceBand, distanceM, angleDiffDeg,
 	type Wind, type SunPosition, type FenceProximity, type ClearanceBand, isNum,
+	groupAgeMs,
 } from "@/lib/flightGeometry";
 import { $hudFrame } from "@/stores/aircraft.store";
 import { $fenceItems } from "@/stores/geo.store";
@@ -105,6 +106,9 @@ export function recomputeDerived(): void {
 			driftDeg: (headingDeg !== null && trackDeg !== null)
 				? angleDiffDeg(trackDeg, headingDeg) : 0,
 			sigmaMps: isNum(f.windSigma) ? f.windSigma : undefined,
+			// How old the estimate is, so the readout can say when WIND_COV has
+			// stopped instead of redrawing the last value as the current wind.
+			ageMs: groupAgeMs(f.ages, "wind") ?? undefined,
 		}
 		: null;
 

@@ -52,9 +52,45 @@ BROADCAST_HZ = 25
 STALE_MS = 2000          # no traffic for this long => link no longer "alive" (-> stale)
 LOST_MS = 5000           # no traffic for this long => link "lost"
 REBOOT_GAP_MS = 5000     # a backward time_boot_ms jump bigger than this = PX4 reboot
+# time_boot_ms is uint32 MILLISECONDS, so the vehicle's uptime counter wraps at
+# 49.7 days. For a solar aircraft meant to stay up for days to weeks that is a
+# flight event, not a theoretical one -- and at the wrap the counter jumps from
+# ~2^32 to near zero, which is indistinguishable from a reboot unless the
+# previous value is taken into account. Calling it a reboot would abandon every
+# in-flight handshake and tell the console to throw away its param cache, with a
+# warning saying the aircraft restarted, 49.7 days into a healthy flight.
+BOOT_MS_WRAP = 2 ** 32
+BOOT_WRAP_MARGIN_MS = 60_000   # "near" either end of the counter
 TARGET_SOURCE_TTL_MS = 2000   # JSON setpoint wins over PX4's for this long after it arrives
 BATTERY_SOURCE_TTL_MS = 3000  # JSON battery wins over PX4's dummy for this long
 TARGET_STALE_MS = 3000        # re-request msg 87 once the setpoint stream goes quiet
+
+# `dataAgeMs` says how old the newest VEHICLE data is, which is the right answer
+# for "is the aircraft still talking". It is not the right answer for "is this
+# number still true", because the fields in a frame come from different messages
+# arriving at different rates -- and three of them are messages gs had to ASK
+# for, which a rebooted or reconfigured autopilot simply stops sending.
+#
+# When a stream stops, its last value stays in `latest` and is re-broadcast in
+# every frame from then on, indistinguishable from a live reading. So an airspeed
+# sensor failure takes EKF2's wind estimate with it and the operator keeps being
+# shown the last wind the aircraft ever saw, as the current wind, indefinitely.
+# For an aircraft whose whole job is staying up on wind and sun, that is the
+# worst reading on the panel to be quietly wrong.
+#
+# So each message group carries its own age. The groups are by MESSAGE, because
+# that is what actually stops: fields that arrive together go stale together.
+_AGE_GROUPS = {
+    "GLOBAL_POSITION_INT": "position",
+    "ATTITUDE": "attitude",
+    "VFR_HUD": "airdata",
+    "WIND_COV": "wind",
+    "GPS_RAW_INT": "gps",
+    "BATTERY_STATUS": "battery",
+    "ACTUATOR_OUTPUT_STATUS": "actuators",
+    "SYS_STATUS": "health",
+    "EKF_STATUS_REPORT": "ekf",
+}
 
 # Command TX: who we address, and the retry policy for COMMAND_ACK tracking.
 # 1/1 is the PX4 default; gs locks onto the real ids from the first autopilot
@@ -790,6 +826,9 @@ class Bridge:
         # Set by _on_mav_state when the vehicle's uptime clock jumps backward
         # (a reboot); acted on in _on_mav_protocol, which may transmit.
         self._reboot_pending: int | None = None
+        # Per-message-group freshness; see _AGE_GROUPS. Mav-thread writes under
+        # the lock, the broadcast loop reads it there too.
+        self._src_at: dict[str, int] = {}
         self._tasks: set[asyncio.Task[Any]] = set()    # keep ack-delivery tasks alive
         self.link_reopens = 0                          # diagnostics: transport reopen count
         self._hb_at = 0                                # last GCS heartbeat tx (mav thread)
@@ -835,6 +874,7 @@ class Bridge:
             print(f"[gs] link reopened: releasing vehicle lock on sysid {self._vehicle[0]}")
         self._vehicle = None
         self._last_pos_boot_ms = -1
+        self._src_at.clear()        # the new link's streams have their own ages
         self._last_req_at.clear()   # re-request the extra streams on the new link
 
     def _resolve_endpoint(self) -> str | None:
@@ -1497,6 +1537,9 @@ class Bridge:
         """Fold a message into `latest`. Called with `self._lock` held, so this
         must stay pure bookkeeping -- no sends, no broadcasts, no blocking."""
         L = self.latest
+        group = _AGE_GROUPS.get(t)
+        if group is not None:
+            self._src_at[group] = now
         if t == "GLOBAL_POSITION_INT":
             # Drop stale/reordered frames; a large backward jump is a reboot.
             boot = msg.time_boot_ms
@@ -1510,7 +1553,15 @@ class Bridge:
             # Flagged here, acted on in _on_mav_protocol, because reacting means
             # transmitting and this runs under the lock.
             if self._last_pos_boot_ms >= 0 and boot < self._last_pos_boot_ms:
-                self._reboot_pending = boot
+                # ...unless the counter simply wrapped: it was about to overflow
+                # and has come back around. See BOOT_MS_WRAP.
+                wrapped = (self._last_pos_boot_ms >= BOOT_MS_WRAP - BOOT_WRAP_MARGIN_MS
+                           and boot <= BOOT_WRAP_MARGIN_MS)
+                if wrapped:
+                    print(f"[gs] vehicle uptime counter wrapped at 49.7 days "
+                          f"({self._last_pos_boot_ms} -> {boot} ms); not a reboot")
+                else:
+                    self._reboot_pending = boot
             self._last_pos_boot_ms = boot
             # PX4's own uptime clock, surfaced for diagnostics: when the
             # simulator stalls this is the value PX4's clock stops at, which
@@ -2041,6 +2092,7 @@ class Bridge:
                 with self._lock:
                     mav_at, json_at = self.last_mav_at, self.last_json_at
                     frame = dict(self.latest)
+                    src_at = dict(self._src_at)
                 # A MAVLink vehicle, once seen, is the sole authority on link health:
                 # the JSON feed must never keep the link green for a dead autopilot.
                 # A pure flightlink run (no PX4) falls back to the JSON feed, which
@@ -2064,6 +2116,13 @@ class Bridge:
                 # "frozen 42 s ago" instead of quietly showing a stale position.
                 # Both sides monotonic, so a clock step cannot make it negative.
                 frame["dataAgeMs"] = (mono - last) if last else None
+                # Per-group ages, so a client can tell a stopped stream from a
+                # live one instead of redrawing its last value forever. A group
+                # that has never been seen is simply absent -- "no wind estimate
+                # yet" and "a wind estimate from four minutes ago" are different
+                # things and a client should be able to say which it has.
+                if src_at:
+                    frame["ages"] = {g: mono - at for g, at in src_at.items()}
                 payload = dumps(frame)
                 if self._clients:
                     websockets.broadcast(self._clients, payload)

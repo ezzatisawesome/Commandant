@@ -23,6 +23,23 @@ from the Phase 0 frame remain unchanged (`lat`, `lon`, `alt`, `roll`, `pitch`,
   arrives.
 - `t` (int): wall-clock ms since the epoch — a timestamp to **display or log**.
 - `upMs` (int): monotonic ms since the gs daemon started.
+- `ages` (object, optional): age in ms of each **message group** behind this
+  frame — `position`, `attitude`, `airdata`, `wind`, `gps`, `battery`,
+  `actuators`, `health`, `ekf`.
+
+**`dataAgeMs` and `ages` answer different questions.** `dataAgeMs` is "is the
+aircraft still talking". `ages` is "is this particular number still true", and
+it is not the same question: a frame's fields arrive on different messages at
+different rates, and three of them (`ACTUATOR_OUTPUT_STATUS`, `WIND_COV`,
+`POSITION_TARGET_GLOBAL_INT`) are messages gs had to *ask* for, which a rebooted
+or reconfigured autopilot simply stops sending. When a stream stops, its last
+value stays in the frame and is re-broadcast indefinitely, indistinguishable
+from a live reading — so losing the airspeed sensor takes EKF2's wind estimate
+with it and the operator goes on being shown the last wind the aircraft ever saw
+as the current wind. A group that has **never** been seen is absent from `ages`
+rather than reported as 0: "no estimate yet" and "an estimate from four minutes
+ago" are different things and a client should be able to say which it has. Ages
+reset when the link is reopened, since that may be a different aircraft.
 
 **Two clocks, and clients must difference the right one.** `t` is the wall
 clock. The field hub is a Raspberry Pi with no RTC: it boots with a stale or

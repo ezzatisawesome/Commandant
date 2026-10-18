@@ -14,6 +14,7 @@ import {
 } from "@/stores/displayConfig.store";
 import type { LinkState, TelemetryFrame } from "@/types/app";
 import type { ClearanceBand } from "@/lib/flightGeometry";
+import { GROUP_STALE_MS } from "@/lib/flightGeometry";
 import { Sparkline } from "./Sparkline";
 import { HealthStrip } from "./HealthStrip";
 import { ControlBar } from "./ControlBar";
@@ -141,14 +142,29 @@ export function TelemetryStrip() {
 							? `terrain ${d.terrainM.toFixed(0)} m MSL · ${d.aglM?.toFixed(0) ?? "—"} m AGL`
 							: "waiting for terrain tiles under the aircraft",
 					};
-				case "wind":
+				case "wind": {
+					// A cold wind estimate is shown as cold. PX4 only produces one
+					// while EKF2 has one, so losing the airspeed sensor stops
+					// WIND_COV and leaves the last value to be redrawn as the
+					// current wind forever. The link is fine, the frame is fresh,
+					// and this one number is minutes old — which the strip's own
+					// frame-level `frozen` flag cannot say.
+					const windAge = d.wind?.ageMs;
+					const windCold = isNum(windAge) && windAge > GROUP_STALE_MS;
 					return {
-						label: meta.label, unit: d.wind ? meta.unit : undefined,
+						label: meta.label, unit: d.wind && !windCold ? meta.unit : undefined,
 						value: d.wind === null ? "—"
+							: windCold ? `${d.wind.speedMps.toFixed(1)} cold`
 							: `${d.wind.speedMps.toFixed(1)} ${compass(d.wind.fromDeg)}`,
-						tone: "text-white",
-						title: d.wind ? `from ${d.wind.fromDeg.toFixed(0)}°` : "needs two fixes",
+						tone: windCold ? "text-amber-400" : "text-white",
+						title: d.wind === null ? "no EKF2 wind estimate yet"
+							: windCold
+								? `WIND_COV stopped ${(windAge! / 1000).toFixed(0)} s ago — `
+									+ `last estimate was ${d.wind.speedMps.toFixed(1)} m/s `
+									+ `from ${d.wind.fromDeg.toFixed(0)}°`
+								: `from ${d.wind.fromDeg.toFixed(0)}°`,
 					};
+				}
 				case "drift":
 					return {
 						label: meta.label,

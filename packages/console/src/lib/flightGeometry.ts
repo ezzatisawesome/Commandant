@@ -54,6 +54,27 @@ export interface Wind {
 	driftDeg: number;
 	/** 1-sigma horizontal uncertainty from the estimator, m/s, when known. */
 	sigmaMps?: number;
+	/** How old this estimate is, ms, when the daemon reports it. PX4 only
+	 *  produces a wind estimate while EKF2 has one — lose the airspeed sensor
+	 *  and WIND_COV stops, leaving the last value to be redrawn as the current
+	 *  wind indefinitely. On an aircraft that stays up on wind and sun that is
+	 *  the worst number on the panel to be quietly wrong, so it is carried
+	 *  through and the readout says when it has gone cold. */
+	ageMs?: number;
+}
+
+/** A reading older than this is reported as cold rather than current. Chosen
+ *  well above the slowest of these streams (WIND_COV is requested at a few Hz
+ *  on a radio) so ordinary jitter never trips it. */
+export const GROUP_STALE_MS = 5000;
+
+/** Age of a message group behind a frame, or null if the daemon does not report
+ *  ages (an older gs) or has never seen that group. */
+export function groupAgeMs(
+	ages: Record<string, number> | undefined, group: string,
+): number | null {
+	const a = ages?.[group];
+	return isNum(a) ? a : null;
 }
 
 /**

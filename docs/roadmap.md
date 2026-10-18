@@ -72,6 +72,33 @@ fixed (`packages/gs/tests/test_flight_ready.py`, 14 tests).
    the EKF wind estimate are simply never populated, with no error. The dialect
    is now rebound explicitly.
 
+**Long-flight and per-stream staleness (2026-10-18):** three findings aimed at
+the stated target of a flight that lasts days.
+
+- **A stopped stream was redrawn as a live reading.** `dataAgeMs` answers "is
+  the aircraft still talking"; it cannot answer "is this number still true".
+  A frame's fields arrive on different messages at different rates, and three of
+  them are messages gs had to *ask* for. When one stops, its last value stays in
+  the frame forever, indistinguishable from a live one — so losing the airspeed
+  sensor takes EKF2's wind estimate with it and the operator keeps being shown
+  the last wind the aircraft ever saw as the current wind. On an airframe that
+  stays up on wind and sun that is the worst number on the panel to be quietly
+  wrong. Frames now carry a per-message-group `ages` map, a never-seen group is
+  absent rather than 0, and the strip shows a cold wind as `cold` in amber with
+  the age in its tooltip.
+- **The uptime counter wraps at 49.7 days.** `time_boot_ms` is uint32 ms, and
+  this airframe is meant to stay up for days to weeks, so the wrap is a flight
+  event. At the wrap the counter jumps from ~2³² to near zero — exactly what a
+  reboot looks like — which would have abandoned every in-flight handshake and
+  told the console to throw away its param cache, with a warning saying the
+  aircraft restarted, 49.7 days into a healthy flight. A wrap is now told apart
+  from a restart by where the counter was.
+- **Checked and not a fault: accumulation.** 400 rounds of churn over the
+  command / param / mission / client registries leaves them all empty, and an
+  ack route belonging to a tab that closed mid-command is released even though
+  the send fails. The console's status log is a bounded ring (200) and both
+  trails are chunk-capped, so nothing there grows either.
+
 **A param refresh starved the commands (2026-10-18):** `PARAM_REQUEST_LIST`
 hands the pacing to the autopilot, which sends all ~1000 values as fast as the
 link will carry. MEASURED on a 3.4 kB/s / 120 ms SiK link with a 400-param set:
