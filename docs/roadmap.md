@@ -72,6 +72,40 @@ fixed (`packages/gs/tests/test_flight_ready.py`, 14 tests).
    the EKF wind estimate are simply never populated, with no error. The dialect
    is now rebound explicitly.
 
+**Mission upload over a real radio (2026-10-17):** a seventh fault, found by
+building the thing that could find it — `packages/gs/scripts/radio_soak.py`,
+which runs the real command/param/mission state machines across a simulated
+telemetry radio (bandwidth, one-way latency, packet loss). Every timeout and
+retry constant in `bridge.py` was tuned against localhost UDP, where latency is
+~0 and loss is 0.
+
+A stalled upload re-sent `MISSION_COUNT`. Per the MAVLink mission protocol that
+makes the autopilot **discard the transfer and restart at seq 0**, so one lost
+frame cost the whole mission again. Worse, that restart counted as progress and
+reset `tries` to 0 — so the retry budget never ran out and the operation
+**livelocked**: MEASURED at 5 % loss on a 3.4 kB/s / 120 ms link, 21–39
+`MISSION_COUNT` kickoffs, no completion, and *no timeout ever reported*. The
+console sits on "uploading" forever with nothing to act on, which is worse than
+a clean failure.
+
+A stall mid-transfer means exactly one packet was lost — the autopilot's
+`MISSION_REQUEST_INT`, or our `MISSION_ITEM_INT` answering it — so gs now
+retransmits that one item and keeps `MISSION_COUNT` for the single case it is
+right for: the autopilot never answered the kickoff at all. A hard cap on
+kickoffs bounds the class, so a restart loop can never be unbounded again
+whatever induces it.
+
+| 40-item upload, 3.4 kB/s / 120 ms | before | after |
+|---|---|---|
+| 5 % loss (3 seeds) | 10–39 kickoffs; 2 of 3 never completed | **1 kickoff, 11–20 s, 3/3 ok** |
+| 10 % loss (3 seeds) | — | **1 kickoff, 18–27 s, 3/3 ok** |
+
+`radio_soak.py` is a soak tool, not a unit test — stochastic and minutes per
+run, so deliberately outside the pytest suite. Run it when changing a protocol
+state machine or any timing constant. It exits non-zero on a failure *or* on an
+upload that was restarted rather than resumed, since a run that succeeds after
+ten kickoffs still has the defect in it.
+
 **Plug and play (2026-10-17):** `--mavlink auto` is the default. There is
 deliberately **no distinction between a HITL rig and the aircraft** — gs only
 ever sees MAVLink, and the one place the distinction leaked out was

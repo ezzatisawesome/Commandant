@@ -1050,13 +1050,48 @@ class Bridge:
                 else:
                     self._broadcast({"type": op["ack_type"], "ok": False, "result": -1, "text": "timeout"})
                 self._mission = None
+            elif op.get("kickoffs", 0) > MISSION_MAX_TRIES:
+                # Backstop against a restart LOOP, which the ordinary `tries`
+                # check cannot catch: `tries` resets to 0 on every bit of
+                # progress -- right for bounding a stall, and exactly how the
+                # pre-fix retry livelocked. Re-sending MISSION_COUNT made the
+                # autopilot restart at seq 0, that request counted as progress,
+                # the budget reset, and round it went. MEASURED at 5 % loss on a
+                # 3.4 kB/s link: 39 restarts, no completion in 90 s, and no
+                # timeout ever reported -- the console sits on "uploading"
+                # forever, which is worse than a clean failure. Retransmitting
+                # one item (below) removes the cause; this bounds the class.
+                text = "timeout (restart loop)"
+                if op["op"] == "upload":
+                    self._report_mission_ack(op.get("id"), ok=False, result=-1,
+                                             text=text, ack_type=op["ack_type"])
+                else:
+                    self._broadcast({"type": op["ack_type"], "ok": False,
+                                     "result": -1, "text": text})
+                self._mission = None
             else:
                 op["tries"] += 1
                 op["last"] = now
                 try:
                     if op["op"] == "upload":
-                        conn.mav.mission_count_send(
-                            self.tsys, self.tcomp, op["count"], op["mtype"])
+                        # A stall mid-transfer means ONE packet was lost: either
+                        # the autopilot's MISSION_REQUEST_INT or our
+                        # MISSION_ITEM_INT answering it. Re-sending MISSION_COUNT
+                        # makes the autopilot discard everything and restart from
+                        # seq 0, so a single lost frame costs the whole mission
+                        # again -- and MISSION_MAX_TRIES gets spent retransmitting
+                        # items that already arrived. MEASURED on a 3.4 kB/s /
+                        # 120 ms link at 5 % loss: a 40-item upload burned all
+                        # three kickoffs and took 9.4 s, with no margin left.
+                        # So re-send the last item instead, and keep MISSION_COUNT
+                        # for the one case it is right for -- the autopilot never
+                        # answered the kickoff at all.
+                        if op.get("last_seq") is None:
+                            op["kickoffs"] = op.get("kickoffs", 0) + 1
+                            conn.mav.mission_count_send(
+                                self.tsys, self.tcomp, op["count"], op["mtype"])
+                        else:
+                            self._mission_send_item(conn, op["last_seq"])
                     elif op["count"] is None:
                         conn.mav.mission_request_list_send(
                             self.tsys, self.tcomp, op["mtype"])
@@ -1078,6 +1113,7 @@ class Bridge:
             return
         self._mission = {"op": "upload", "id": job.get("id"), "items": fields,
                          "count": len(fields), "last": _now_ms(), "tries": 0,
+                         "last_seq": None, "kickoffs": 1,
                          "mtype": job["mtype"], "rtype": job["rtype"], "ack_type": ack_type}
         try:
             conn.mav.mission_count_send(
@@ -1407,6 +1443,10 @@ class Bridge:
                         self._mission_send_item(conn, seq)
                     except Exception as exc:
                         print(f"[gs] mission item send failed: {exc}")
+                    # Remember what the autopilot last asked for, so a stall
+                    # retransmits that one item instead of restarting the whole
+                    # upload (see _service_missions).
+                    op["last_seq"] = seq
                     op["last"] = now
                     op["tries"] = 0
                     self._broadcast({"type": "mission_progress", "phase": "upload",

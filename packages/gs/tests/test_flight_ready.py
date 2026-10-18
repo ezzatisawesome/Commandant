@@ -473,3 +473,123 @@ def test_h6_v2_only_messages_exist_whatever_the_import_order():
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     assert "ok" in out.stdout
+
+
+# --- H7: a stalled mission upload restarted from scratch -------------------
+
+def _upload(b, conn, n=10):
+    items = [{"kind": "waypoint", "lat": 37.0 + i * 1e-4, "lon": -122.0, "alt": 50}
+             for i in range(n)]
+    b._mission_queue.put({"kind": "push", "id": "m1", "items": items,
+                          "mtype": bridgemod.MAV_MISSION_TYPE_MISSION,
+                          "rtype": "mission", "ack_type": "mission_ack"})
+    b._service_missions(conn)
+    return items
+
+
+def test_h7_a_stalled_upload_retransmits_one_item_not_the_whole_mission(monkeypatch):
+    """Mid-upload, a stall means exactly one packet was lost -- the autopilot's
+    MISSION_REQUEST_INT, or our MISSION_ITEM_INT answering it. Re-sending
+    MISSION_COUNT makes the autopilot discard everything and restart at seq 0,
+    so one lost frame costs the whole mission again and MISSION_MAX_TRIES is
+    spent retransmitting items that already arrived. MEASURED against a
+    3.4 kB/s / 120 ms link at 5 % loss: a 40-item upload burned all three
+    kickoffs and took 9.4 s, i.e. it succeeded with zero margin."""
+    monkeypatch.setattr(bridgemod, "MISSION_OP_TIMEOUT_MS", 0)
+    b = _bridge()
+    conn = RecordingConn()
+    _upload(b, conn)
+    assert [s[0] for s in conn.mav.sent] == ["mission_count_send"]
+
+    # The autopilot works through seq 0..3, then goes quiet.
+    for seq in range(4):
+        b._on_mav_protocol(conn, 0, "MISSION_REQUEST_INT",
+                           _msg("MISSION_REQUEST_INT", seq=seq, mission_type=0))
+    assert b._mission["last_seq"] == 3
+    conn.mav.sent.clear()
+
+    # The stall retry must retransmit seq 3, not restart the transfer. (Zero the
+    # progress clock rather than sleep, so the test is not a timing race.)
+    b._mission["last"] = 0
+    b._service_missions(conn)
+    assert [s[0] for s in conn.mav.sent] == ["mission_item_int_send"], \
+        "a lost frame restarted the whole upload"
+    assert conn.mav.sent[0][1][2] == 3, "retransmitted the wrong sequence number"
+    # And the progress already made is not thrown away.
+    assert b._mission is not None and b._mission["count"] == 10
+
+
+def test_h7_mission_count_is_still_resent_when_the_kickoff_went_unanswered(monkeypatch):
+    """The one case re-sending MISSION_COUNT is right for: the autopilot never
+    acknowledged the kickoff, so there is no transfer in progress to resume."""
+    monkeypatch.setattr(bridgemod, "MISSION_OP_TIMEOUT_MS", 0)
+    b = _bridge()
+    conn = RecordingConn()
+    _upload(b, conn)
+    conn.mav.sent.clear()
+    b._mission["last"] = 0
+    b._service_missions(conn)
+    assert [s[0] for s in conn.mav.sent] == ["mission_count_send"]
+
+
+def test_h7_upload_still_gives_up_eventually(monkeypatch):
+    """Bounded retries survive the change: a vehicle that stops answering must
+    still produce a timeout ack rather than a mission op pending forever."""
+    monkeypatch.setattr(bridgemod, "MISSION_OP_TIMEOUT_MS", 0)
+    acks = []
+    b = _bridge()
+
+    class Loop:
+        def call_soon_threadsafe(self, fn, *a):
+            acks.append(a[0])
+    b._loop = Loop()
+    conn = RecordingConn()
+    _upload(b, conn)
+    b._on_mav_protocol(conn, 0, "MISSION_REQUEST_INT",
+                       _msg("MISSION_REQUEST_INT", seq=0, mission_type=0))
+    for _ in range(bridgemod.MISSION_MAX_TRIES + 2):
+        if b._mission is not None:
+            b._mission["last"] = 0
+        b._service_missions(conn)
+    assert b._mission is None
+    assert acks and acks[-1]["text"] == "timeout" and acks[-1]["ok"] is False
+
+
+def test_h7_a_restart_loop_cannot_run_forever(monkeypatch):
+    """The failure mode behind H7, pinned as a class.
+
+    `tries` resets to 0 on every bit of progress, which is the right way to
+    bound a *stall* -- and is exactly how the pre-fix retry livelocked: the
+    MISSION_COUNT retry made the autopilot restart at seq 0, that request
+    counted as progress, the budget reset, and round it went. MEASURED at 5 %
+    loss on a 3.4 kB/s / 120 ms link: 39 restarts, no completion in 90 s, and
+    no timeout ever reported. An upload that neither finishes nor fails is
+    worse than one that fails, because the operator has nothing to act on.
+
+    Simulated here by feeding progress-at-seq-0 after every retry, which is
+    what a restarting autopilot looks like from gs's side."""
+    monkeypatch.setattr(bridgemod, "MISSION_OP_TIMEOUT_MS", 0)
+    acks = []
+    b = _bridge()
+
+    class Loop:
+        def call_soon_threadsafe(self, fn, *a):
+            acks.append(a[0])
+    b._loop = Loop()
+    conn = RecordingConn()
+    _upload(b, conn, n=10)
+
+    for _ in range(200):                      # pre-fix this never terminates
+        if b._mission is None:
+            break
+        b._mission["last"] = 0
+        b._mission["last_seq"] = None         # the restart threw progress away
+        b._service_missions(conn)
+        # The autopilot, having restarted, asks for seq 0 again -> "progress".
+        b._on_mav_protocol(conn, 0, "MISSION_REQUEST_INT",
+                           _msg("MISSION_REQUEST_INT", seq=0, mission_type=0))
+    assert b._mission is None, "the upload neither completed nor failed"
+    assert acks[-1]["ok"] is False
+    assert acks[-1]["text"] == "timeout (restart loop)"
+    kickoffs = len([s for s in conn.mav.sent if s[0] == "mission_count_send"])
+    assert kickoffs <= bridgemod.MISSION_MAX_TRIES + 1, kickoffs

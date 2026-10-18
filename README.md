@@ -90,10 +90,21 @@ split dev setup. The console↔gs message contract is `docs/ws-contract.md`.
 ## Tests
 
 ```sh
-cd packages/gs      && uv run pytest -q   # 66 — protocol state machines vs a fake PX4
+cd packages/gs      && uv run pytest -q   # 70 — protocol state machines vs a fake PX4
 cd packages/relay   && uv run pytest -q   # 10 — fan-out, and the read-only guarantee
 cd packages/console && npm test           # 284 — stores, WS client, validation (vitest)
 cd packages/console && npm run typecheck
+```
+
+The protocol state machines are also soak-tested across a simulated telemetry
+radio — bandwidth, latency and packet loss — which is where their timeout and
+retry constants actually get exercised. Stochastic and minutes per run, so it is
+not part of the suite; run it after touching a state machine or a timing
+constant:
+
+```sh
+cd packages/gs && uv run python scripts/radio_soak.py        # 57600 SiK, 5% loss
+uv run python scripts/radio_soak.py --loss 0.1 --items 60    # and a worse day
 ```
 
 A production build also asserts what the browser needs, which a dev build cannot:
