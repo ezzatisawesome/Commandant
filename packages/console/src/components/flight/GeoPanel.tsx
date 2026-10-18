@@ -17,6 +17,8 @@ import {
 	updateRallyItem,
 	clearFence,
 	clearRally,
+	$vehicleFence,
+	fenceMatchesVehicle,
 } from "@/stores/geo.store";
 import { $linkState, $commander } from "@/stores/link.store";
 import { telemetryClient } from "@/services/telemetry";
@@ -82,6 +84,11 @@ export default function GeoPanel() {
 	// Authority/link first (what the operator can act on most often), then the
 	// geometry gs would refuse anyway — said here so they see it while authoring.
 	const planRead = useStore($planRead);
+	// The globe draws the DRAFT, which is what you want while editing — but the
+	// proximity readout and PX4 both use what the vehicle is enforcing, so when
+	// the two differ the outline on screen is not the boundary in effect.
+	const vehicleFence = useStore($vehicleFence);
+	const fenceDiverged = vehicleFence !== null && !fenceMatchesVehicle(fence, vehicleFence);
 	const fenceBlocked = uploadBlockedReason({ live, commander, count: fence.length })
 		?? fenceGeometryProblem(fence);
 	const rallyBlocked = uploadBlockedReason({ live, commander, count: rally.length });
@@ -131,6 +138,12 @@ export default function GeoPanel() {
 				</div>
 			) : null}
 
+			{fenceDiverged ? (
+				<div className="pt-2 text-[10px] text-amber-300">
+					▲ edited since the vehicle took it — the outline on the globe is your
+					draft, not the boundary being enforced. Upload to make them the same.
+				</div>
+			) : null}
 			{status ? (
 				<div className={`pt-2 text-[10px] ${status.ok ? "text-emerald-400" : "text-red-400"}`}>
 					{status.ok ? "✓" : "✗"} {status.text}

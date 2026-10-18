@@ -22,6 +22,26 @@ export const $fenceItems = atom<FenceItem[]>([]);
  *  mid-mission is the worst direction for this particular error. */
 export const $vehicleFence = atom<FenceItem[] | null>(null);
 
+/** Does the draft still describe the fence the vehicle is enforcing?
+ *
+ *  `false` when that cannot be established, including when nothing has been
+ *  read back — an unverified match is not a match. Compared on the fields that
+ *  decide where the boundary is. */
+export function fenceMatchesVehicle(
+	draft: FenceItem[] = $fenceItems.get(),
+	vehicle: FenceItem[] | null = $vehicleFence.get(),
+): boolean {
+	if (vehicle === null) return false;
+	if (draft.length !== vehicle.length) return false;
+	return draft.every((d, i) => {
+		const v = vehicle[i];
+		return d.kind === v.kind
+			&& Math.abs(d.lat - v.lat) < 1e-7
+			&& Math.abs(d.lon - v.lon) < 1e-7
+			&& Math.abs((d.params?.radius ?? 0) - (v.params?.radius ?? 0)) < 0.5;
+	});
+}
+
 /** Record the fence the vehicle is enforcing: a readback, or an accepted push. */
 export function setVehicleFence(items: FenceItem[] | null) {
 	$vehicleFence.set(items === null ? null : items.map((it) => ({ ...it })));

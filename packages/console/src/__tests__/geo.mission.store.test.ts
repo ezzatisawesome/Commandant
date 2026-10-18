@@ -1,8 +1,11 @@
 import { describe, it, expect, beforeEach } from "vitest";
 
+import type { FenceItem } from "@/types/app";
+
 import {
 	$fenceItems, addFencePoint, fenceItemsForPush, clearFence, removeFenceItem,
 	setFenceItems, fenceGeometryProblem,
+	setVehicleFence, fenceMatchesVehicle, updateFenceItem,
 } from "@/stores/geo.store";
 import {
 	$missionItems, addWaypoint, removeItem, reorderItem, clearMission, updateItem,
@@ -184,5 +187,46 @@ describe("the draft and what the vehicle is flying are different things", () => 
 		setVehicleMission(read);
 		removeItem(1);
 		expect(missionMatchesVehicle()).toBe(false);
+	});
+});
+
+describe("the drawn fence and the enforced fence", () => {
+	const square = (d: number): FenceItem[] =>
+		[[-d, -d], [-d, d], [d, d], [d, -d]].map(([dy, dx], i) => ({
+			seq: i, kind: "fence_inclusion" as const, lat: 37.4 + dy, lon: -122.15 + dx,
+		}));
+
+	beforeEach(() => { clearFence(); setVehicleFence(null); });
+
+	it("an unread vehicle fence is not a match", () => {
+		setFenceItems(square(0.01));
+		expect(fenceMatchesVehicle()).toBe(false);
+	});
+
+	it("a readback makes them match", () => {
+		const read = square(0.01);
+		setFenceItems(read);
+		setVehicleFence(read);
+		expect(fenceMatchesVehicle()).toBe(true);
+	});
+
+	it("dragging a vertex breaks the match — that is where the boundary moves", () => {
+		const read = square(0.01);
+		setFenceItems(read);
+		setVehicleFence(read);
+		updateFenceItem(1, { lat: 37.5 });
+		expect(fenceMatchesVehicle()).toBe(false);
+	});
+
+	it("resizing a circle breaks the match", () => {
+		const circle: FenceItem[] = [{
+			seq: 0, kind: "fence_circle_exclusion", lat: 37.4, lon: -122.15,
+			params: { radius: 300 },
+		}];
+		setFenceItems(circle);
+		setVehicleFence(circle);
+		expect(fenceMatchesVehicle()).toBe(true);
+		updateFenceItem(0, { params: { radius: 900 } });
+		expect(fenceMatchesVehicle()).toBe(false);
 	});
 });
