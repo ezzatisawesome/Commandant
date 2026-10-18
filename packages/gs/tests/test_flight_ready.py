@@ -1996,3 +1996,35 @@ def test_status_allocates_no_state_of_its_own():
     for _ in range(50):
         b.status()
     assert set(vars(b)) == attrs_before
+
+
+# --- tightness: state that exists and means nothing ------------------------
+
+def test_no_instance_attribute_is_written_but_never_read():
+    """A long-lived daemon accumulates state nobody reads, and that is worse
+    than no state: the next reader assumes it matters and reasons from it.
+
+    Two were found this way. `_json_target_at` was the JSON feed's claim on the
+    commanded-path overlay, and its only reader was the yield-to-JSON branch
+    that PX4 ownership replaced -- the writes outlived the read, leaving a
+    timestamp that looked like it arbitrated something and did not.
+    `_param_gap_requested` was written in two places and read nowhere at all.
+
+    This is a source-inspection test on purpose: the property is "is this field
+    ever read", which no behavioural test can see, and the whole point is to
+    notice the next one before it is load-bearing in someone's head."""
+    import re
+    src = open(bridgemod.__file__).read()
+    init = src[src.index("    def __init__("):src.index("    # --- MAVLink ingest")]
+    attrs = sorted(set(re.findall(r"self\.(_?[a-zA-Z][a-zA-Z0-9_]*)\s*[:=]", init)))
+    assert len(attrs) > 30, "the __init__ slice stopped matching; fix this test"
+
+    unread = []
+    for a in attrs:
+        uses = re.findall(rf"self\.{a}\b(\s*[-+]?=)?", src)
+        reads = sum(1 for u in uses if not u.strip().endswith("="))
+        if reads == 0:
+            unread.append(a)
+    assert unread == [], (
+        f"written but never read: {unread}. Either something reads it and this "
+        f"test is wrong, or it is dead and should go.")

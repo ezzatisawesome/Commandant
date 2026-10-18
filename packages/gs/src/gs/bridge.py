@@ -848,7 +848,6 @@ class Bridge:
 
         # Source-arbitration / stream-health bookkeeping (mirrors the TS bridge).
         self._last_pos_boot_ms = -1
-        self._json_target_at = 0
         # When PX4's own POSITION_TARGET_GLOBAL_INT last arrived and was usable.
         # While this is fresh, the JSON feed's target is ignored.
         self._mav_target_at = 0
@@ -884,7 +883,6 @@ class Bridge:
         self._param_received: set[int] = set()
         self._param_refresh_active = False
         self._param_last_rx_ms = 0
-        self._param_gap_requested = False
         self._param_last_progress = 0
         self._param_set_pending: dict[str, dict[str, Any]] = {}  # name -> set job
         self._param_gap_sweeps = 0
@@ -1365,7 +1363,6 @@ class Bridge:
         self._param_received.clear()
         self._param_count = 0
         self._param_refresh_active = True
-        self._param_gap_requested = False
         self._param_last_progress = 0
         self._param_gap_sweeps = 0
         self._param_last_rx_ms = _mono_ms()
@@ -2045,7 +2042,11 @@ class Bridge:
                             continue
                         self.latest[k] = v
                 if obj.get("targetLat") is not None and not mav_owns_target:
-                    self._json_target_at = now
+                    # The setpoint stream is alive from SOME source, so hold off
+                    # re-requesting message 87. (A `_json_target_at` was kept
+                    # here too, as the JSON feed's claim on the overlay -- but
+                    # its only reader was the yield-to-JSON branch that PX4
+                    # ownership replaced, so the writes outlived the read.)
                     self._last_target_at = now
                 if any(obj.get(k) is not None for k in ("voltage", "current", "batteryRemaining")):
                     self._json_battery_at = now
