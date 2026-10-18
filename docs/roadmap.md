@@ -7,8 +7,12 @@ QGroundControl-replacement GCS for the solar aircraft.
 
 **Progress (2026-10-18):** a flight-readiness pass aimed at one question — is
 this daemon ready to be the ground station for a real PX4, a HITL rig, and the
-airframe, with no distinction between them? **Fourteen faults found and fixed**,
-each hypothesised, measured, and pinned by a test that fails on the old code.
+airframe, with no distinction between them? **Twenty pre-existing faults found
+and fixed**, each hypothesised, measured, and pinned by a test that fails on the
+old code. Five more hypotheses were checked and turned out to be *fine* — those
+are recorded too, since a ruled-out suspicion is worth as much to the next
+reader as a fix. Two faults this pass introduced itself were caught in it, by
+its own tests, and are called out where they happened.
 Written up in the dated sections below; the short version is that almost all of
 them were invisible on localhost UDP and only appear when the link is a radio,
 the clock is a Pi's, or the flight lasts longer than an afternoon.
