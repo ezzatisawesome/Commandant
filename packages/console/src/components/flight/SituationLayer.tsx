@@ -12,7 +12,7 @@ import { $viewerStore } from "@/stores/cesium.store";
 import { $aircraftStore } from "@/stores/aircraft.store";
 import { $derived, setTerrainSampler, startDerived } from "@/stores/derived.store";
 import { $showSun, $showWind, $showClearance } from "@/stores/viewControls.store";
-import { isNum } from "@/lib/flightGeometry";
+import { isNum, GROUP_STALE_MS } from "@/lib/flightGeometry";
 
 // Globe overlays for the derived situation: terrain clearance, wind and sun.
 //
@@ -184,7 +184,14 @@ export default function SituationLayer() {
 					if (!$showWind.get()) return undefined;
 					const p = here();
 					const w = $derived.get().wind;
+					// A cold estimate draws no arrow. The strip shows the last
+					// value struck through, which is the honest way to present a
+					// number; an arrow is a direction, and pointing one at air
+					// nobody has measured in four minutes is worse than drawing
+					// nothing. Two displays of one reading must not disagree about
+					// whether it is current.
 					if (!p || !w || w.speedMps < 0.2) return undefined;
+					if (isNum(w.ageMs) && w.ageMs > GROUP_STALE_MS) return undefined;
 					const len = Math.max(WIND_MIN_M, w.speedMps * WIND_SCALE_M);
 					return [p, along(p, (w.fromDeg + 180) % 360, len)];
 				}, false),
@@ -196,6 +203,9 @@ export default function SituationLayer() {
 				const p = here();
 				const w = $derived.get().wind;
 				if (!p || !w || w.speedMps < 0.2) return undefined;
+				// Same rule as the arrow, or the number is left floating on the
+				// globe with nothing under it.
+				if (isNum(w.ageMs) && w.ageMs > GROUP_STALE_MS) return undefined;
 				return along(p, (w.fromDeg + 180) % 360,
 					Math.max(WIND_MIN_M, w.speedMps * WIND_SCALE_M));
 			}, false),
