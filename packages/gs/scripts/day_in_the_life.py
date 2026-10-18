@@ -210,6 +210,13 @@ async def fly(args):
                          lambda g: g.get("type") == "telemetry" and g.get("armed") is False,
                          lambda g: "armed=false")
 
+            # What did the daemon decide? This is the question a field failure
+            # always comes down to, so the rehearsal ends by asking it.
+            st = await r.step("ask the daemon what it decided", {"type": "status"},
+                              lambda g: g.get("type") == "status",
+                              lambda g: f"{g['endpoint']} @ {g['linkBudgetBps']} B/s, "
+                                        f"params={g['paramFetch']}, vehicle={g['vehicle']}")
+
             frames = [g for g in r.seen if g.get("type") == "telemetry"]
             ages = [g.get("ages", {}) for g in frames if g.get("ages")]
             print("\n over the whole run")
@@ -220,8 +227,14 @@ async def fly(args):
             print(f"  link reopens                  {b.link_reopens}")
             print(f"  swallowed handler errors      {b.handler_errors}")
             print(f"  GCS heartbeats PX4 received   {px4.gcs_heartbeats}"
-          + ("" if px4.gcs_heartbeats else "   <-- PX4 would call the datalink lost"))
+                  + ("" if px4.gcs_heartbeats
+                     else "   <-- PX4 would call the datalink lost"))
             print(f"  radio frames dropped          {px4.radio.dropped}")
+            if st:
+                print(f"  gs says                       "
+                      f"up {st['upMs'] / 1000:.0f}s, {st['clients']} client(s), "
+                      f"{st['linkReopens']} reopen(s), "
+                      f"{st['handlerErrors']} handler error(s)")
             bad = [s for s in r.steps if not s.ok]
             print()
             if bad:

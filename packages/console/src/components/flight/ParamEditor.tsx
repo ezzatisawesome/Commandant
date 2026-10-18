@@ -3,7 +3,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "@nanostores/react";
 
-import { $params, $paramProgress, $paramError, upsertParam } from "@/stores/params.store";
+import {
+	$params, $paramProgress, $paramError, $paramsStale, upsertParam,
+} from "@/stores/params.store";
 import { $linkState } from "@/stores/link.store";
 import { telemetryClient } from "@/services/telemetry";
 import { loadParamMeta, lookupMeta, parseParamInput, validateParam, type ParamMeta } from "@/lib/paramMeta";
@@ -36,6 +38,7 @@ export default function ParamEditor() {
 	const params = useStore($params);
 	const progress = useStore($paramProgress);
 	const paramError = useStore($paramError);
+	const paramsStale = useStore($paramsStale);
 	const linkState = useStore($linkState);
 	const live = linkState === "alive";
 
@@ -121,6 +124,16 @@ export default function ParamEditor() {
 						</div>
 					</div>
 
+					{/* The link dropped and came back, so these values predate the
+					    gap: gs cannot report a reboot it did not witness. Shown
+					    rather than cleared — a thousand values should not vanish
+					    because the WiFi hiccuped — but not claimed as current. */}
+					{paramsStale ? (
+						<div className="px-3 pt-2 text-[10px] text-amber-400">
+							▲ the link dropped — these values predate it and are unverified;
+							refresh before trusting or editing any of them
+						</div>
+					) : null}
 					{paramError ? (
 						<div className="px-3 pt-2 text-[10px] text-amber-400">
 							refresh incomplete ({paramError}) — {total} of the list loaded; retry when the link is alive

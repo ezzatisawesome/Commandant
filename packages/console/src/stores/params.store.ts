@@ -17,6 +17,22 @@ export const $params = atom<Record<string, ParamEntry>>({});
 // null. Drives the progress bar in the param editor.
 export const $paramProgress = atom<{ received: number; count: number } | null>(null);
 
+/** True when the cached table can no longer be vouched for.
+ *
+ *  Params are a READ OF THE VEHICLE, not the operator's own work, and PX4
+ *  reverts anything it did not save. gs announces a reboot it witnessed
+ *  (`vehicle_reboot`) and the cache is dropped — but gs cannot announce an
+ *  event it missed, and a dropped socket is exactly a window where it was not
+ *  watching: the daemon may have restarted, the vehicle may have rebooted, the
+ *  radio may have been moved to a different aircraft.
+ *
+ *  Clearing the table on every blip would throw away a thousand values the
+ *  operator is reading because the WiFi hiccuped. Marking it instead keeps them
+ *  on screen and says they are unverified — the same treatment a cold wind
+ *  estimate gets, and the same principle: stale data may be shown, but never as
+ *  though it were current. */
+export const $paramsStale = atom(false);
+
 export function upsertParam(p: ParamEntry) {
 	upsertParams([p]);
 }
@@ -43,10 +59,19 @@ export function setParamProgress(received: number, count: number, done = false, 
 	}
 	$paramError.set(null);
 	$paramProgress.set({ received, count });
+	// A refresh in flight is re-reading from the vehicle, so whatever it has
+	// returned so far is current again.
+	$paramsStale.set(false);
 }
 
 export function clearParams() {
 	$params.set({});
 	$paramProgress.set(null);
 	$paramError.set(null);
+	$paramsStale.set(false);     // nothing cached, so nothing unverified
+}
+
+/** The link went away and came back: whatever is cached predates the gap. */
+export function markParamsStale() {
+	if (Object.keys($params.get()).length > 0) $paramsStale.set(true);
 }

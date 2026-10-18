@@ -105,6 +105,37 @@ state (`mission_current`, `mission_reached`) belongs to the run that ended and
 goes too; the stored plan itself usually survives in the autopilot, so it is
 left alone — pull it to be sure.
 
+### `status` (ask the daemon what it decided)
+console → gs: `{ "type": "status" }` → one `status` back.
+
+```json
+{ "type": "status", "endpoint": "serial:/dev/ttyUSB0:57600",
+  "configuredEndpoint": "auto", "linkBudgetBps": 3456, "paramFetch": "paced",
+  "vehicle": [1, 1], "linkState": "alive", "streamAges": { "position": 42 },
+  "pendingCommands": 0, "missionOp": null,
+  "linkReopens": 0, "handlerErrors": 0, "upMs": 91234, "version": "0.1.0" }
+```
+
+Read-only, open to any client, and it **allocates nothing** — every field is
+state gs already keeps, so asking cannot grow the daemon or drift from the
+behaviour it describes.
+
+This exists for the field. When something is wrong during a day-in-the-life run
+— commands timing out, a stream missing, the wrong rates on a radio — the
+question is always *"what did gs decide?"*, and there was no way to ask. The
+fields that matter are the ones gs **inferred** rather than was told: which
+transport autodetect found, what budget it derived from it, which vehicle it
+locked onto. Those are exactly what nobody configured, so nobody knows them.
+
+`linkReopens` and `handlerErrors` are both recovered from silently, which is
+precisely why they are here: a daemon that has reopened the link forty times, or
+swallowed a hundred handler exceptions, is working *and* is telling you
+something.
+
+It is deliberately a request/response for a person with a question, not a stream
+to poll — a 1 Hz poll of this is exactly the idle traffic a telemetry radio has
+no room for.
+
 ### `ack` (response to a command)
 ```json
 { "type": "ack", "id": "<command id>", "ok": true, "result": 0, "text": "accepted" }

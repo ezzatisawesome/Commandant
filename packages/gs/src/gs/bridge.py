@@ -21,9 +21,9 @@ import glob
 import json
 import math
 import os
-import struct
 import queue
 import socket
+import struct
 import threading
 import time
 import traceback
@@ -44,6 +44,8 @@ import websockets
 # rebind the dialect explicitly, which is order-independent.
 os.environ.setdefault("MAVLINK20", "1")
 from pymavlink import mavutil  # noqa: E402
+
+from . import __version__  # noqa: E402
 
 if not hasattr(mavutil.mavlink, "MAVLINK_MSG_ID_ACTUATOR_OUTPUT_STATUS"):
     mavutil.set_dialect(os.environ.get("MAVLINK_DIALECT", "all"))
@@ -2048,6 +2050,58 @@ class Bridge:
                 if any(obj.get(k) is not None for k in ("voltage", "current", "batteryRemaining")):
                     self._json_battery_at = now
 
+    def status(self) -> dict[str, Any]:
+        """A snapshot of what this daemon currently believes.
+
+        Deliberately derived, not accumulated: nothing here is a counter kept
+        for the sake of this message, so asking costs nothing and the answer
+        cannot drift from the behaviour it describes."""
+        with self._lock:
+            src_at = dict(self._src_at)
+            mav_at, json_at = self.last_mav_at, self.last_json_at
+        mono = _mono_ms()
+        return {
+            "type": "status",
+            # --- what gs decided about the link ---------------------------
+            "endpoint": self.active_endpoint,
+            "configuredEndpoint": self.mavlink_endpoint,
+            "linkBudgetBps": round(self.link_budget_bps),
+            "linkBudgetPinned": self._budget_pin is not None,
+            "paramFetch": ("paced" if self.link_budget_bps < PARAM_PACED_BELOW_BPS
+                           else "flood"),
+            # --- what it found on the other end ---------------------------
+            "vehicle": list(self._vehicle) if self._vehicle else None,
+            "linkState": self._link_state(mono, mav_at if mav_at else json_at),
+            "dataAgeMs": (mono - (mav_at if mav_at else json_at)
+                          if (mav_at or json_at) else None),
+            "streamAges": {g: mono - at for g, at in src_at.items()},
+            "bootMs": self.latest.get("bootMs"),
+            # --- what it is in the middle of ------------------------------
+            "commanderHeld": self._commander is not None,
+            "clients": len(self._clients),
+            "pendingCommands": len(self._pending),
+            "pendingParamSets": len(self._param_set_pending),
+            "paramRefresh": ({"received": len(self._param_received),
+                              "count": self._param_count}
+                             if self._param_refresh_active else None),
+            "missionOp": ({"op": self._mission["op"], "plane": self._mission["rtype"]}
+                          if self._mission else None),
+            # --- things that went wrong quietly ---------------------------
+            # Both of these are survivable by design, which is exactly why they
+            # need surfacing: a daemon that reopened the link forty times, or
+            # swallowed a hundred handler exceptions, is working and is also
+            # telling you something.
+            "linkReopens": self.link_reopens,
+            "handlerErrors": self.handler_errors,
+            "upMs": mono - _MONO_ORIGIN_MS,
+            "version": __version__,
+            "relay": (None if self.relay is None else {
+                "connected": self.relay.connected,
+                "sent": self.relay.sent,
+                "dropped": self.relay.dropped,
+            }),
+        }
+
     def _json_owns(self, key: str) -> bool:
         """May the flightlink JSON feed write this key? Once an autopilot is on
         the link it owns flight state; the feed keeps only JSON_ONLY_KEYS. With
@@ -2143,6 +2197,20 @@ class Bridge:
             # Route the eventual ack back to this client, then hand off to the mav thread.
             self._pending_clients[cid] = ws
             self._cmd_queue.put({"id": cid, "mav_cmd": mav_cmd, "params": params})
+
+        elif mtype == "status":
+            # Ask the daemon what it thinks. Read-only, open to any client, and
+            # it allocates nothing: every field below is state gs already keeps.
+            #
+            # This exists for the field. When something is wrong during a
+            # day-in-the-life run -- commands timing out, a stream missing, the
+            # wrong rates on a radio -- the question is always "what did gs
+            # decide?", and there was no way to ask. The answers that matter are
+            # the ones gs INFERRED rather than was told: which transport it
+            # found, what budget it derived from it, which vehicle it locked
+            # onto, and whether it has been quietly reopening the link or
+            # swallowing handler exceptions.
+            await self._send(ws, self.status())
 
         elif mtype == "param_refresh":
             # Read-only; any client may request the param set.

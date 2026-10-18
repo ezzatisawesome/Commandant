@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from "uuid";
 
 import type {
 	AckMessage,
+	StatusMessage,
 	CommandName,
 	FenceAckMessage,
 	FenceItem,
@@ -25,7 +26,9 @@ import { $linkState, $commander } from "@/stores/link.store";
 import { pushStatus } from "@/stores/statustext.store";
 /** MAV_SEVERITY_WARNING — what gs uses for its own operator notices. */
 const SEVERITY_WARNING = 4;
-import { upsertParam, upsertParams, setParamProgress, clearParams } from "@/stores/params.store";
+import {
+	upsertParam, upsertParams, setParamProgress, clearParams, markParamsStale,
+} from "@/stores/params.store";
 import {
 	$missionCurrent,
 	$missionProgress,
@@ -101,6 +104,9 @@ export class TelemetryClient {
 	private pendingParams = new Map<string, PendingParam>();
 	// mission_push requests awaiting their mission_ack, keyed by id.
 	private pendingMissions = new Map<string, PendingMission>();
+	// One in-flight status request. There is no id on the wire because there is
+	// never more than one outstanding: it is a human asking a question.
+	private pendingStatus: { resolve: (s: StatusMessage) => void; timer: ReturnType<typeof setTimeout> } | null = null;
 	// fence_push / rally_push requests awaiting their ack, keyed by id.
 	private pendingFence = new Map<string, PendingGeo>();
 	private pendingRally = new Map<string, PendingGeo>();
@@ -134,10 +140,17 @@ export class TelemetryClient {
 			if (IS_VIEW) $commander.set(false); // watching, never commanding
 			if (this.hadSession) {
 				// Live-execution state from the previous socket is unknown now; the
-				// plan/params the operator was editing are left alone.
+				// plan the operator was editing is their own work and is left alone.
 				$missionCurrent.set(null);
 				$missionReached.set(null);
 				$missionProgress.set(null);
+				// The param table is NOT the operator's work — it is a read of the
+				// vehicle, and gs cannot announce an event it missed. A dropped
+				// socket is exactly a window where it was not watching: the daemon
+				// may have restarted, the vehicle may have rebooted and reverted
+				// unsaved writes, the radio may have been moved to another
+				// aircraft. Keep the values, stop claiming they are current.
+				markParamsStale();
 			}
 			this.hadSession = true;
 			// Bid to be the single active commander as soon as the socket is up, so
@@ -201,6 +214,13 @@ export class TelemetryClient {
 				this.resolveGeoAck(this.pendingFence, msg as FenceAckMessage);
 			} else if (type === "rally_ack") {
 				this.resolveGeoAck(this.pendingRally, msg as RallyAckMessage);
+			} else if (type === "status") {
+				const p = this.pendingStatus;
+				if (p) {
+					clearTimeout(p.timer);
+					this.pendingStatus = null;
+					p.resolve(msg as StatusMessage);
+				}
 			} else if (type === "commander") {
 				// Another console took command. Said explicitly so this one can
 				// grey out, rather than leaving the operator to discover it from
@@ -398,6 +418,27 @@ export class TelemetryClient {
 	}
 
 	// --- parameters (Phase 2) ------------------------------------------------
+
+	/** Ask the daemon what it currently believes — see StatusMessage.
+	 *
+	 *  Deliberately not wired to a store or polled: this is a diagnostic for a
+	 *  person with a question, and a 1 Hz poll of it would be exactly the kind
+	 *  of idle traffic a telemetry radio does not have room for. Call it from
+	 *  the console, or read it from the daemon's own log line. */
+	status(): Promise<StatusMessage> {
+		return new Promise((resolve, reject) => {
+			if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+				reject(new Error("not connected"));
+				return;
+			}
+			const timer = setTimeout(() => {
+				this.pendingStatus = null;
+				reject(new Error("timeout"));
+			}, COMMAND_TIMEOUT_MS);
+			this.pendingStatus = { resolve, timer };
+			this.send({ type: "status" });
+		});
+	}
 
 	/** Request the full PX4 parameter list; results stream into the params store. */
 	refreshParams() {

@@ -27,8 +27,8 @@ class FakeWS {
 import { TelemetryClient } from "@/services/telemetry";
 import { $aircraftStore, $trailStore, pushFrame } from "@/stores/aircraft.store";
 import { $linkState, $commander } from "@/stores/link.store";
-import { $params } from "@/stores/params.store";
-import { $missionCurrent, $missionProgress, $missionReached } from "@/stores/mission.store";
+import { $params, $paramsStale } from "@/stores/params.store";
+import { $missionCurrent, $missionProgress, $missionReached, $missionItems, setMissionItems } from "@/stores/mission.store";
 import { $statusTexts, clearStatus } from "@/stores/statustext.store";
 
 let client: TelemetryClient;
@@ -293,5 +293,69 @@ describe("stream control is a write to the vehicle, not a display preference (gs
 		const id = ws().lastSent().id;
 		ws().recv({ type: "ack", id, ok: true, result: 0, text: "capped at 1.9 Hz" });
 		await expect(p).resolves.toMatchObject({ ok: true, text: "capped at 1.9 Hz" });
+	});
+});
+
+describe("a reconnect does not vouch for what it could not see", () => {
+	it("marks the param cache unverified on reconnect, but not on first connect", () => {
+		client.connect(); ws().open();
+		ws().recv({ type: "params", items: [{ name: "FW_AIRSPD_TRIM", value: 15, ptype: 9, index: 1 }] });
+		expect($paramsStale.get()).toBe(false);   // first connect vouches for itself
+
+		ws().close();                              // the link drops
+		vi.advanceTimersByTime(5000);              // backoff fires, socket reopens
+		ws().open();
+		// gs cannot report a reboot it did not witness, so the gap is the doubt.
+		expect($paramsStale.get()).toBe(true);
+		expect(Object.keys($params.get())).toHaveLength(1);  // values kept
+	});
+
+	it("leaves the operator's own mission draft alone across a reconnect", () => {
+		// The plan is their work, not a read of the vehicle — losing it to a
+		// WiFi blip would be worse than showing it.
+		client.connect(); ws().open();
+		setMissionItems([{ seq: 0, kind: "waypoint", lat: 37.4, lon: -122.1, alt: 80 }]);
+		ws().close();
+		vi.advanceTimersByTime(5000);
+		ws().open();
+		expect($missionItems.get()).toHaveLength(1);
+	});
+});
+
+describe("asking the daemon what it decided (gs `status`)", () => {
+	// A diagnostic for a person with a question during a day-in-the-life run,
+	// not a store to poll: a 1 Hz poll of this is exactly the idle traffic a
+	// telemetry radio has no room for.
+	const reply = {
+		type: "status", endpoint: "serial:/dev/ttyUSB0:57600",
+		configuredEndpoint: "auto", linkBudgetBps: 3456, linkBudgetPinned: false,
+		paramFetch: "paced", vehicle: [1, 1], linkState: "alive", dataAgeMs: 42,
+		streamAges: { position: 42 }, commanderHeld: true, clients: 2,
+		pendingCommands: 0, pendingParamSets: 0, paramRefresh: null,
+		missionOp: null, linkReopens: 0, handlerErrors: 0, upMs: 1234,
+		version: "0.1.0", relay: null,
+	};
+
+	it("resolves with what the daemon inferred about the link", async () => {
+		client.connect(); ws().open();
+		const p = client.status();
+		expect(ws().lastSent().type).toBe("status");
+		ws().recv(reply);
+		await expect(p).resolves.toMatchObject({
+			endpoint: "serial:/dev/ttyUSB0:57600",
+			configuredEndpoint: "auto",
+			paramFetch: "paced",
+		});
+	});
+
+	it("is not treated as telemetry, and does not blank the HUD", () => {
+		client.connect(); ws().open();
+		ws().recv({ type: "telemetry", t: 1, connected: true, lat: 37.4, lon: -122.1, alt: 100 });
+		ws().recv(reply);                       // nobody asked; must be harmless
+		expect($aircraftStore.get()?.lat).toBe(37.4);
+	});
+
+	it("rejects rather than hanging when the socket is not open", async () => {
+		await expect(client.status()).rejects.toThrow(/not connected/);
 	});
 });

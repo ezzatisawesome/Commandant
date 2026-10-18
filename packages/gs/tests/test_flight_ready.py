@@ -1898,3 +1898,101 @@ def test_h14_the_paced_walk_wraps_to_retry_what_never_answered(monkeypatch):
         asked += [s[1][3] for s in conn.mav.sent if s[0] == "param_request_read_send"]
     assert asked, "stopped asking entirely"
     assert set(asked) == {2}, f"asked for something other than the missing index: {set(asked)}"
+
+
+# --- status: ask the daemon what it decided --------------------------------
+
+def test_status_reports_what_gs_inferred_rather_than_what_it_was_told():
+    """The field question is always "what did gs decide?", and there was no way
+    to ask. The answers that matter are the INFERRED ones -- which transport
+    autodetect found, what budget it derived, which vehicle it locked onto --
+    because those are exactly what nobody configured and so nobody knows."""
+    b = _bridge(mavlink_endpoint=bridgemod.AUTODETECT)
+    b.active_endpoint = "serial:/dev/ttyUSB0:57600"
+    b.link_budget_bps = 3456
+    conn = RecordingConn()
+    # Lock onto a non-default sysid and feed a frame FROM it: the point of the
+    # field is that gs reports the vehicle it actually found.
+    b._vehicle = (7, 1)
+    gpi = _gpi(600_000)
+    gpi.get_srcSystem = lambda: 7
+    b._on_mav(conn, gpi)
+
+    st = b.status()
+    assert st["type"] == "status"
+    assert st["configuredEndpoint"] == "auto"
+    assert st["endpoint"] == "serial:/dev/ttyUSB0:57600"
+    assert st["linkBudgetBps"] == 3456
+    assert st["paramFetch"] == "paced", "a radio must report the paced strategy"
+    assert st["vehicle"] == [7, 1]
+    assert st["linkState"] == "alive"
+    assert st["bootMs"] == 600_000
+    assert "position" in st["streamAges"]
+    assert st["version"]
+
+
+def test_status_surfaces_the_failures_that_are_survivable_by_design():
+    """`link_reopens` and `handler_errors` are both recovered from silently --
+    which is exactly why they need surfacing. A daemon that reopened the link
+    forty times is working, and is also telling you something."""
+    b = _bridge()
+    b.link_reopens = 41
+    b.handler_errors = 3
+    st = b.status()
+    assert st["linkReopens"] == 41
+    assert st["handlerErrors"] == 3
+
+
+def test_status_reports_work_in_flight_without_disturbing_it(monkeypatch):
+    b = _bridge()
+    b._loop = _capturing_loop([])
+    conn = RecordingConn()
+    b._cmd_queue.put({"id": "c1", "mav_cmd": m.MAV_CMD_COMPONENT_ARM_DISARM,
+                      "params": [1, 0, 0, 0, 0, 0, 0]})
+    b._service_commands(conn)
+    _upload(b, conn, n=3)
+    b._param_queue.put({"kind": "refresh"})
+    b._service_params(conn)
+
+    before = (dict(b._pending), b._mission["op"], b._param_refresh_active)
+    st = b.status()
+    assert st["pendingCommands"] == 1
+    assert st["missionOp"] == {"op": "upload", "plane": "mission"}
+    assert st["paramRefresh"] is not None
+    # Asking must not be an operation: nothing it reports may be consumed by
+    # reporting it.
+    assert (dict(b._pending), b._mission["op"], b._param_refresh_active) == before
+
+
+def test_status_is_read_only_and_open_to_any_client(ports):
+    """A viewer asking what the daemon thinks takes nothing from the operator,
+    and must not need command authority to diagnose a link."""
+    import asyncio
+    b = _bridge(json_port=ports["json"], ws_port=ports["ws"])
+
+    async def scenario():
+        import websockets
+        serve = asyncio.create_task(b._serve())
+        await asyncio.sleep(0.3)
+        url = f"ws://127.0.0.1:{ports['ws']}"
+        async with websockets.connect(url) as a, websockets.connect(url) as c:
+            await _claim(a, "a1")              # a holds command
+            await c.send(json.dumps({"type": "status"}))
+            st = await _recv_type(c, "status")
+            assert st is not None, "a non-commander could not ask for status"
+            assert st["commanderHeld"] is True
+            assert st["clients"] == 2
+        serve.cancel()
+
+    asyncio.run(scenario())
+
+
+def test_status_allocates_no_state_of_its_own():
+    """Nothing in the snapshot is a counter kept for the sake of the message, so
+    asking repeatedly cannot grow the daemon or drift from the behaviour it
+    describes."""
+    b = _bridge()
+    attrs_before = set(vars(b))
+    for _ in range(50):
+        b.status()
+    assert set(vars(b)) == attrs_before

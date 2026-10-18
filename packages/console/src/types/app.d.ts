@@ -131,6 +131,41 @@ export interface ClaimMessage { type: "claim", id?: string, force?: boolean }
  *  the console that just LOST it to a takeover, so its UI can grey out instead
  *  of leaving the operator to discover it from every action being rejected. */
 export interface CommanderMessage { type: "commander", held: boolean, text?: string }
+/** Ask the daemon what it currently believes: `{ type: "status" }` in, this
+ *  back. Read-only, open to any client, and it allocates nothing — every field
+ *  is state gs already keeps. Exists for the field: when commands time out or a
+ *  stream is missing during a day-in-the-life run, the question is "what did gs
+ *  decide?", and the answers that matter are the ones it INFERRED (which
+ *  transport autodetect found, what budget it derived, which vehicle it locked
+ *  onto) because those are exactly what nobody configured. */
+export interface StatusMessage {
+    type: "status",
+    endpoint: string,              // the transport actually open
+    configuredEndpoint: string,    // what was asked for ("auto", usually)
+    linkBudgetBps: number,
+    linkBudgetPinned: boolean,
+    paramFetch: "paced" | "flood",
+    vehicle: [number, number] | null,   // locked sysid/compid
+    linkState: LinkState,
+    dataAgeMs: number | null,
+    streamAges: Record<string, number>,
+    bootMs?: number | null,
+    commanderHeld: boolean,
+    clients: number,
+    pendingCommands: number,
+    pendingParamSets: number,
+    paramRefresh: { received: number, count: number } | null,
+    missionOp: { op: string, plane: string } | null,
+    /** Both survivable by design, which is why they are worth seeing: a daemon
+     *  that reopened the link forty times is working, and is also telling you
+     *  something. */
+    linkReopens: number,
+    handlerErrors: number,
+    upMs: number,
+    version: string,
+    relay: { connected: boolean, sent: number, dropped: number } | null,
+}
+export interface StatusRequestMessage { type: "status" }
 export interface ParamRefreshMessage { type: "param_refresh" } // request the full param list
 export interface ParamSetMessage {
     type: "param_set",
@@ -200,7 +235,8 @@ export interface RallyPullMessage { type: "rally_pull" }
 export type ClientMessage =
     | CommandMessage | ClaimMessage | ParamRefreshMessage | ParamSetMessage | StreamMessage
     | MissionPushMessage | MissionPullMessage | MissionSetCurrentMessage
-    | FencePushMessage | FencePullMessage | RallyPushMessage | RallyPullMessage;
+    | FencePushMessage | FencePullMessage | RallyPushMessage | RallyPullMessage
+    | StatusRequestMessage;
 
 // gs -> console
 export interface TelemetryMessage extends TelemetryFrame { type: "telemetry" }
@@ -287,4 +323,5 @@ export type ServerMessage =
     | MissionCurrentMessage | MissionReachedMessage
     | FenceMessage | RallyMessage | FenceAckMessage | RallyAckMessage
     | VehicleRebootMessage
-    | CommanderMessage;
+    | CommanderMessage
+    | StatusMessage;
