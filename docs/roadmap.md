@@ -81,6 +81,34 @@ fixed (`packages/gs/tests/test_flight_ready.py`, 14 tests).
    the EKF wind estimate are simply never populated, with no error. The dialect
    is now rebound explicitly.
 
+**The relay's slow-viewer protection was dead code (2026-10-18):** the relay
+documents four constraints in priority order, and the third — "a slow viewer
+cannot affect the hub or other viewers" — was implemented in a `_fan_out`
+helper that **nothing ever called**. Every broadcast went through
+`websockets.broadcast` instead, so `SLOW_VIEWER_BYTES` was unreachable and
+`frames_dropped` was permanently 0, which made the `/healthz` figure a
+reassuring lie as well.
+
+That matters because `broadcast` is explicitly not flow-controlled. Its own
+documentation: *"pushes the message synchronously to all connections even if
+their write buffers are overflowing. There's no backpressure... messages will
+pile up in its write buffer until the connection times out. Keep
+`ping_interval` and `ping_timeout` low to prevent excessive memory usage from
+slow connections."* This is the only Commandant component on the public
+internet, viewers are unauthenticated, and it runs on one always-on Fly machine
+— so a phone on bad cell data watching a 5 Hz stream grows a buffer inside the
+relay process, and anyone can open one.
+
+`broadcast` is still the right primitive (one serialisation, no awaiting, so no
+viewer can delay another). What was missing was getting rid of a viewer that
+cannot keep up, which is also the better outcome for that viewer: it reconnects
+and gets the retained state — a correct current screen — rather than a backlog
+of frames superseded while they sat in a queue. The ping cycle went 20 s → 10 s
+too, since that is the other half of the defence the library recommends: a
+stalled socket is only reclaimed when its ping times out, and 20 s each meant up
+to 40 s of stream buffered per dead-but-unclosed viewer. The test now pins the
+*call site*, not just the helper — the bug was never a wrong check.
+
 **A flight command gs could prove was malformed (2026-10-18):** `reposition`
 built its MAVLink params from `args.get("lat", NaN)`, so an omitted or
 non-finite coordinate went out as a NaN position — "fly to here" with no here,

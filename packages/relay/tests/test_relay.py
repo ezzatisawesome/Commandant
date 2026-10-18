@@ -271,3 +271,98 @@ async def test_a_wedged_hub_also_stops_being_replayed(monkeypatch):
                 break
         assert "telemetry" not in kinds, f"stale frame replayed: {kinds}"
         await late.close(); await pub.close()
+
+
+# --- a slow viewer must not grow a buffer inside this process ---------------
+
+class FakeTransport:
+    def __init__(self, buffered: int):
+        self._buffered = buffered
+
+    def get_write_buffer_size(self) -> int:
+        return self._buffered
+
+
+class FakeViewer:
+    """Stands in for a viewer socket with a given amount of unsent data."""
+
+    def __init__(self, buffered: int):
+        self.transport = FakeTransport(buffered)
+        self.closed_with: tuple | None = None
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        self.closed_with = (code, reason)
+
+
+def test_a_viewer_that_cannot_keep_up_is_dropped():
+    """Constraint 3 -- a slow viewer cannot affect the hub or other viewers --
+    was implemented in a `_fan_out` helper that nothing ever called. Every
+    broadcast went through `websockets.broadcast`, which is explicitly NOT
+    flow-controlled: per its own docs it "pushes the message synchronously to
+    all connections even if their write buffers are overflowing... messages
+    will pile up in its write buffer". This is the only component on the public
+    internet, viewers are unauthenticated, and it runs on one small machine.
+
+    So the buffer check has to actually run. Closing the slow viewer is also
+    better for that viewer: it reconnects and gets the retained state, which is
+    a correct current screen rather than a backlog of superseded frames."""
+    from relay.server import SLOW_VIEWER_BYTES
+
+    relay = Relay(token="t", host="127.0.0.1", port=0)
+    keeping_up = FakeViewer(1024)
+    backed_up = FakeViewer(SLOW_VIEWER_BYTES + 1)
+    relay._viewers.update({keeping_up, backed_up})
+
+    async def scenario():
+        assert relay._drop_slow_viewers() == 1
+        await asyncio.sleep(0)       # let the fire-and-forget close run
+
+    asyncio.run(scenario())
+
+
+    assert backed_up not in relay._viewers, "a runaway viewer was kept"
+    assert keeping_up in relay._viewers, "dropped a viewer that was keeping up"
+    assert relay.viewers_dropped == 1
+    assert backed_up.closed_with is not None
+    assert backed_up.closed_with[0] == 1013      # "try again later"
+
+
+def test_every_broadcast_runs_the_slow_viewer_check():
+    """The bug was not a wrong check, it was a check nothing called. Pin the
+    call site, not just the helper."""
+    relay = Relay(token="t", host="127.0.0.1", port=0)
+    called = []
+    relay._drop_slow_viewers = lambda: called.append(True) or 0
+
+    async def scenario():
+        await relay._broadcast(json.dumps({"type": "telemetry"}))
+    asyncio.run(scenario())
+    assert called, "a broadcast went out without checking for slow viewers"
+
+
+def test_dropping_a_slow_viewer_is_counted_for_healthz():
+    """`frames_dropped` was permanently 0, which made the /healthz figure a
+    reassuring lie. It has to move when something is actually dropped."""
+    from relay.server import SLOW_VIEWER_BYTES
+
+    relay = Relay(token="t", host="127.0.0.1", port=0)
+    relay._viewers.add(FakeViewer(SLOW_VIEWER_BYTES * 4))
+    assert relay.frames_dropped == 0
+    relay._drop_slow_viewers()
+    assert relay.frames_dropped == 1
+    assert relay.viewers_dropped == 1
+
+
+def test_a_viewer_with_no_transport_is_left_alone():
+    """Not every connection object exposes a transport; an unknown buffer state
+    is not evidence of a slow viewer, and guessing would disconnect healthy
+    browsers."""
+    relay = Relay(token="t", host="127.0.0.1", port=0)
+
+    class NoTransport:
+        transport = None
+    v = NoTransport()
+    relay._viewers.add(v)
+    assert relay._drop_slow_viewers() == 0
+    assert v in relay._viewers
+    assert relay.viewers_dropped == 0
