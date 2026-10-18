@@ -81,6 +81,28 @@ fixed (`packages/gs/tests/test_flight_ready.py`, 14 tests).
    the EKF wind estimate are simply never populated, with no error. The dialect
    is now rebound explicitly.
 
+**A plan that leaves its own geofence (2026-10-18):** `missionCheck.ts` already
+predicts the one refusal PX4 announces only through STATUSTEXT — a plan missing
+the takeoff/landing items `MIS_TKO_LAND_REQ` demands. It did not predict the
+other one. PX4 enforces the geofence **in flight, not at upload**: a mission
+whose waypoints lie outside the inclusion fence, or inside an exclusion one,
+transfers cleanly and acks `accepted`, and then breaches mid-mission. `GF_ACTION`
+defaults to **2, Hold mode** (read from the bundled metadata, not assumed), so
+the aircraft flies the plan until it breaches and then stops and loiters out
+there. Both halves of that plan were "accepted".
+
+`missionFenceProblem` names the first offending waypoint before the upload, and
+`planProblem` composes the two checks — the takeoff/landing requirement first,
+since that is the one the operator hits earliest and the cheaper of the two to
+fix.
+
+It needed new geometry rather than the existing `fenceProximity`, which answers
+"what shape is nearest". A waypoint can sit comfortably inside the inclusion
+polygon *and* inside an exclusion circle; if the inclusion edge is closer, the
+nearest shape is the compliant one and the violation is invisible. The
+run-slicing both need is now shared, so the readout and the check cannot
+disagree about what the shapes are.
+
 **A day in the life, rehearsed (2026-10-18):** `scripts/day_in_the_life.py`
 walks the sequence an operator actually walks — link up, take command, read
 params, write one, upload a geofence and read it back, upload a mission and read

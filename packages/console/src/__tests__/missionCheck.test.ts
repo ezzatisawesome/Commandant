@@ -1,9 +1,13 @@
 import { describe, it, expect } from "vitest";
 
+import type { FenceItem } from "@/types/app";
+
 import {
 	TKO_LAND_REQ_PARAM,
 	missionLooksRunnable,
 	missionRejectionReason,
+	missionFenceProblem,
+	planProblem,
 	needsEither,
 	needsLanding,
 	needsTakeoff,
@@ -126,5 +130,68 @@ describe("missionLooksRunnable", () => {
 
 	it("is true when nothing is known against it", () => {
 		expect(missionLooksRunnable(BARE, undefined)).toBe(true);
+	});
+});
+
+describe("a plan that leaves its own geofence (gs/console gap)", () => {
+	// PX4 enforces the geofence in FLIGHT, not at upload: a mission whose
+	// waypoints sit outside the inclusion fence uploads cleanly, acks
+	// "accepted", and then breaches mid-mission. GF_ACTION defaults to 2 (Hold
+	// mode) per the PX4 metadata this console bundles, so the aircraft stops and
+	// loiters out there, for a reason that appears only as a STATUSTEXT. Both
+	// halves of that plan were "accepted".
+	const square = (lat: number, lon: number, d: number): FenceItem[] =>
+		[[-d, -d], [-d, d], [d, d], [d, -d]].map(([dy, dx], i) => ({
+			seq: i, kind: "fence_inclusion" as const, lat: lat + dy, lon: lon + dx,
+		}));
+	const wp = (seq: number, lat: number, lon: number) =>
+		({ seq, kind: "waypoint" as const, lat, lon, alt: 80 });
+
+	it("names the first waypoint outside an inclusion polygon", () => {
+		const fence = square(37.4, -122.15, 0.01);
+		const items = [wp(0, 37.4, -122.15), wp(1, 37.5, -122.15)];  // #1 is far north
+		const msg = missionFenceProblem(items, fence);
+		expect(msg).toMatch(/Waypoint 1/);
+		expect(msg).toMatch(/outside the inclusion fence polygon/);
+	});
+
+	it("is quiet when every waypoint is inside", () => {
+		const fence = square(37.4, -122.15, 0.01);
+		expect(missionFenceProblem([wp(0, 37.4, -122.15), wp(1, 37.405, -122.145)], fence))
+			.toBeNull();
+	});
+
+	it("catches a waypoint inside an exclusion circle the inclusion fence allows", () => {
+		// The reason this cannot use fenceProximity: the waypoint sits well
+		// inside the inclusion polygon, so the NEAREST shape is the compliant
+		// one and the violation is invisible to a nearest-shape answer.
+		const fence: FenceItem[] = [
+			...square(37.4, -122.15, 0.02),
+			{ seq: 4, kind: "fence_circle_exclusion", lat: 37.4, lon: -122.15, params: { radius: 500 } },
+		];
+		const msg = missionFenceProblem([wp(0, 37.4005, -122.15)], fence);
+		expect(msg).toMatch(/inside an exclusion fence circle/);
+	});
+
+	it("ignores rtl, which carries no position", () => {
+		// rtl goes on the wire as MAV_FRAME_MISSION with lat/lon zero. Checking
+		// it would report every plan as breaching a fence at null island.
+		const fence = square(37.4, -122.15, 0.01);
+		const items = [wp(0, 37.4, -122.15),
+			{ seq: 1, kind: "rtl" as const, lat: 0, lon: 0, alt: 0 }];
+		expect(missionFenceProblem(items, fence)).toBeNull();
+	});
+
+	it("stays quiet with no fence, rather than implying the plan is clear", () => {
+		expect(missionFenceProblem([wp(0, 37.4, -122.15)], [])).toBeNull();
+	});
+
+	it("planProblem reports the takeoff/landing requirement first", () => {
+		// Both wrong: the requirement is the one the operator hits first, at the
+		// mode change, and it is cheaper to fix.
+		const fence = square(37.4, -122.15, 0.01);
+		const items = [wp(0, 37.5, -122.15)];           // outside, and no takeoff
+		expect(planProblem(items, 1, fence)).toMatch(/MIS_TKO_LAND_REQ/);
+		expect(planProblem(items, 0, fence)).toMatch(/outside the inclusion fence/);
 	});
 });

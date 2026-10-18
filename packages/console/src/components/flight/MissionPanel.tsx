@@ -19,7 +19,8 @@ import { telemetryClient } from "@/services/telemetry";
 import { Button } from "@/components/ui/button";
 import { radiusParamKey } from "@/lib/grabbers";
 import { $params } from "@/stores/params.store";
-import { TKO_LAND_REQ_PARAM, missionRejectionReason } from "@/lib/missionCheck";
+import { TKO_LAND_REQ_PARAM, planProblem } from "@/lib/missionCheck";
+import { $fenceItems } from "@/stores/geo.store";
 import type { MissionKind } from "@/types/app";
 
 const KINDS: MissionKind[] = [
@@ -82,7 +83,11 @@ export default function MissionPanel() {
 	// Will PX4 actually fly this once uploaded? It validates at the mode change,
 	// not the upload, so without this the operator gets a green tick here and a
 	// silent refusal later. Quiet until the param list has been downloaded.
-	const wontRun = missionRejectionReason(items, params[TKO_LAND_REQ_PARAM]?.value);
+	// ...and will it stay inside the fence? PX4 enforces the geofence in flight,
+	// not at upload, so a plan that leaves it is accepted and then breaches
+	// mid-mission — GF_ACTION defaults to Hold, so the aircraft stops out there.
+	const fence = useStore($fenceItems);
+	const wontRun = planProblem(items, params[TKO_LAND_REQ_PARAM]?.value, fence);
 
 	async function upload() {
 		setBusy(true);

@@ -234,23 +234,25 @@ interface FenceLike {
  * operator cannot tell 50 m from 500 m. Polygon vertices arrive as consecutive
  * runs of the same kind (the MAVLink convention), which is how they are grouped.
  */
-export function fenceProximity(
+/** Walk the fence shapes a flat item list describes.
+ *
+ *  Both the proximity readout and the pre-upload mission check need this, and
+ *  they must agree about what the shapes ARE — the run-slicing (a contiguous
+ *  run of one polygon kind is one ring) is the fiddly part and is not worth
+ *  having twice. `violated` is whether the given point breaks that shape:
+ *  outside an inclusion, or inside an exclusion. */
+function forEachFenceShape(
 	lat: number, lon: number, items: FenceLike[],
-): FenceProximity | null {
-	if (!isNum(lat) || !isNum(lon) || items.length === 0) return null;
-	let best: FenceProximity | null = null;
-	const consider = (d: number, kind: string, violated: boolean) => {
-		if (!best || d < best.distanceM) best = { distanceM: d, kind, violated };
-	};
-
+	cb: (kind: string, nearestM: number, violated: boolean) => void,
+): void {
 	// Circles are independent items.
 	for (const c of items) {
 		if (!c.kind.startsWith("fence_circle")) continue;
 		const r = c.params?.radius ?? 0;
+		if (!(r > 0)) continue;              // not a circle; gs refuses these too
 		const dCentre = distanceM(lat, lon, c.lat, c.lon);
 		const inside = dCentre <= r;
-		consider(Math.abs(dCentre - r), c.kind,
-			c.kind.includes("inclusion") ? !inside : inside);
+		cb(c.kind, Math.abs(dCentre - r), c.kind.includes("inclusion") ? !inside : inside);
 	}
 
 	// Polygons: each contiguous run of one kind is one ring.
@@ -269,11 +271,40 @@ export function fenceProximity(
 					distanceToSegmentM(lat, lon, a.lat, a.lon, b.lat, b.lon));
 			}
 			const inside = pointInPolygon(lat, lon, ring);
-			consider(nearest, kind, kind === "fence_inclusion" ? !inside : inside);
+			cb(kind, nearest, kind === "fence_inclusion" ? !inside : inside);
 		}
 		i = j;
 	}
+}
+
+export function fenceProximity(
+	lat: number, lon: number, items: FenceLike[],
+): FenceProximity | null {
+	if (!isNum(lat) || !isNum(lon) || items.length === 0) return null;
+	let best: FenceProximity | null = null;
+	forEachFenceShape(lat, lon, items, (kind, d, violated) => {
+		if (!best || d < best.distanceM) best = { distanceM: d, kind, violated };
+	});
 	return best;
+}
+
+/** The kind of the first fence shape this point BREAKS, or null if it breaks
+ *  none.
+ *
+ *  Distinct from `fenceProximity`, which answers "what is nearest" — and a
+ *  point can sit comfortably inside the inclusion polygon while also sitting
+ *  inside an exclusion circle. If the inclusion edge happens to be closer,
+ *  the nearest shape is the compliant one and the violation is invisible. Any
+ *  violation is a violation, so this looks at all of them. */
+export function fenceViolation(
+	lat: number, lon: number, items: FenceLike[],
+): string | null {
+	if (!isNum(lat) || !isNum(lon) || items.length === 0) return null;
+	let found: string | null = null;
+	forEachFenceShape(lat, lon, items, (kind, _d, violated) => {
+		if (violated && found === null) found = kind;
+	});
+	return found;
 }
 
 // --- terrain clearance --------------------------------------------------------

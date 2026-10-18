@@ -18,7 +18,8 @@
 // preventive half of that — check what we can predict, rather than only
 // reporting what came back.
 
-import type { MissionItem } from "@/types/app";
+import type { FenceItem, MissionItem } from "@/types/app";
+import { fenceViolation, isNum } from "@/lib/flightGeometry";
 
 /** PX4 parameter deciding whether a plan must carry takeoff/landing items. */
 export const TKO_LAND_REQ_PARAM = "MIS_TKO_LAND_REQ";
@@ -82,4 +83,54 @@ export function missionRejectionReason(items: MissionItem[], req: number | undef
  */
 export function missionLooksRunnable(items: MissionItem[], req: number | undefined): boolean {
 	return items.length > 0 && missionRejectionReason(items, req) === null;
+}
+
+
+/** Mission item kinds that carry a position worth checking against the fence.
+ *  `rtl` carries no position (MAV_FRAME_MISSION, lat/lon zero), and checking it
+ *  would report every plan as breaching a fence at null island. */
+const POSITIONAL_KINDS = new Set([
+	"takeoff", "waypoint", "loiter_unlim", "loiter_time", "loiter_turns", "land",
+]);
+
+/**
+ * Which waypoint breaks the geofence, or null if none does.
+ *
+ * Same spirit as `missionRejectionReason`: say the predictable thing BEFORE the
+ * upload. PX4 accepts a mission whose waypoints lie outside the inclusion fence
+ * or inside an exclusion one — the upload is just a transfer — and then enforces
+ * the fence in flight. `GF_ACTION` defaults to 2, Hold mode (checked in the PX4
+ * parameter metadata this console bundles), so the aircraft flies the plan until
+ * it breaches and then stops and loiters there, mid-mission, for a reason that
+ * appears only as a STATUSTEXT. Both halves of that plan were "accepted".
+ *
+ * The fence passed in should be the one actually on the vehicle (pull it) or the
+ * one about to be uploaded. With no fence this stays quiet rather than implying
+ * the plan is clear — there is nothing to be clear of.
+ */
+export function missionFenceProblem(
+	items: MissionItem[], fence: FenceItem[],
+): string | null {
+	if (items.length === 0 || fence.length === 0) return null;
+	for (const it of items) {
+		if (!POSITIONAL_KINDS.has(it.kind)) continue;
+		if (!isNum(it.lat) || !isNum(it.lon)) continue;
+		const broken = fenceViolation(it.lat, it.lon, fence);
+		if (broken === null) continue;
+		const where = broken.includes("exclusion")
+			? "inside an exclusion fence"
+			: "outside the inclusion fence";
+		const shape = broken.includes("circle") ? "circle" : "polygon";
+		return `Waypoint ${it.seq} (${it.kind}) is ${where} ${shape}. PX4 will `
+			+ `accept the upload and then enforce the fence in flight, so the `
+			+ `aircraft would breach mid-mission and act on GF_ACTION there.`;
+	}
+	return null;
+}
+
+/** Everything predictable about why this plan will not fly as drawn, or null. */
+export function planProblem(
+	items: MissionItem[], req: number | undefined, fence: FenceItem[],
+): string | null {
+	return missionRejectionReason(items, req) ?? missionFenceProblem(items, fence);
 }
