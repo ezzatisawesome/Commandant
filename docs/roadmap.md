@@ -26,8 +26,33 @@ a 3.4 kB/s radio at 5 % loss with a reboot injected mid-flight),
 load. `--mavlink auto` means there is now no configuration step at all: gs
 probes USB, radio, UDP and TCP and takes whatever has an autopilot on it.
 
-Still open and untouched by that pass: Phase 3 (SIL rehearsal), param snapshots,
-real-Pi hub validation, one DNS record, and Guppi egress.
+**Progress (2026-10-18, second pass):** merged `origin/main` — the first pass
+had been built on a base two commits stale, and resolving it deliberately rather
+than by taking a side was the first job (see the merge commit: both the
+`relativeAlt` and setpoint-ownership fixes are kept, and the geofence warning
+was ported into the `Blocker[]` model rather than merged beside the API it
+replaced). Then: **four more faults**, three of them statelessness —
+
+- PX4 over **USB** was budgeted as a telemetry radio (1.9 Hz actuators, paced
+  params) because CDC-ACM's baud is a fiction. Every bench and HITL session has
+  been running on radio rates for no reason.
+- The console's **param cache** survived a reconnect and was shown as current,
+  although gs cannot report a reboot it did not witness.
+- An **empty plan panel** claimed the vehicle had no plan when it meant nobody
+  had asked.
+- A `status` request outstanding at disconnect was never settled.
+
+And: `python -m gs --status` for a field hub over ssh, `--attach` so the
+rehearsal can drive real PX4/HITL instead of only the stand-in, `--wait-ready`
+so a real SITL run does not report FAIL for arming an aircraft that is not ready
+yet, `npm run preflight` to make the pre-flight gate one command, two pieces of
+dead daemon state removed, and the replaced wind triangle deleted.
+
+Still open and untouched: Phase 3 (SIL rehearsal), param snapshots, real-Pi hub
+validation, one DNS record, and Guppi egress. **The headline remaining gap is
+that every number here was measured against a simulated radio and a simulated
+autopilot** — `day_in_the_life.py --attach auto --net --wait-ready` is built to
+check them against the real one, and exits non-zero so it can gate that.
 
 **Progress (2026-10-06):** checklists below were reconciled against the code —
 22 items were implemented but still showed unticked. What genuinely remains is
