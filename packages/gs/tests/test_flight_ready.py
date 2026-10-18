@@ -2103,3 +2103,65 @@ def test_status_cli_formats_a_relay_uplink_when_there_is_one(capsys):
     assert "relay uplink" in out and "1200 / 3" in out
     assert "asked for auto" in out, "say when the endpoint was not the one configured"
     assert "nothing" in out          # nothing in flight
+
+
+# --- H26: PX4 over USB was budgeted as if it were a radio ------------------
+
+@pytest.mark.parametrize("endpoint", [
+    "/dev/tty.usbmodem14201",            # macOS, the name autodetect finds
+    "/dev/cu.usbmodem14201",
+    "serial:/dev/ttyACM0:115200",        # Linux
+    "serial:/dev/ttyACM1:57600",         # whatever number is set, it is a fiction
+])
+def test_h26_usb_cdc_acm_is_not_rate_limited_by_its_baud(endpoint):
+    """A flight controller plugged into a laptop is a USB CDC-ACM device, and
+    CDC-ACM ignores the baud rate entirely -- line coding is a no-op over USB,
+    both ends accept whatever number is set and move data at bus speed.
+
+    MEASURED pre-fix: `/dev/tty.usbmodem14201` fell through to the 57600 default
+    and came out at 3456 B/s, the same budget as a SiK radio, so gs asked for
+    1.9 Hz actuator output and switched the param fetch to the paced walk. On
+    the one link where everything should run at full rate -- the bench, and
+    HITL -- it behaved like a radio."""
+    budget = bridgemod.link_budget_bps(endpoint)
+    assert budget == bridgemod.NET_BUDGET_BPS, f"{endpoint} budgeted at {budget}"
+    hz = bridgemod.budgeted_hz(budget, bridgemod.MSG_ACTUATOR_OUTPUT_STATUS, 3)
+    assert hz == bridgemod.REQUEST_HZ_MAX
+    assert budget >= bridgemod.PARAM_PACED_BELOW_BPS, "would pace a USB param fetch"
+
+
+@pytest.mark.parametrize("endpoint,rate", [
+    ("serial:/dev/ttyUSB0:57600", 57600),              # FTDI/CP210x: a real UART
+    ("serial:/dev/tty.usbserial-A104:57600", 57600),   # the same, on macOS
+    ("/dev/ttyAMA0", bridgemod.DEFAULT_SERIAL_BAUD),   # the Pi's own UART pins
+    ("/dev/ttyS0", bridgemod.DEFAULT_SERIAL_BAUD),
+])
+def test_h26_a_real_uart_is_still_budgeted(endpoint, rate):
+    """The distinction is the device class, not that the name starts with
+    /dev/tty. ttyUSB and usbserial are real UARTs behind a bridge chip, and
+    ttyAMA/ttyS are the SoC's own -- which on a Pi hub is exactly where the
+    telemetry radio is wired, so those must stay rate-limited or the whole link
+    budget means nothing where it matters most."""
+    budget = bridgemod.link_budget_bps(endpoint)
+    expected = (rate / 10.0) * bridgemod.SERIAL_GOODPUT_FRACTION
+    assert budget == pytest.approx(expected)
+    assert budget < bridgemod.PARAM_PACED_BELOW_BPS, "a radio must pace its params"
+
+
+def test_h26_autodetect_finds_usb_and_treats_it_as_the_fat_pipe_it_is(monkeypatch):
+    """End to end: the endpoint autodetect picks for a bench/HITL controller
+    gets full-rate streams, not the radio treatment."""
+    monkeypatch.setattr(bridgemod, "detect_endpoint",
+                        lambda *a, **k: "serial:/dev/ttyACM0:115200")
+    monkeypatch.setattr(bridgemod, "open_connection", lambda *a, **k: RecordingConn())
+    b = _bridge(mavlink_endpoint=bridgemod.AUTODETECT)
+    b._open_with_retry()
+    assert b.link_budget_bps == bridgemod.NET_BUDGET_BPS
+    conn = RecordingConn()
+    b._request_message(conn, 1, 1, bridgemod.MSG_ACTUATOR_OUTPUT_STATUS)
+    hz = 1e6 / next(s for s in conn.mav.sent if s[0] == "command_long_send")[1][5]
+    assert hz == pytest.approx(25.0), f"USB throttled to {hz:g} Hz"
+    b._param_queue.put({"kind": "refresh"})
+    b._service_params(conn)
+    assert any(s[0] == "param_request_list_send" for s in conn.mav.sent), \
+        "paced the param fetch over USB"

@@ -117,6 +117,30 @@ fixed (`packages/gs/tests/test_flight_ready.py`, 14 tests).
    the EKF wind estimate are simply never populated, with no error. The dialect
    is now rebound explicitly.
 
+**PX4 over USB was budgeted as a radio (2026-10-18):** a USB CDC-ACM device —
+which is what a flight controller plugged into a laptop is, on the bench and in
+HITL — ignores the baud rate entirely. Line coding is a no-op over USB: both
+ends accept whatever number is set and move data at bus speed.
+
+MEASURED on the pre-fix code, for the macOS device name autodetect actually
+finds:
+
+| endpoint | budget | actuators | params |
+|---|---|---|---|
+| `/dev/tty.usbmodem14201` | **3456 B/s** | **1.9 Hz** | **paced** |
+| `serial:/dev/ttyACM0:115200` | 6912 B/s | 3.8 Hz | paced |
+| `serial:/dev/ttyUSB0:57600` (a real radio) | 3456 B/s | 1.9 Hz | paced |
+
+So the bench and HITL link — the one place everything should run at full rate —
+got the same treatment as a SiK radio, and the macOS name was *worse* than the
+Linux one because it fell through to the 57600 default.
+
+The distinction is the device class, not the name's prefix: `ttyACM`/`usbmodem`
+are CDC-ACM and now read as a fat pipe, while `ttyUSB`/`usbserial` are real
+UARTs behind an FTDI or CP210x bridge and `ttyAMA`/`ttyS` are the SoC's own —
+which on a Pi hub is exactly where the telemetry radio is wired, so those stay
+rate-limited or the budget means nothing where it matters most.
+
 **Measured, and left alone (2026-10-18):** three performance questions this
 pass asked and answered in the negative, recorded so the next person does not
 re-ask them.

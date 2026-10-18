@@ -255,6 +255,8 @@ _GCS_ID = {"source_system": GCS_SYSTEM, "source_component": GCS_COMPONENT}
 AUTODETECT = "auto"
 SERIAL_CANDIDATES = (
     # PX4 over USB: the flight controller itself, on the bench or in HITL.
+    # The baud here is a formality -- CDC-ACM ignores it (see _is_usb_cdc) --
+    # but pymavlink wants a number.
     ("/dev/tty.usbmodem*", 115200),
     ("/dev/ttyACM*", 115200),
     # A telemetry radio: the hub's link to an airborne aircraft.
@@ -327,17 +329,44 @@ def detect_endpoint(candidates: list[str] | None = None) -> str | None:
     return None
 
 
+# A USB CDC-ACM device -- which is what a flight controller plugged into a
+# laptop is, on the bench and in HITL -- ignores the baud rate entirely. Line
+# coding is a no-op over USB: both ends accept whatever number is set and move
+# data at bus speed, megabytes per second.
+#
+# Treating the number as real is not a small error. MEASURED on the pre-fix
+# code: `/dev/tty.usbmodem14201` (the macOS name, which autodetect finds) fell
+# through to the 57600 default and came out at 3456 B/s -- the same budget as a
+# SiK radio -- so gs asked for 1.9 Hz actuator output and switched the param
+# fetch to the paced walk. On the link where everything should be at full rate,
+# the bench and HITL sessions got radio behaviour.
+#
+# The distinction is the device class, not the name's prefix: ttyACM/usbmodem
+# are CDC-ACM, while ttyUSB/usbserial are real UARTs behind an FTDI or CP210x
+# bridge, and ttyAMA/ttyS are the SoC's own UART -- which on a Pi hub is exactly
+# where the telemetry radio lives, so those must stay rate-limited.
+_CDC_ACM_HINTS = ("ttyacm", "usbmodem")
+
+
+def _is_usb_cdc(device: str) -> bool:
+    low = device.lower()
+    return any(h in low for h in _CDC_ACM_HINTS)
+
+
 def link_budget_bps(endpoint: str, baud: int = DEFAULT_SERIAL_BAUD) -> float:
-    """Usable goodput of a MAVLink endpoint, bytes/sec. Serial is the real
-    constraint (a telemetry radio); anything over IP is treated as free."""
+    """Usable goodput of a MAVLink endpoint, bytes/sec. A real UART is the
+    constraint (a telemetry radio); IP and USB CDC-ACM are treated as free."""
     if endpoint.startswith("serial:"):
         parts = endpoint.split(":")
+        device = parts[1] if len(parts) > 1 else ""
         rate = int(parts[2]) if len(parts) > 2 and parts[2] else baud
     elif "://" not in endpoint and (endpoint.startswith("/dev/")
                                     or endpoint.upper().startswith("COM")):
-        rate = baud
+        device, rate = endpoint, baud
     else:
         return NET_BUDGET_BPS
+    if _is_usb_cdc(device):
+        return NET_BUDGET_BPS        # the baud is a fiction; see _CDC_ACM_HINTS
     return (rate / 10.0) * SERIAL_GOODPUT_FRACTION   # 8N1 => 10 bits per byte
 
 
