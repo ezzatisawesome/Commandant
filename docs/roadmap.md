@@ -737,8 +737,31 @@ Control verbs. Small, high-value, and the prerequisite for missions.
       indicators; reject/rollback on mismatch.
 - [x] Diff vs airframe defaults (reuse the airframe init script already read via
       `/api/airframe`); highlight changed-from-default.
-- [ ] Param snapshots: save / load / compare sets to file (local persistence).
-      The only Phase 2 item not built.
+- [x] Param snapshots: save / load / compare sets to file (local persistence).
+      *(Done 2026-10-18. `lib/paramSnapshot.ts` + the Save/Compare buttons in the
+      param editor.)*
+
+      This is the one place Commandant deliberately keeps state on disk, and the
+      exception is justified by the question a snapshot answers, which nothing
+      else can: **what changed since the configuration that flew?** A param set
+      is ~1000 values that a week of tuning moves a handful of, and after an
+      incident "which handful" is the whole question.
+
+      A file, not a server: the console is a static app served by the hub, so a
+      download and a file picker need no backend and work on a phone whose only
+      network is the hub's own WiFi. Plain versioned JSON, so it can be read,
+      diffed and committed by anything.
+
+      Three decisions worth keeping: types are **not** stored (PX4 owns those,
+      and a snapshot that disagreed with the vehicle about a type would be worse
+      than one that says nothing); a bad value rejects the **whole** file rather
+      than loading half of it, because a half-loaded set is how a diff comes to
+      be trusted while describing something else; and the diff reports **both**
+      one-sided cases instead of intersecting them away, since a parameter in
+      one and not the other usually means a firmware change — a more important
+      finding than a changed number. Compared with a relative tolerance, so a
+      float that merely round-tripped through MAVLink's float32 is not reported
+      as an edit; a list full of noise is a list the operator stops reading.
 
 ## Phase 3 — SIL-rehearsal gateway
 
