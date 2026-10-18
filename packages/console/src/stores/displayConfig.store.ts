@@ -19,6 +19,22 @@ export interface FieldDef {
 	 * does not say whether it is the bus, a cell, or the motor controller.
 	 */
 	channel: string;
+	/**
+	 * Which MAVLink message group this reading comes from, matching the keys in
+	 * the frame's `ages` map (gs's _AGE_GROUPS).
+	 *
+	 * The frame being fresh does not make every field in it fresh: these arrive
+	 * on different messages at different rates, and three of them are messages
+	 * gs had to ASK for, which a rebooted autopilot stops sending. When one
+	 * stops, its last value is re-broadcast in every frame from then on,
+	 * indistinguishable from a live reading — so the panel has to know which
+	 * stream each cell depends on in order to say when that cell has gone cold.
+	 *
+	 * Absent for fields with no MAVLink carrier (the solar/power model, which
+	 * comes from the sim's JSON feed) and for `mode`/`armed`, whose freshness
+	 * is the link's own and already shown by the link indicator.
+	 */
+	group?: string;
 	unit?: string;
 	digits?: number;
 	kind: FieldKind;
@@ -43,20 +59,20 @@ export const CHANNEL_GROUPS: Array<{ ns: string; title: string }> = [
 export const FIELD_CATALOG: FieldDef[] = [
 	{ key: "mode", label: "Mode", channel: "fc.mode", kind: "text" },
 	{ key: "armed", label: "Armed", channel: "fc.armed", kind: "text" },
-	{ key: "airspeed", label: "Airspeed", channel: "air.airspeed", unit: "m/s", digits: 1, kind: "num", sparkClassName: "text-emerald-400/80" },
-	{ key: "groundspeed", label: "Groundspeed", channel: "nav.groundspeed", unit: "m/s", digits: 1, kind: "num", sparkClassName: "text-emerald-400/60" },
-	{ key: "alt", label: "Altitude", channel: "nav.alt", unit: "m", digits: 0, kind: "num", sparkClassName: "text-sky-400/80" },
-	{ key: "heading", label: "Heading", channel: "nav.heading", unit: "°", digits: 0, kind: "num" },
-	{ key: "throttle", label: "Throttle", channel: "ctl.throttle", unit: "%", digits: 0, kind: "num", sparkClassName: "text-amber-400/80" },
-	{ key: "roll", label: "Roll", channel: "att.roll", unit: "rad", digits: 2, kind: "num" },
-	{ key: "pitch", label: "Pitch", channel: "att.pitch", unit: "rad", digits: 2, kind: "num" },
-	{ key: "yaw", label: "Yaw", channel: "att.yaw", unit: "rad", digits: 2, kind: "num" },
-	{ key: "elevator", label: "Elevator", channel: "ctl.elevator", unit: "%", digits: 0, kind: "control" },
-	{ key: "aileron", label: "Aileron", channel: "ctl.aileron", unit: "%", digits: 0, kind: "control" },
-	{ key: "rudder", label: "Rudder", channel: "ctl.rudder", unit: "%", digits: 0, kind: "control" },
-	{ key: "batteryRemaining", label: "Battery", channel: "bus.battery", unit: "%", digits: 0, kind: "num", sparkClassName: "text-emerald-400/80" },
-	{ key: "voltage", label: "Voltage", channel: "bus.voltage", unit: "V", digits: 2, kind: "num", sparkClassName: "text-violet-400/80" },
-	{ key: "current", label: "Net Current", channel: "bus.current", unit: "A", digits: 1, kind: "num", sparkClassName: "text-rose-400/80" },
+	{ key: "airspeed", label: "Airspeed", channel: "air.airspeed", group: "airdata", unit: "m/s", digits: 1, kind: "num", sparkClassName: "text-emerald-400/80" },
+	{ key: "groundspeed", label: "Groundspeed", channel: "nav.groundspeed", group: "position", unit: "m/s", digits: 1, kind: "num", sparkClassName: "text-emerald-400/60" },
+	{ key: "alt", label: "Altitude", channel: "nav.alt", group: "position", unit: "m", digits: 0, kind: "num", sparkClassName: "text-sky-400/80" },
+	{ key: "heading", label: "Heading", channel: "nav.heading", group: "position", unit: "°", digits: 0, kind: "num" },
+	{ key: "throttle", label: "Throttle", channel: "ctl.throttle", group: "airdata", unit: "%", digits: 0, kind: "num", sparkClassName: "text-amber-400/80" },
+	{ key: "roll", label: "Roll", channel: "att.roll", group: "attitude", unit: "rad", digits: 2, kind: "num" },
+	{ key: "pitch", label: "Pitch", channel: "att.pitch", group: "attitude", unit: "rad", digits: 2, kind: "num" },
+	{ key: "yaw", label: "Yaw", channel: "att.yaw", group: "attitude", unit: "rad", digits: 2, kind: "num" },
+	{ key: "elevator", label: "Elevator", channel: "ctl.elevator", group: "actuators", unit: "%", digits: 0, kind: "control" },
+	{ key: "aileron", label: "Aileron", channel: "ctl.aileron", group: "actuators", unit: "%", digits: 0, kind: "control" },
+	{ key: "rudder", label: "Rudder", channel: "ctl.rudder", group: "actuators", unit: "%", digits: 0, kind: "control" },
+	{ key: "batteryRemaining", label: "Battery", channel: "bus.battery", group: "battery", unit: "%", digits: 0, kind: "num", sparkClassName: "text-emerald-400/80" },
+	{ key: "voltage", label: "Voltage", channel: "bus.voltage", group: "battery", unit: "V", digits: 2, kind: "num", sparkClassName: "text-violet-400/80" },
+	{ key: "current", label: "Net Current", channel: "bus.current", group: "battery", unit: "A", digits: 1, kind: "num", sparkClassName: "text-rose-400/80" },
 	{ key: "genW", label: "Solar Gen", channel: "power.gen", unit: "W", digits: 0, kind: "num", sparkClassName: "text-yellow-400/80" },
 	{ key: "loadW", label: "Load", channel: "power.load", unit: "W", digits: 0, kind: "num", sparkClassName: "text-orange-400/80" },
 	{ key: "propW", label: "Propulsion", channel: "power.prop", unit: "W", digits: 0, kind: "num", sparkClassName: "text-orange-300/80" },

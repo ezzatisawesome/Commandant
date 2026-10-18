@@ -5,6 +5,7 @@ import {
 	ballPitchMarks, BALL_BANK_TICKS, bankMajor, rollLabel, pitchLabel,
 	quantize, HUD_STEP,
 } from "@/lib/hud";
+import { FIELD_CATALOG } from "@/stores/displayConfig.store";
 
 // An instrument that is wrong is worse than no instrument: the operator reads it
 // instead of thinking. So the symbology is pinned numerically — sign conventions
@@ -271,5 +272,49 @@ describe("input quantisation", () => {
 	it("keeps a quantised integer exact", () => {
 		expect(quantize(214, 0.5)).toBe(214);
 		expect(quantize(103, 1)).toBe(103);
+	});
+});
+
+describe("every cell knows which stream it depends on (gs fault H19, completed)", () => {
+	// gs reports an age per message GROUP, and only the wind readout was using
+	// it. The rest of the panel went on showing the last value it received as
+	// though it were live — and three of these streams are ones gs had to ASK
+	// for, so a rebooted or reconfigured autopilot stops them while the frame
+	// stays fresh.
+	it("maps the fields that come from a MAVLink stream to that stream", () => {
+		const byKey = Object.fromEntries(FIELD_CATALOG.map((d) => [d.key, d]));
+		expect(byKey["airspeed"].group).toBe("airdata");
+		expect(byKey["throttle"].group).toBe("airdata");
+		expect(byKey["alt"].group).toBe("position");
+		expect(byKey["heading"].group).toBe("position");
+		expect(byKey["roll"].group).toBe("attitude");
+		expect(byKey["elevator"].group).toBe("actuators");
+		expect(byKey["aileron"].group).toBe("actuators");
+		expect(byKey["voltage"].group).toBe("battery");
+		expect(byKey["batteryRemaining"].group).toBe("battery");
+	});
+
+	it("leaves fields with no MAVLink carrier ungrouped", () => {
+		// The solar/power model comes from the sim's JSON feed, which has no
+		// per-group age. Claiming one would be inventing a stream.
+		const byKey = Object.fromEntries(FIELD_CATALOG.map((d) => [d.key, d]));
+		for (const k of ["genW", "loadW", "propW", "motorCurrent", "irradiance"]) {
+			expect(byKey[k].group).toBeUndefined();
+		}
+		// mode/armed ride the heartbeat; their freshness IS the link's, which the
+		// link indicator already shows.
+		expect(byKey["mode"].group).toBeUndefined();
+		expect(byKey["armed"].group).toBeUndefined();
+	});
+
+	it("every group named by a field is one gs actually reports", () => {
+		// A typo here would mean a cell that can never go cold, silently.
+		const reported = new Set([
+			"position", "attitude", "airdata", "wind", "gps", "battery",
+			"actuators", "health", "ekf",
+		]);
+		for (const d of FIELD_CATALOG) {
+			if (d.group !== undefined) expect(reported).toContain(d.group);
+		}
 	});
 });
