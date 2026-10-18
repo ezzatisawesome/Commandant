@@ -1844,3 +1844,56 @@ def test_h25_a_refusal_reaches_the_client_as_an_ack(ports):
         assert b._cmd_queue.empty(), "a malformed command still reached the mav thread"
 
     asyncio.run(scenario())
+
+
+def test_h14_the_paced_walk_resumes_rather_than_rescanning(monkeypatch):
+    """`_service_params` runs once per mav-loop iteration, i.e. once per
+    received message. Rescanning all ~1000 indices each time to issue at most 8
+    reads came to tens of thousands of index checks per second -- on a
+    Raspberry Pi. The walk keeps a cursor instead.
+
+    Checked by behaviour, not by reading the code: consecutive ticks must ask
+    for DIFFERENT indices, moving forward, rather than re-offering the same
+    low ones."""
+    monkeypatch.setattr(bridgemod, "PARAM_READ_RETRY_MS", 10_000)
+    b = _bridge(mavlink_endpoint="serial:/dev/ttyUSB0:57600")
+    b._loop = _capturing_loop([])
+    conn = RecordingConn()
+    b._param_queue.put({"kind": "refresh"})
+    b._service_params(conn)
+    b._on_mav_protocol(conn, bridgemod._mono_ms(), "PARAM_VALUE", _param_value(0, 60))
+
+    asked: list[int] = []
+    for _ in range(5):
+        conn.mav.sent.clear()
+        b._param_paced_at = 0          # make each tick eligible, deterministically
+        b._service_params(conn)
+        asked += [s[1][3] for s in conn.mav.sent if s[0] == "param_request_read_send"]
+
+    assert len(asked) == len(set(asked)), f"re-asked an index already requested: {asked}"
+    assert asked == sorted(asked), f"the walk did not move forward: {asked}"
+    assert len(asked) >= 5 * 1, "the walk stopped making progress"
+    assert b._param_next_idx > 1
+
+
+def test_h14_the_paced_walk_wraps_to_retry_what_never_answered(monkeypatch):
+    """Having reached the end, it comes back around for the gaps -- otherwise a
+    single lost reply would leave the refresh one short forever."""
+    monkeypatch.setattr(bridgemod, "PARAM_READ_RETRY_MS", 0)
+    b = _bridge(mavlink_endpoint="serial:/dev/ttyUSB0:57600")
+    b._loop = _capturing_loop([])
+    conn = RecordingConn()
+    b._param_queue.put({"kind": "refresh"})
+    b._service_params(conn)
+    b._on_mav_protocol(conn, bridgemod._mono_ms(), "PARAM_VALUE", _param_value(0, 4))
+    # Answer 1 and 3; 2 never replies.
+    for idx in (1, 3):
+        b._on_mav_protocol(conn, bridgemod._mono_ms(), "PARAM_VALUE", _param_value(idx, 4))
+    asked: list[int] = []
+    for _ in range(6):
+        conn.mav.sent.clear()
+        b._param_paced_at = 0
+        b._service_params(conn)
+        asked += [s[1][3] for s in conn.mav.sent if s[0] == "param_request_read_send"]
+    assert asked, "stopped asking entirely"
+    assert set(asked) == {2}, f"asked for something other than the missing index: {set(asked)}"

@@ -864,6 +864,7 @@ class Bridge:
         self._param_paced = False
         self._param_req_at: dict[int, int] = {}   # index -> last request (mono ms)
         self._param_paced_at = 0                  # last paced request tick
+        self._param_next_idx = 0                  # cursor into the paced walk
         # Set by _on_mav_state when the vehicle's uptime clock jumps backward
         # (a reboot); acted on in _on_mav_protocol, which may transmit.
         self._reboot_pending: int | None = None
@@ -1302,16 +1303,31 @@ class Bridge:
                    else int((now - self._param_paced_at) / interval_ms))
         if allowed <= 0:
             return
+        # Resume the walk where it left off rather than rescanning from zero.
+        # This runs once per mav-loop iteration, i.e. once per received message,
+        # so a scan from 0 over ~1000 params came to tens of thousands of index
+        # checks per second -- on a Raspberry Pi, to issue at most 8 reads. The
+        # cursor wraps once per pass, which also interleaves retries of indices
+        # that never answered with new ones instead of letting the early ones
+        # consume every burst.
+        budget = min(allowed, PARAM_READ_BURST)
         sent = 0
-        for idx in range(self._param_count):
-            if sent >= min(allowed, PARAM_READ_BURST):
-                break
+        scanned = 0
+        idx = self._param_next_idx
+        while sent < budget and scanned < self._param_count:
+            if idx >= self._param_count:
+                idx = 0
+            scanned += 1
             if idx in self._param_received:
+                idx += 1
                 continue
             if now - self._param_req_at.get(idx, 0) < PARAM_READ_RETRY_MS:
-                continue          # already asked recently; wait for the answer
+                idx += 1          # already asked recently; wait for the answer
+                continue
             self._paced_read(conn, idx)
             sent += 1
+            idx += 1
+        self._param_next_idx = idx
         if sent:
             self._param_paced_at = now
 
@@ -1325,6 +1341,7 @@ class Bridge:
         self._param_last_rx_ms = _mono_ms()
         self._param_req_at.clear()
         self._param_paced_at = 0
+        self._param_next_idx = 0
         # Strategy follows the transport, like the stream rates do. A fat pipe
         # gets the fast path it has always had; a radio gets paced reads so a
         # refresh cannot starve the commands (see PARAM_PACED_BELOW_BPS).

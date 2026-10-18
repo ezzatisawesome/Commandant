@@ -81,6 +81,16 @@ fixed (`packages/gs/tests/test_flight_ready.py`, 14 tests).
    the EKF wind estimate are simply never populated, with no error. The dialect
    is now rebound explicitly.
 
+**Self-review of this pass's own code (2026-10-18):** the paced param walk
+rescanned all ~1000 indices from zero on every tick, to issue at most 8 reads —
+and it runs once per mav-loop iteration, i.e. once per received message, so at
+50–200 MAVLink messages a second that is 50,000–200,000 index checks a second on
+a Raspberry Pi. Not a correctness bug, and exactly the kind of thing that only
+matters on the hardware this actually deploys to. It keeps a cursor now, which
+also interleaves retries of indices that never answered with new ones instead of
+letting the early gaps consume every burst. The refresh still completes in 20 s
+and the arm during it still acks in 0.14 s.
+
 **The frame did not change (2026-10-18):** the `_on_mav` lock-scope split was
 the largest structural change of this pass, and the emitted frame is the
 console's contract. `scripts/frame_diff.py` feeds one identical 12-message
