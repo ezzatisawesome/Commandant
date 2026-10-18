@@ -28,7 +28,7 @@ import { TelemetryClient } from "@/services/telemetry";
 import { $aircraftStore, $trailStore, pushFrame } from "@/stores/aircraft.store";
 import { $linkState, $commander } from "@/stores/link.store";
 import { $params, $paramsStale } from "@/stores/params.store";
-import { $missionCurrent, $missionProgress, $missionReached, $missionItems, setMissionItems, $planRead, clearPlanRead } from "@/stores/mission.store";
+import { $missionCurrent, $missionProgress, $missionReached, $missionItems, setMissionItems, $planRead, clearPlanRead, $vehicleMission, setVehicleMission, missionMatchesVehicle } from "@/stores/mission.store";
 import { $statusTexts, clearStatus } from "@/stores/statustext.store";
 
 let client: TelemetryClient;
@@ -38,7 +38,7 @@ beforeEach(() => {
 	FakeWS.throwOnConstruct = false;
 	$aircraftStore.set(null); $trailStore.set([]); $params.set({});
 	$missionCurrent.set(null); $missionReached.set(null); $missionProgress.set(null);
-	clearStatus(); clearPlanRead();
+	clearStatus(); clearPlanRead(); setVehicleMission(null); setMissionItems([]);
 	client = new TelemetryClient("ws://test:8790");
 });
 afterEach(() => { client.disconnect(); vi.useRealTimers(); });
@@ -406,5 +406,51 @@ describe("teardown settles every kind of outstanding request", () => {
 		const p = client.status();
 		client.disconnect();
 		await expect(p).rejects.toThrow(/disconnected/);
+	});
+});
+
+describe("the console records what the vehicle holds, separately from the draft", () => {
+	it("a readback is a moment the two provably agree", () => {
+		client.connect(); ws().open();
+		expect($vehicleMission.get()).toBeNull();     // unknown, not empty
+		ws().recv({ type: "mission", count: 1,
+			items: [{ seq: 0, kind: "waypoint", lat: 37.4, lon: -122.1, alt: 80 }] });
+		expect($vehicleMission.get()).toHaveLength(1);
+		expect(missionMatchesVehicle()).toBe(true);
+	});
+
+	it("an accepted upload records what was SENT, not the draft at ack time", async () => {
+		// Over a radio the handshake takes seconds, and the operator may keep
+		// editing during it. Recording the draft as it stands when the ack lands
+		// would claim the vehicle holds something it was never sent.
+		client.connect(); ws().open();
+		const sent = [{ seq: 0, kind: "waypoint" as const, lat: 37.4, lon: -122.1, alt: 80 }];
+		const p = client.pushMission(sent);
+		const id = ws().lastSent().id;
+		setMissionItems([{ seq: 0, kind: "waypoint", lat: 37.9, lon: -122.1, alt: 80 }]);
+		ws().recv({ type: "mission_ack", id, ok: true, result: 0, text: "accepted" });
+		await p;
+		expect($vehicleMission.get()![0].lat).toBe(37.4);   // what was sent
+		expect(missionMatchesVehicle()).toBe(false);         // the draft moved on
+	});
+
+	it("a REJECTED upload records nothing — the vehicle did not take it", async () => {
+		client.connect(); ws().open();
+		const p = client.pushMission([{ seq: 0, kind: "waypoint", lat: 37.4, lon: -122.1, alt: 80 }]);
+		const id = ws().lastSent().id;
+		ws().recv({ type: "mission_ack", id, ok: false, result: 13, text: "invalid param" });
+		await p;
+		expect($vehicleMission.get()).toBeNull();
+	});
+
+	it("a reconnect makes what the vehicle holds unknown again", () => {
+		client.connect(); ws().open();
+		ws().recv({ type: "mission", count: 1,
+			items: [{ seq: 0, kind: "waypoint", lat: 37.4, lon: -122.1, alt: 80 }] });
+		expect($vehicleMission.get()).not.toBeNull();
+		ws().close();
+		vi.advanceTimersByTime(5000);
+		ws().open();
+		expect($vehicleMission.get()).toBeNull();
 	});
 });

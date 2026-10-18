@@ -7,6 +7,7 @@ import {
 import {
 	$missionItems, addWaypoint, removeItem, reorderItem, clearMission, updateItem,
 	$planRead, markPlanRead, clearPlanRead,
+	setMissionItems, setVehicleMission, missionMatchesVehicle,
 } from "@/stores/mission.store";
 
 describe("fence push shaping", () => {
@@ -123,5 +124,65 @@ describe("an empty plan panel must not claim the vehicle has no plan", () => {
 		markPlanRead("fence");
 		clearPlanRead();
 		expect($planRead.get()).toEqual({ mission: false, fence: false, rally: false });
+	});
+});
+
+describe("the draft and what the vehicle is flying are different things", () => {
+	// $missionItems is the operator's EDITABLE draft, and every add/remove/
+	// reorder runs it through resequence(), which renumbers items 0..n-1.
+	// Mission execution state arrives from PX4 as a seq into the mission the
+	// VEHICLE holds. Apply one to the other and the globe highlights whichever
+	// draft item now carries that number — the operator watches the aircraft
+	// fly toward a point it is not flying toward.
+	const wp = (seq: number, lat: number) =>
+		({ seq, kind: "waypoint" as const, lat, lon: -122.1, alt: 80 });
+
+	beforeEach(() => { clearMission(); setVehicleMission(null); });
+
+	it("an unread vehicle mission is not a match, because it is not known", () => {
+		setMissionItems([wp(0, 37.40), wp(1, 37.41)]);
+		expect(missionMatchesVehicle()).toBe(false);
+	});
+
+	it("a readback makes the draft match", () => {
+		const read = [wp(0, 37.40), wp(1, 37.41)];
+		setMissionItems(read);
+		setVehicleMission(read);
+		expect(missionMatchesVehicle()).toBe(true);
+	});
+
+	it("inserting a waypoint renumbers the draft and breaks the match", () => {
+		// The exact failure: PX4 says it is flying toward seq 1. Before the
+		// insert that is 37.41; after it, draft seq 1 IS 37.40.
+		const read = [wp(0, 37.40), wp(1, 37.41)];
+		setMissionItems(read);
+		setVehicleMission(read);
+		addWaypoint(37.39, -122.1, 80);
+		setMissionItems([$missionItems.get()[2], ...$missionItems.get().slice(0, 2)]);
+		expect($missionItems.get()[1].lat).toBe(37.40);   // was 37.41 on the vehicle
+		expect(missionMatchesVehicle()).toBe(false);
+	});
+
+	it("dragging a waypoint breaks the match, since that is where it will go", () => {
+		const read = [wp(0, 37.40), wp(1, 37.41)];
+		setMissionItems(read);
+		setVehicleMission(read);
+		updateItem(1, { lat: 37.60 });
+		expect(missionMatchesVehicle()).toBe(false);
+	});
+
+	it("a cosmetic difference is not worth disclaiming the whole plan over", () => {
+		const read = [wp(0, 37.40), wp(1, 37.41)];
+		setMissionItems(read.map((it) => ({ ...it, params: { acceptRadius: 60 } })));
+		setVehicleMission(read);
+		expect(missionMatchesVehicle()).toBe(true);
+	});
+
+	it("a deletion breaks the match", () => {
+		const read = [wp(0, 37.40), wp(1, 37.41), wp(2, 37.42)];
+		setMissionItems(read);
+		setVehicleMission(read);
+		removeItem(1);
+		expect(missionMatchesVehicle()).toBe(false);
 	});
 });

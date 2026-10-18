@@ -36,6 +36,7 @@ import {
 	setMissionItems,
 	markPlanRead,
 	clearPlanRead,
+	setVehicleMission,
 } from "@/stores/mission.store";
 import { setFenceItems, setRallyItems } from "@/stores/geo.store";
 import envs, { IS_VIEW } from "@/lib/envs";
@@ -161,6 +162,9 @@ export class TelemetryClient {
 				// have changed while nobody was listening, so an empty panel
 				// must go back to meaning "not asked" rather than "none".
 				clearPlanRead();
+				// And what the vehicle holds is no longer known: it may have
+				// rebooted, or this may be a different aircraft.
+				setVehicleMission(null);
 			}
 			this.hadSession = true;
 			// Bid to be the single active commander as soon as the socket is up, so
@@ -206,6 +210,9 @@ export class TelemetryClient {
 				// Readback after a pull: replace the editable plan wholesale.
 				setMissionItems((msg as MissionMessage).items);
 				markPlanRead("mission");
+				// A readback is the one moment the draft and the vehicle provably
+				// agree, so record it as what the vehicle holds.
+				setVehicleMission((msg as MissionMessage).items);
 				$missionProgress.set(null);
 			} else if (type === "mission_progress") {
 				const p = msg as { phase: "upload" | "download"; seq: number; count: number };
@@ -550,7 +557,18 @@ export class TelemetryClient {
 				this.pendingMissions.delete(id);
 				reject(new Error("timeout"));
 			}, MISSION_TIMEOUT_MS);
-			this.pendingMissions.set(id, { resolve, reject, timer });
+			// An ACCEPTED upload is the other moment the two provably agree.
+			// Recorded from the items that were actually sent, not from the draft
+			// as it stands when the ack arrives -- the operator may have kept
+			// editing during the handshake, which over a radio takes seconds.
+			const sent = items.map((it) => ({ ...it }));
+			this.pendingMissions.set(id, {
+				resolve: (ack) => {
+					if (ack.ok) setVehicleMission(sent);
+					resolve(ack);
+				},
+				reject, timer,
+			});
 			this.send({ type: "mission_push", id, items });
 		});
 	}

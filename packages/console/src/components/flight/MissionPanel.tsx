@@ -15,7 +15,7 @@ import {
 	clearMission,
 } from "@/stores/mission.store";
 import { $fenceItems } from "@/stores/geo.store";
-import { $planRead } from "@/stores/mission.store";
+import { $planRead, $vehicleMission, missionMatchesVehicle } from "@/stores/mission.store";
 import { $linkState, $commander } from "@/stores/link.store";
 import { telemetryClient } from "@/services/telemetry";
 import { Button } from "@/components/ui/button";
@@ -88,6 +88,10 @@ export default function MissionPanel() {
 	// words, the offending row can carry a flag, and the globe can draw the
 	// constraint — rather than all three being one paragraph of amber text.
 	const planRead = useStore($planRead);
+	const vehicleMission = useStore($vehicleMission);
+	// Does the draft still describe what the aircraft is flying? Recomputed from
+	// both stores so a drag or a reorder updates it immediately.
+	const matches = missionMatchesVehicle(items, vehicleMission);
 	const fence = useStore($fenceItems);
 	const blockers = missionBlockers(items, lookupFrom(params), fence);
 
@@ -189,6 +193,16 @@ export default function MissionPanel() {
 			) : null}
 
 			<div className="mt-2 overflow-auto font-mono text-[11px]">
+				{/* The draft has diverged from the vehicle, so the route drawn on
+				    the globe is not what the aircraft will fly and its execution
+				    highlight has been dropped (it indexes the vehicle's mission,
+				    which is a different list now). */}
+				{items.length > 0 && vehicleMission !== null && !matches ? (
+					<div className="px-1 pb-1 text-[10px] text-amber-300">
+						▲ edited since the vehicle last took it — the globe is showing your
+						draft, not what it is flying. Upload to make them the same.
+					</div>
+				) : null}
 				{items.length === 0 ? (
 					<div className="py-4 text-center text-white/30">
 						{planRead.mission
