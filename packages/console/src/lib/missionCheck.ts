@@ -240,6 +240,14 @@ export function missionBlockers(
 	//
 	// Reported per item, like the landing findings, so the offending waypoint
 	// gets a row flag and can be dragged into compliance rather than described.
+	//
+	// The fence here is the DRAFT, which is correct even though the live breach
+	// readout deliberately uses the fence the VEHICLE is enforcing. They answer
+	// different questions: that one is "where is the aircraft now, against what
+	// PX4 will act on", this one is "will the plan I am about to upload sit
+	// inside the fence I am about to upload". Both drafts, consistently —
+	// checking a new plan against the old fence would warn about a boundary that
+	// is itself on its way out.
 	for (const it of items) {
 		if (!POSITIONAL_KINDS.has(it.kind)) continue;
 		if (!isNum(it.lat) || !isNum(it.lon)) continue;

@@ -38,7 +38,7 @@ import {
 	clearPlanRead,
 	setVehicleMission,
 } from "@/stores/mission.store";
-import { setFenceItems, setRallyItems } from "@/stores/geo.store";
+import { setFenceItems, setRallyItems, setVehicleFence } from "@/stores/geo.store";
 import envs, { IS_VIEW } from "@/lib/envs";
 
 // How long a command waits for its ack before we give up (gs retries internally
@@ -165,6 +165,7 @@ export class TelemetryClient {
 				// And what the vehicle holds is no longer known: it may have
 				// rebooted, or this may be a different aircraft.
 				setVehicleMission(null);
+				setVehicleFence(null);
 			}
 			this.hadSession = true;
 			// Bid to be the single active commander as soon as the socket is up, so
@@ -227,6 +228,7 @@ export class TelemetryClient {
 			} else if (type === "fence") {
 				setFenceItems((msg as FenceMessage).items);
 				markPlanRead("fence");
+				setVehicleFence((msg as FenceMessage).items);
 			} else if (type === "rally") {
 				setRallyItems((msg as RallyMessage).items);
 				markPlanRead("rally");
@@ -645,7 +647,18 @@ export class TelemetryClient {
 				pending.delete(id);
 				reject(new Error("timeout"));
 			}, MISSION_TIMEOUT_MS);
-			pending.set(id, { resolve, reject, timer });
+			// An accepted fence push is the other moment the draft and the
+			// vehicle provably agree. From the items SENT, for the same reason as
+			// the mission: the handshake takes seconds over a radio and the
+			// operator may keep dragging vertices during it.
+			const sent = items.map((it) => ({ ...it }));
+			pending.set(id, {
+				resolve: (ack) => {
+					if (ack.ok && type === "fence_push") setVehicleFence(sent as FenceItem[]);
+					resolve(ack);
+				},
+				reject, timer,
+			});
 			this.send({ type, id, items });
 		});
 	}

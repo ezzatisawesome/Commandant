@@ -13,7 +13,7 @@ import {
 	groupAgeMs,
 } from "@/lib/flightGeometry";
 import { $hudFrame } from "@/stores/aircraft.store";
-import { $fenceItems } from "@/stores/geo.store";
+import { $vehicleFence } from "@/stores/geo.store";
 
 export interface DerivedState {
 	/** Height above ground, metres. null until terrain tiles cover the aircraft. */
@@ -121,7 +121,14 @@ export function recomputeDerived(): void {
 		clearance: clearanceBand(agl),
 		terrainM: terrainM ?? null,
 		wind, trackDeg, sun,
-		fence: fenceProximity(f.lat, f.lon, $fenceItems.get()),
+		// Against the fence the VEHICLE is enforcing, never the draft. This
+		// readout says BREACHED, and a draft the operator is still dragging is
+		// not what PX4 will act on: computing it from the draft turned the strip
+		// red for a boundary never uploaded, and green when the draft was dragged
+		// outward while the small one was still live on the aircraft. `null` when
+		// the vehicle's fence is unknown, which the strip shows as a dash rather
+		// than a confident distance.
+		fence: fenceProximity(f.lat, f.lon, $vehicleFence.get() ?? []),
 		targetDistM: (isNum(f.targetLat) && isNum(f.targetLon))
 			? distanceM(f.lat, f.lon, f.targetLat, f.targetLon)
 			: null,
@@ -130,6 +137,6 @@ export function recomputeDerived(): void {
 
 /** Wire the recompute to its inputs. Returns an unsubscribe. */
 export function startDerived(): () => void {
-	const offs = [$hudFrame.listen(recomputeDerived), $fenceItems.listen(recomputeDerived)];
+	const offs = [$hudFrame.listen(recomputeDerived), $vehicleFence.listen(recomputeDerived)];
 	return () => offs.forEach((o) => o());
 }

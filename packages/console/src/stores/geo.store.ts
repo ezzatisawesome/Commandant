@@ -8,6 +8,24 @@ import type { FenceItem, FenceKind, RallyItem } from "@/types/app";
 // EDITABLE sets the operator authors; they're pushed via fence_push / rally_push
 // and replaced wholesale by a `fence` / `rally` reply after a pull.
 export const $fenceItems = atom<FenceItem[]>([]);
+
+/** The fence the VEHICLE is enforcing, as distinct from the draft above.
+ *
+ *  `null` means unknown — nothing read back or uploaded this session.
+ *
+ *  This matters more than the mission equivalent, because the fence drives a
+ *  live readout that says BREACHED. Computed against the draft, as it was, the
+ *  strip turned red for an aircraft outside a boundary the operator had just
+ *  drawn and never uploaded — and, far worse, went GREEN when the operator
+ *  dragged the draft outward, while PX4 went on enforcing the small one and
+ *  acting on GF_ACTION. A reassuring number for an aircraft about to be stopped
+ *  mid-mission is the worst direction for this particular error. */
+export const $vehicleFence = atom<FenceItem[] | null>(null);
+
+/** Record the fence the vehicle is enforcing: a readback, or an accepted push. */
+export function setVehicleFence(items: FenceItem[] | null) {
+	$vehicleFence.set(items === null ? null : items.map((it) => ({ ...it })));
+}
 export const $rallyItems = atom<RallyItem[]>([]);
 
 // Geo authoring mode (separate from mission edit so the two don't fight over

@@ -200,7 +200,14 @@ export function TelemetryStrip() {
 							: `${d.fence.violated ? "OUT " : ""}${d.fence.distanceM.toFixed(0)}`,
 						tone: !d.fence ? "text-white/40" : d.fence.violated ? "text-red-400"
 							: d.fence.distanceM < 100 ? "text-amber-400" : "text-emerald-400",
-						title: d.fence ? `${d.fence.kind}${d.fence.violated ? " — BREACHED" : ""}` : "no fence",
+						// A dash here means "the vehicle's fence is not known" — nothing
+						// read back or uploaded this session — not "there is no fence".
+						// The draft the operator is drawing is deliberately not used:
+						// PX4 enforces what it holds, and a green number computed from
+						// a draft dragged outward is the worst possible reassurance.
+						title: d.fence
+							? `${d.fence.kind}${d.fence.violated ? " — BREACHED" : ""}`
+							: "the vehicle's fence is not known — Download it in the geofence panel",
 					};
 			}
 		}
