@@ -9,6 +9,7 @@ than by the sim's own JSON feed.
 from __future__ import annotations
 
 import json
+import math
 import socket
 import threading
 import time
@@ -1778,3 +1779,68 @@ def test_h24_a_long_uptime_reboot_is_still_unambiguous():
     b, reboots = _boot_run([600_000, 200])
     assert len(reboots) == 1
     assert b.latest["bootMs"] == 200
+
+
+# --- H25: a flight command gs could prove was malformed went on the wire ---
+
+@pytest.mark.parametrize("args,why", [
+    ({}, "no coordinates at all"),
+    ({"lat": 37.4}, "a latitude and no longitude"),
+    ({"lat": 37.4, "lon": float("nan")}, "an explicit NaN longitude"),
+    ({"lat": 200.0, "lon": -122.1}, "a latitude off the planet"),
+    ({"lat": 37.4, "lon": -400.0}, "a longitude off the planet"),
+])
+def test_h25_reposition_without_a_destination_is_refused(args, why):
+    """"Fly to here" with no here. An omitted or non-finite coordinate went out
+    as a NaN position -- a fly-to command with no destination, sent to an
+    aircraft, for PX4 to interpret however it does. gs is the last thing between
+    a malformed request and the vehicle; it refuses what it can prove wrong
+    rather than forwarding it and hoping the autopilot objects."""
+    with pytest.raises(ValueError):
+        bridgemod.build_command("reposition", args)
+
+
+def test_h25_reposition_without_an_altitude_is_fine():
+    """A missing ALTITUDE is not the same thing: NaN there means "keep the
+    current one", which is a real and useful request."""
+    _, params = bridgemod.build_command("reposition", {"lat": 37.4, "lon": -122.1})
+    assert params[4] == pytest.approx(37.4) and params[5] == pytest.approx(-122.1)
+    assert math.isnan(params[6])
+
+
+@pytest.mark.parametrize("alt", [0, -50, float("nan"), float("inf")])
+def test_h25_a_takeoff_into_the_ground_is_refused(alt):
+    with pytest.raises(ValueError):
+        bridgemod.build_command("takeoff", {"alt": alt})
+
+
+def test_h25_an_ordinary_takeoff_still_works():
+    _, params = bridgemod.build_command("takeoff", {})
+    assert params[6] == pytest.approx(30.0)
+    _, params = bridgemod.build_command("takeoff", {"alt": 120})
+    assert params[6] == pytest.approx(120.0)
+
+
+def test_h25_a_refusal_reaches_the_client_as_an_ack(ports):
+    """And it must come back as a `not ok` ack under the command's own id, not
+    as a dropped message -- the operator clicked something."""
+    import asyncio
+    b = _bridge()
+
+    async def scenario():
+        b._loop = asyncio.get_running_loop()
+        sent = []
+
+        class WS:
+            async def send(self, payload):
+                sent.append(json.loads(payload))
+        ws = WS()
+        b._commander = ws
+        await b._on_ws_message(ws, json.dumps({"type": "command", "id": "r1",
+                                               "name": "reposition", "args": {}}))
+        assert sent and sent[-1]["type"] == "ack" and sent[-1]["id"] == "r1"
+        assert sent[-1]["ok"] is False
+        assert "lat" in sent[-1]["text"]
+        assert b._cmd_queue.empty(), "a malformed command still reached the mav thread"
+
+    asyncio.run(scenario())

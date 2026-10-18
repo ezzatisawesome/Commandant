@@ -81,6 +81,20 @@ fixed (`packages/gs/tests/test_flight_ready.py`, 14 tests).
    the EKF wind estimate are simply never populated, with no error. The dialect
    is now rebound explicitly.
 
+**A flight command gs could prove was malformed (2026-10-18):** `reposition`
+built its MAVLink params from `args.get("lat", NaN)`, so an omitted or
+non-finite coordinate went out as a NaN position — "fly to here" with no here,
+sent to an aircraft, for PX4 to interpret however it does. A `takeoff` with
+`alt: -50` went out as a takeoff to 50 m below the launch point. Both now raise,
+and the refusal reaches the operator as a `not ok` ack under the command's own
+id rather than a dropped message, because they clicked something.
+
+A missing *altitude* on a reposition is deliberately still fine: NaN there means
+"keep the current one", which is a real request. Same principle as the geofence
+check — gs is the last thing between a malformed request and the vehicle, so it
+refuses what it can prove wrong instead of forwarding it and hoping the
+autopilot objects.
+
 **A quick reboot froze the aircraft permanently (2026-10-18):** found by the
 day-in-the-life rehearsal the moment a reboot was injected into it — and
 pre-existing, not introduced by this pass.

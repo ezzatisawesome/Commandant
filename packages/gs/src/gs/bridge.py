@@ -374,6 +374,11 @@ def build_command(name: str, args: dict[str, Any]) -> tuple[int, list[float]]:
         return m.MAV_CMD_DO_SET_MODE, [float(m.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED), main, sub, 0, 0, 0, 0]
     if name == "takeoff":
         alt = float(args.get("alt", 30.0))
+        # A takeoff to zero or below is a takeoff into the ground. gs is the last
+        # thing between a malformed request and an aircraft, so it refuses what
+        # it can prove wrong rather than forwarding it and hoping PX4 objects.
+        if not math.isfinite(alt) or alt <= 0:
+            raise ValueError(f"takeoff needs a positive altitude, got {alt}")
         # Mirrors mavlink_io.takeoff: p1..p6 = 0/NaN, p7 = target alt.
         return m.MAV_CMD_NAV_TAKEOFF, [0, 0, 0, _NAN, _NAN, _NAN, alt]
     if name == "land":
@@ -390,6 +395,14 @@ def build_command(name: str, args: dict[str, Any]) -> tuple[int, list[float]]:
         lat = float(args.get("lat", _NAN))
         lon = float(args.get("lon", _NAN))
         alt = float(args.get("alt", _NAN))
+        # "Fly to here" with no here. An omitted or non-finite coordinate used to
+        # go out as a NaN position: a fly-to command with no destination, sent to
+        # an aircraft, for PX4 to interpret however it does. A missing altitude
+        # is fine and means "keep the current one"; a missing POSITION is not.
+        if not (math.isfinite(lat) and math.isfinite(lon)):
+            raise ValueError("reposition needs a finite lat and lon")
+        if not -90.0 <= lat <= 90.0 or not -180.0 <= lon <= 180.0:
+            raise ValueError(f"reposition lat/lon out of range: {lat}, {lon}")
         return m.MAV_CMD_DO_REPOSITION, [-1, 1, 0, _NAN, lat, lon, alt]
     raise ValueError(f"unknown command '{name}'")
 
