@@ -115,11 +115,11 @@ export default function ParamEditor() {
 				+ "● changed-from-default markers are off"));
 	}, [open]);
 
-	const rows = useMemo(() => {
+	const { rows, matched } = useMemo(() => {
 		const all = Object.values(params).sort((a, b) => a.name.localeCompare(b.name));
 		const q = query.trim().toUpperCase();
 		const filtered = q ? all.filter((p) => p.name.toUpperCase().includes(q)) : all;
-		return filtered.slice(0, ROW_CAP);
+		return { rows: filtered.slice(0, ROW_CAP), matched: filtered.length };
 	}, [params, query]);
 
 	const total = Object.keys(params).length;
@@ -325,6 +325,17 @@ export default function ParamEditor() {
 								);
 							})
 						)}
+						{/* The row cap is a render budget, not a statement about the
+						    vehicle -- and it said nothing, so the list simply stopped.
+						    Real PX4 has 720 parameters; sorted by name, a 400-row cap
+						    ends somewhere in the Ms, which hides every RTL_, SENS_ and
+						    SYS_ parameter from anyone who scrolls rather than searches.
+						    The header said "720 loaded" the whole time. */}
+						{matched > rows.length ? (
+							<div className="border-t border-white/10 py-2 text-center text-[10px] text-amber-300/70">
+								showing {rows.length} of {matched} — search to reach the rest
+							</div>
+						) : null}
 					</div>
 				</div>
 			)}

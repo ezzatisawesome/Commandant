@@ -464,7 +464,23 @@ export class TelemetryClient {
 
 	/** Request the full PX4 parameter list; results stream into the params store. */
 	refreshParams() {
-		clearParams();
+		// NOT clearParams(). gs dedupes a refresh request while one is already
+		// walking the list (deliberately -- two tabs pressing Refresh must not
+		// double the radio load), so clearing here threw away the values
+		// already received and left the table holding only the TAIL of the walk
+		// that was already running. gs then reported done, 720 of 720, and the
+		// editor showed a partial table with no error at all.
+		//
+		// MEASURED against real PX4, 720 parameters: a raw client that was
+		// listening from the start received all 721 names, while the browser's
+		// table held 121 on one run and 361 on another -- whatever happened to
+		// arrive after the clear.
+		//
+		// Overwriting in place is correct instead: a walk sends every
+		// parameter, so the table is complete when it finishes either way. A
+		// parameter that vanished from the vehicle would linger, which cannot
+		// happen without new firmware -- and swapping vehicles reconnects the
+		// socket, which does clear it.
 		this.send({ type: "param_refresh" });
 	}
 

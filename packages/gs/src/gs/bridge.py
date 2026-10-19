@@ -1386,7 +1386,16 @@ class Bridge:
                 break
             if item["kind"] == "refresh":
                 if self._param_refresh_active:
-                    continue  # two tabs clicking Refresh must not double the radio load
+                    # Two tabs clicking Refresh must not double the radio load.
+                    # Say so rather than dropping it in silence: a client that
+                    # hears nothing cannot tell its request from a lost one,
+                    # and the console used to clear its table on the strength
+                    # of a request that was never going to be acted on.
+                    self._broadcast({"type": "param_progress",
+                                     "received": len(self._param_received),
+                                     "count": self._param_count,
+                                     "note": "a refresh is already in progress"})
+                    continue
                 self._start_param_refresh(conn)
             elif item["kind"] == "set":
                 self._start_param_set(conn, item)
