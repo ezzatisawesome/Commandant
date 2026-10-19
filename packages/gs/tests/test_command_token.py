@@ -209,3 +209,30 @@ def test_a_viewer_cannot_hold_the_link_by_re_reading_parameters():
         await b._on_ws_message(pilot, json.dumps({"type": "param_refresh", "id": "p1"}))
         assert not b._param_queue.empty(), "the commander was rate-limited"
     _run(scenario())
+
+
+def test_the_token_rides_on_the_claim_and_nothing_else_needs_one():
+    """A deliberately small surface. Gating each privileged message would be a
+    list to keep in step with the code, and that list is wrong the first time
+    somebody adds a message. Authority is already the gate on everything, so
+    the secret sits on the one door into authority."""
+    import inspect
+
+    from gs.bridge import Bridge as B
+    src = inspect.getsource(B._on_ws_message)
+    # Exactly one token check, and it is in the claim branch.
+    assert src.count("_token_ok") == 1, "the token check spread beyond the claim"
+    claim_part = src[src.index('mtype == "claim"'):src.index('elif mtype == "command"')]
+    assert "_token_ok" in claim_part, "the token check is not on the claim"
+
+
+def test_an_empty_offer_is_not_equal_to_an_unset_token():
+    """`secrets.compare_digest("", "")` is True, so a hub that meant to require
+    a token and shipped an empty one would accept an empty offer. The guard is
+    that an empty CONFIGURED token means unsecured-by-configuration, which is
+    announced, and anything else demands a non-empty match."""
+    b = _b(command_token=TOKEN)
+    assert b._token_ok("") is False
+    assert b._token_ok(None) is False
+    assert b._token_ok(0) is False
+    assert b._token_ok(TOKEN) is True

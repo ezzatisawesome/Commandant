@@ -23,6 +23,7 @@ import type {
 import { pushFrame } from "@/stores/aircraft.store";
 import { $viewerStore } from "@/stores/cesium.store";
 import { $linkState, $commander } from "@/stores/link.store";
+import { $commandToken, $tokenRequired } from "@/stores/token.store";
 import { pushStatus } from "@/stores/statustext.store";
 /** MAV_SEVERITY_WARNING — what gs uses for its own operator notices. */
 const SEVERITY_WARNING = 4;
@@ -430,12 +431,23 @@ export class TelemetryClient {
 			this.pending.set(id, {
 				resolve: (ack) => {
 					$commander.set(ack.ok);
+					// gs says WHY it refused. "needs the hub token" is the one
+					// refusal the operator can act on, so it drives a prompt
+					// rather than the generic "another console holds command".
+					$tokenRequired.set(!ack.ok && /token/i.test(ack.text || ""));
 					resolve(ack.ok);
 				},
 				reject,
 				timer,
 			});
-			this.send(force ? { type: "claim", id, force: true } : { type: "claim", id });
+			// The token rides on the claim, which is the only message gs gates:
+			// every privileged path already refuses a non-commander, so one
+			// secret at the door covers commands, parameter writes and plan
+			// uploads. Empty is normal -- a hub running without a token accepts
+			// it and announces that it is doing so.
+			const token = $commandToken.get();
+			this.send({ type: "claim", id, ...(force ? { force: true } : {}),
+				...(token ? { token } : {}) });
 		});
 	}
 

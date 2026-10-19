@@ -18,6 +18,7 @@ const Aircraft = dynamic(() => import("@/components/flight/Aircraft"), { ssr: fa
 const CommandsPanel = dynamic(() => import("@/components/flight/CommandsPanel"), { ssr: false });
 const Hud = dynamic(() => import("@/components/flight/Hud"), { ssr: false });
 const Alerts = dynamic(() => import("@/components/flight/Alerts"), { ssr: false });
+const TokenPrompt = dynamic(() => import("@/components/flight/TokenPrompt"), { ssr: false });
 const TelemetryStrip = dynamic(() => import("@/components/flight/TelemetryStrip").then((m) => m.TelemetryStrip), { ssr: false });
 const ViewControls = dynamic(() => import("@/components/flight/ViewControls"), { ssr: false });
 const AirframeConfig = dynamic(() => import("@/components/flight/AirframeConfig"), { ssr: false });
@@ -127,6 +128,8 @@ export default function FlightPage() {
 			{/* Autopilot warnings and failsafes, in front of everything. The
 			    status log keeps the full record; this is what interrupts. */}
 			<ErrorBoundary name="Alerts"><Alerts /></ErrorBoundary>
+			{/* Only renders when gs has refused a claim for want of its token. */}
+			<ErrorBoundary name="TokenPrompt"><TokenPrompt /></ErrorBoundary>
 
 			<Dock items={items} />
 		</>
