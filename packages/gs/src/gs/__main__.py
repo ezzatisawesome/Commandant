@@ -144,6 +144,12 @@ def main() -> int:
                         help="ask a RUNNING daemon what it decided and exit. The "
                              "same snapshot the console can request, over the same "
                              "socket -- a field hub has ssh, not a browser.")
+    parser.add_argument("--command-token",
+                        default=os.environ.get("GS_COMMAND_TOKEN", ""),
+                        help="secret a console must present to take command "
+                             "authority; telemetry stays open to everyone. "
+                             "Empty means anyone who can reach the port can fly "
+                             "the aircraft (and gs says so at startup).")
     parser.add_argument("--log-dir", default=os.environ.get("GS_LOG_DIR", "logs"),
                         metavar="DIR",
                         help="where to write replayable .tlog flight logs "
@@ -178,6 +184,7 @@ def main() -> int:
         relay=relay,
         budget_bps=args.link_budget,
         log_dir=None if args.no_log else args.log_dir,
+        command_token=args.command_token,
     ).run()
     return 0
 

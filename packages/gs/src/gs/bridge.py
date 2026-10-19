@@ -22,6 +22,7 @@ import json
 import math
 import os
 import queue
+import secrets
 import socket
 import struct
 import threading
@@ -207,7 +208,27 @@ PARAM_BATCH_MAX = 64
 # flight. For 1000 params on that radio the trade is 10.7 s using 100 % of the
 # link (and commands failing) against 35.7 s using 30 % (and commands working),
 # which for a ground station is not a close call.
-PARAM_PACED_BELOW_BPS = 20_000   # narrower than this => pace, don't flood
+PARAM_PACED_BELOW_BPS = 20_000
+# How long a client that is NOT the commander must wait between full parameter
+# walks. A walk costs ~10 s of 30% of a 57600 link, which is fine occasionally
+# and is a standing tax if anyone may re-trigger it on completion. The commander
+# is exempt: after a vehicle reboot every parameter is stale and re-reading at
+# once is the right thing to do.
+PARAM_REFRESH_COOLDOWN_MS = 60_000
+# STATUSTEXT carries 50 characters; longer messages arrive as several chunks
+# sharing an `id` and numbered by `chunk_seq`. See _on_statustext.
+STATUSTEXT_CHUNK = 50
+# A run is flushed once it goes quiet, so a lost final chunk delays a message
+# instead of losing it. PX4 emits a run back-to-back, so this is generous.
+STATUSTEXT_RUN_TIMEOUT_MS = 2_000
+# A sender that never terminates a run must not grow memory. 20 chunks is 1000
+# characters, far past anything PX4 sends.
+STATUSTEXT_MAX_CHUNKS = 20
+# Re-asking for a stream that never comes: start at a second, double, stop at a
+# minute. See _request_message for what this costs on a radio when it does not
+# back off at all.
+STREAM_REQ_MIN_MS = 1_000
+STREAM_REQ_MAX_MS = 60_000   # narrower than this => pace, don't flood
 PARAM_LINK_SHARE = 0.30          # of the link a paced refresh may use
 PARAM_READ_BURST = 8             # max reads issued in one service tick
 PARAM_READ_RETRY_MS = 3000       # re-request an index that never answered
@@ -444,6 +465,15 @@ _POS_IGNORE_BITS = 0b11
 MSG_ACTUATOR_OUTPUT_STATUS = mavutil.mavlink.MAVLINK_MSG_ID_ACTUATOR_OUTPUT_STATUS  # 375
 MSG_POSITION_TARGET_GLOBAL_INT = mavutil.mavlink.MAVLINK_MSG_ID_POSITION_TARGET_GLOBAL_INT  # 87
 MSG_WIND_COV = mavutil.mavlink.MAVLINK_MSG_ID_WIND_COV  # 231 — EKF wind estimate
+# The extras gs asks for, by the type name a decoded message reports. Keyed by
+# name rather than by msg.get_msgId() so that anything shaped like a message
+# works here -- the id is a pymavlink implementation detail and the name is the
+# thing the rest of this file already dispatches on.
+_REQUESTED_IDS = {
+    "ACTUATOR_OUTPUT_STATUS": MSG_ACTUATOR_OUTPUT_STATUS,
+    "POSITION_TARGET_GLOBAL_INT": MSG_POSITION_TARGET_GLOBAL_INT,
+    "WIND_COV": MSG_WIND_COV,
+}
 
 
 def build_command(name: str, args: dict[str, Any]) -> tuple[int, list[float]]:
@@ -887,12 +917,17 @@ class Bridge:
         relay: Any = None,
         budget_bps: float | None = None,
         log_dir: str | None = None,
+        command_token: str = "",
     ) -> None:
         self.mavlink_endpoint = mavlink_endpoint
         self.json_port = json_port
         self.ws_host = ws_host
         self.ws_port = ws_port
         self.baud = baud
+        # The secret that separates watching from commanding. Empty means the
+        # old behaviour -- anyone who can reach the port can fly the aircraft --
+        # which is announced loudly at startup rather than left to be discovered.
+        self.command_token = command_token
         # Everything that crosses the link, written where someone can replay it.
         # None disables it; the daemon still flies, it just forgets.
         self.flight_log = FlightLog(log_dir) if log_dir else None
@@ -922,6 +957,8 @@ class Bridge:
         self._json_battery_at = 0
         self._last_target_at = 0
         self._last_req_at: dict[int, int] = {}
+        # Attempts per message id, for the backoff in _request_message.
+        self._req_tries: dict[int, int] = {}
 
         self._clients: set[Any] = set()
 
@@ -966,6 +1003,9 @@ class Bridge:
         self._reboot_pending: int | None = None
         # A backward uptime jump too small to be unambiguous, held for one frame
         # so the next one can say whether it was a reorder or a reboot.
+        self._param_refresh_opened_at = 0   # see PARAM_REFRESH_COOLDOWN_MS
+        # Partially-received chunked status messages, keyed by STATUSTEXT id.
+        self._text_runs: dict[int, dict[str, Any]] = {}
         self._boot_suspect: int | None = None
         # Where position frames arrive FROM, counted per peer. On a UDP or TCP
         # link pymavlink exposes the sender's address, and when two sources
@@ -1035,6 +1075,7 @@ class Bridge:
         self._storm_reported = False
         self._src_at.clear()        # the new link's streams have their own ages
         self._last_req_at.clear()   # re-request the extra streams on the new link
+        self._req_tries.clear()     # ...promptly, not at the backed-off rate
 
     def _resolve_endpoint(self) -> str | None:
         """The endpoint to open. With `auto`, probe for one; the result is
@@ -1156,6 +1197,10 @@ class Bridge:
                 self._service_params(conn)
                 self._service_misc(conn)
                 self._service_missions(conn)
+                # A chunked status message whose last chunk was lost would
+                # otherwise sit in the buffer forever; the operator gets what
+                # arrived, marked as partial. See _on_statustext.
+                self._expire_text_runs()
             except Exception:
                 self.handler_errors += 1
                 print(f"[gs] handler error (link kept alive):\n{traceback.format_exc()}")
@@ -1436,8 +1481,11 @@ class Bridge:
             self._report(cid, ok=False, result=-1, text="vehicle rebooted")
             aborted.append("command")
         # The extra streams have to be re-requested: the new instance is back on
-        # PX4's defaults and never saw our SET_MESSAGE_INTERVALs.
+        # PX4's defaults and never saw our SET_MESSAGE_INTERVALs. The backoff
+        # resets too, or a reboot after a long quiet spell would wait a minute
+        # before asking -- see _request_message.
         self._last_req_at.clear()
+        self._req_tries.clear()
         self._broadcast({"type": "vehicle_reboot", "bootMs": boot_ms, "t": _now_ms(),
                          "aborted": aborted})
 
@@ -1728,10 +1776,31 @@ class Bridge:
             self._do_broadcast(dumps(payload))
 
     def _request_message(self, conn: Any, tsys: int, tcomp: int, msg_id: int) -> None:
+        """Ask the vehicle to stream a message, with a backoff that matters.
+
+        The caller re-asks on every heartbeat for anything it has not seen, and
+        this was throttled to once a second per message with no backoff and no
+        end. That is fine when the stream eventually arrives, which is what the
+        stand-in autopilot always did. Real PX4 ACCEPTS the request and then
+        sends nothing, forever, whenever the vehicle has no such data -- no
+        airspeed sensor means no WIND_COV, no configured actuators means no
+        ACTUATOR_OUTPUT_STATUS, no active setpoint means no POSITION_TARGET.
+        MEASURED against real PX4: 66 COMMAND_ACKs in 25 s, all ACCEPTED, for
+        three streams that never came.
+
+        On a 57600 radio that standing conversation costs 135 B/s up and 66 B/s
+        down -- 5.8% of a half-duplex link's air time, permanently, to re-ask a
+        question that was answered the first time. Backing off to a minute
+        makes it 1/60th of that while still recovering from a genuinely lost
+        request. The watermarks reset on a link reopen and on a vehicle lock,
+        so a reboot or a swapped radio starts asking promptly again."""
         now = _mono_ms()
-        if now - self._last_req_at.get(msg_id, 0) < 1000:  # throttle retries per msg
+        tries = self._req_tries.get(msg_id, 0)
+        wait = min(STREAM_REQ_MIN_MS * (2 ** tries), STREAM_REQ_MAX_MS)
+        if now - self._last_req_at.get(msg_id, 0) < wait:
             return
         self._last_req_at[msg_id] = now
+        self._req_tries[msg_id] = tries + 1
         # Rate from the link budget, not a constant. There are three of these
         # extra streams, so each gets a third of gs's slice.
         hz = budgeted_hz(self.link_budget_bps, msg_id, shares=3)
@@ -1757,6 +1826,11 @@ class Bridge:
                 print(f"[gs] vehicle locked: sysid {src[0]} compid {src[1]}")
         if self._vehicle is not None and src != self._vehicle:
             return  # a companion / second autopilot: never let it overwrite our state
+        # A stream that arrives has answered the question, so its backoff starts
+        # over: if it later stops and has to be asked for again, that ask should
+        # be prompt rather than inheriting the patience built up last time.
+        if self._req_tries:
+            self._req_tries.pop(_REQUESTED_IDS.get(t, -1), None)
         # The lock guards `latest` and nothing else. It deliberately does NOT span
         # a MAVLink transmit: on the hub the link is a serial port, and a write
         # that blocks while the radio's buffer drains would hold this lock for
@@ -1999,6 +2073,85 @@ class Bridge:
             m = mavutil.mavlink
             L["failsafe"] = msg.system_status in (m.MAV_STATE_CRITICAL, m.MAV_STATE_EMERGENCY)
 
+    def _on_statustext(self, msg: Any) -> None:
+        """Reassemble PX4's chunked status messages.
+
+        MAVLink 2 STATUSTEXT carries 50 characters. Anything longer is split
+        across several messages sharing an `id`, numbered by `chunk_seq`, and
+        the receiver is expected to join them. gs ignored both fields, so the
+        most important messages the autopilot sends -- the long ones, which are
+        the ones that explain a refusal -- reached the operator broken mid-word
+        across two log lines. MEASURED against real PX4: declining to arm sends
+        id=15 chunk_seq=0 "Arming denied: Resolve system health failures firs"
+        and id=15 chunk_seq=1 "t". The stand-in autopilot only ever sent short
+        strings, so five passes of testing could not see this.
+
+        id == 0 means "not chunked" and is the common case, so it costs nothing.
+
+        On a radio, chunks get lost and reordered, which decides the rest:
+        - chunks are held by seq and joined in order, so a reordered pair is
+          still correct;
+        - a run is flushed on its terminating chunk (a NUL, or short of the full
+          50 characters), which is how the sender marks the end;
+        - and a run with a hole in it is flushed anyway once it goes quiet,
+          marked with an ellipsis. A dropped middle chunk must not swallow the
+          whole message: a partial refusal reason beats silence, as long as the
+          operator can see it is partial."""
+        raw = msg.text
+        text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+        sev = msg.severity
+        sid = int(getattr(msg, "id", 0) or 0)
+        seq = int(getattr(msg, "chunk_seq", 0) or 0)
+
+        if sid == 0:
+            self._emit_statustext(sev, text)
+            return
+
+        run = self._text_runs.get(sid)
+        if run is None or run["sev"] != sev:
+            # A run under this id whose SEVERITY changed is a different message
+            # reusing the id, so flush rather than splice two messages together.
+            # A different id is left alone: ids exist so concurrent runs can
+            # interleave, and flushing one because another began would truncate
+            # a message that was only interleaved. Abandoned runs are the
+            # timeout's job.
+            if run is not None:
+                self._flush_text_run(sid)
+            run = self._text_runs[sid] = {"sev": sev, "chunks": {}, "at": _mono_ms()}
+        run["chunks"][seq] = text
+        run["at"] = _mono_ms()
+
+        terminated = "\x00" in text or len(text.rstrip("\x00")) < STATUSTEXT_CHUNK
+        if terminated or len(run["chunks"]) >= STATUSTEXT_MAX_CHUNKS:
+            self._flush_text_run(sid)
+
+    def _flush_text_run(self, sid: int) -> None:
+        run = self._text_runs.pop(sid, None)
+        if run is None:
+            return
+        seqs = sorted(run["chunks"])
+        joined = "".join(run["chunks"][i] for i in seqs)
+        # A gap means a chunk never arrived. Say so rather than silently
+        # presenting a sentence that is missing its middle.
+        gapped = seqs != list(range(len(seqs)))
+        if gapped:
+            joined += " \u2026(incomplete)"
+        self._emit_statustext(run["sev"], joined)
+
+    def _expire_text_runs(self) -> None:
+        """Flush runs whose remaining chunks never came. Called from the service
+        tick, so a lost final chunk delays a message rather than losing it."""
+        now = _mono_ms()
+        for sid in [k for k, r in self._text_runs.items()
+                    if now - r["at"] >= STATUSTEXT_RUN_TIMEOUT_MS]:
+            self._flush_text_run(sid)
+
+    def _emit_statustext(self, severity: int, text: str) -> None:
+        # `now` in the caller is monotonic (a duration clock); a statustext
+        # carries a timestamp an operator reads, so stamp it off the wall clock.
+        self._broadcast({"type": "statustext", "severity": severity,
+                         "text": text.rstrip("\x00").strip(), "t": _now_ms()})
+
     def _on_mav_protocol(self, conn: Any, now: int, t: str, msg: Any) -> None:
         """The protocol state machines (statustext, param, command-ack, mission)
         and every message request. Called with the lock RELEASED, because all of
@@ -2007,12 +2160,7 @@ class Bridge:
             self._on_vehicle_reboot(now, self._reboot_pending)
             self._reboot_pending = None
         if t == "STATUSTEXT":
-            raw = msg.text
-            text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
-            # `now` here is monotonic (a duration clock); a statustext carries a
-            # timestamp an operator reads, so stamp it off the wall clock.
-            self._broadcast({"type": "statustext", "severity": msg.severity,
-                             "text": text.rstrip("\x00").strip(), "t": _now_ms()})
+            self._on_statustext(msg)
 
         elif t == "PARAM_VALUE":
             pid = msg.param_id
@@ -2246,6 +2394,8 @@ class Bridge:
                           else {"enabled": False, "path": None}),
             # --- what it is in the middle of ------------------------------
             "commanderHeld": self._commander is not None,
+            # Whether a secret is required, never the secret itself.
+            "commandTokenRequired": bool(self.command_token),
             "clients": len(self._clients),
             "pendingCommands": len(self._pending),
             "pendingParamSets": len(self._param_set_pending),
@@ -2298,6 +2448,16 @@ class Bridge:
         except Exception:
             pass  # client went away mid-send; broadcast loop / finally will clean up
 
+    def _token_ok(self, offered: Any) -> bool:
+        """Constant-time comparison, as the relay already does for its own
+        token: a timing-variable compare leaks the secret to anyone who can
+        reach the port, which on a field hotspot is everyone nearby."""
+        if not self.command_token:
+            return True                 # unsecured by configuration, not by accident
+        if not isinstance(offered, str) or not offered:
+            return False
+        return secrets.compare_digest(offered, self.command_token)
+
     async def _on_ws_message(self, ws: Any, raw: Any) -> None:
         try:
             msg = json.loads(raw)
@@ -2330,6 +2490,22 @@ class Bridge:
             # rejected.
             cid = msg.get("id")
             force = bool(msg.get("force", False))
+            # Authority is gated HERE and nowhere else, because this is the only
+            # door to it: every privileged path below already refuses anyone who
+            # is not the commander, so a token checked once at the claim covers
+            # commands, parameter writes, mission and fence uploads, and any
+            # future one, without a list to keep in step.
+            #
+            # Telemetry is deliberately NOT gated. The hub's premise is "join the
+            # WiFi, open the page", and someone watching the aircraft fly is the
+            # point of it; what needs a secret is arming one.
+            if not self._token_ok(msg.get("token")):
+                print("[gs] refused a command claim with a bad or missing token")
+                if cid is not None:
+                    await self._send(ws, {
+                        "type": "ack", "id": cid, "ok": False, "result": -1,
+                        "text": "command authority needs the hub token"})
+                return
             if self._commander is None or self._commander is ws:
                 self._commander = ws
                 if cid is not None:
@@ -2381,7 +2557,32 @@ class Bridge:
             await self._send(ws, self.status())
 
         elif mtype == "param_refresh":
-            # Read-only; any client may request the param set.
+            # Deliberately open to any client, and pinned as such by H22: a
+            # refresh is a read, a viewer wanting to see the param table takes
+            # nothing from the operator, concurrent requests dedupe, and the
+            # walk is paced to a share of the link. Tightening it to the
+            # commander was my first instinct and it was wrong -- that test
+            # exists to catch exactly that reflex.
+            #
+            # What the dedupe does NOT cover is REPETITION. A walk is ~10 s on a
+            # 57600 radio, and a client that asks again the moment each one
+            # finishes holds 30% of the operator's link for as long as it likes,
+            # with nothing the operator can do about it. So non-commanders are
+            # rate-limited between walks; the commander never is, because a
+            # vehicle reboot clears every parameter and re-reading immediately
+            # is the correct response to it.
+            cid = msg.get("id")
+            if ws is not self._commander:
+                since = _mono_ms() - self._param_refresh_opened_at
+                if self._param_refresh_opened_at and since < PARAM_REFRESH_COOLDOWN_MS:
+                    wait_s = (PARAM_REFRESH_COOLDOWN_MS - since) / 1000
+                    await self._send(ws, {
+                        "type": "param_progress", "id": cid, "received": 0,
+                        "count": 0, "done": True,
+                        "error": f"a refresh ran recently; a viewer may ask again "
+                                 f"in {wait_s:.0f}s (the link is shared)"})
+                    return
+                self._param_refresh_opened_at = _mono_ms()
             self._param_queue.put({"kind": "refresh"})
 
         elif mtype == "param_set":
@@ -2511,6 +2712,13 @@ class Bridge:
             ) from None
         try:
             print(f"[gs] websocket serving on ws://{self.ws_host}:{self.ws_port}")
+            if not self.command_token:
+                # Said every start, not once in a README. The hub runs an open
+                # WiFi on a flight line; without a token, anyone within range
+                # who loads the page can arm the aircraft.
+                print("[gs] NO COMMAND TOKEN SET — anyone who can reach this "
+                      "port can take command and arm the vehicle. Set "
+                      "GS_COMMAND_TOKEN (or --command-token) to require one.")
             interval = 1.0 / BROADCAST_HZ
             while True:
                 await asyncio.sleep(interval)
