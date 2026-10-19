@@ -472,6 +472,24 @@ MSG_WIND_COV = mavutil.mavlink.MAVLINK_MSG_ID_WIND_COV  # 231 — EKF wind estim
 # name rather than by msg.get_msgId() so that anything shaped like a message
 # works here -- the id is a pymavlink implementation detail and the name is the
 # thing the rest of this file already dispatches on.
+# Messages real PX4 streams to a GCS by default that gs never reads. MEASURED
+# against the firmware over a fat pipe: 8595 messages in 30 s, of which these
+# four were 4290 -- half the traffic decoded and discarded, at 189 us each.
+# ATTITUDE_QUATERNION duplicates ATTITUDE, which gs does use; the other three
+# are estimator and IMU detail for a simulator or a companion computer, not for
+# a ground station.
+#
+# Trimming them is per-CHANNEL in PX4, so it changes what OUR link carries and
+# nothing else: a companion on another channel keeps its streams. On a radio
+# PX4 is already pacing itself and these mostly will not appear; the case this
+# is for is USB and HITL, where bandwidth is free and the hub's CPU is not.
+_TRIMMABLE = {
+    "HIGHRES_IMU": mavutil.mavlink.MAVLINK_MSG_ID_HIGHRES_IMU,
+    "ATTITUDE_QUATERNION": mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE_QUATERNION,
+    "LOCAL_POSITION_NED": mavutil.mavlink.MAVLINK_MSG_ID_LOCAL_POSITION_NED,
+    "ODOMETRY": mavutil.mavlink.MAVLINK_MSG_ID_ODOMETRY,
+}
+
 _REQUESTED_IDS = {
     "ACTUATOR_OUTPUT_STATUS": MSG_ACTUATOR_OUTPUT_STATUS,
     "POSITION_TARGET_GLOBAL_INT": MSG_POSITION_TARGET_GLOBAL_INT,
@@ -919,6 +937,7 @@ class Bridge:
         baud: int = DEFAULT_SERIAL_BAUD,
         relay: Any = None,
         budget_bps: float | None = None,
+        trim_streams: bool = True,
         log_dir: str | None = None,
         command_token: str = "",
     ) -> None:
@@ -931,6 +950,8 @@ class Bridge:
         # old behaviour -- anyone who can reach the port can fly the aircraft --
         # which is announced loudly at startup rather than left to be discovered.
         self.command_token = command_token
+        # Ask PX4 to stop sending what gs never reads. See _TRIMMABLE.
+        self.trim_streams = trim_streams
         # Everything that crosses the link, written where someone can replay it.
         # None disables it; the daemon still flies, it just forgets.
         self.flight_log = FlightLog(log_dir) if log_dir else None
@@ -964,6 +985,10 @@ class Bridge:
         self._req_tries: dict[int, int] = {}
         # name -> MAV_PARAM_TYPE, learned from the vehicle. See _start_param_set.
         self._param_types: dict[str, int] = {}
+        # Backoff state for asking PX4 to STOP sending something. Separate from
+        # _req_tries, whose reset-on-arrival rule is the opposite of this one's.
+        self._trim_at: dict[int, int] = {}
+        self._trim_tries: dict[int, int] = {}
 
         self._clients: set[Any] = set()
 
@@ -1082,6 +1107,8 @@ class Bridge:
         self._last_req_at.clear()   # re-request the extra streams on the new link
         self._req_tries.clear()     # ...promptly, not at the backed-off rate
         self._param_types.clear()   # a different airframe may type names differently
+        self._trim_at.clear()       # the new link is back on PX4's defaults
+        self._trim_tries.clear()
 
     def _resolve_endpoint(self) -> str | None:
         """The endpoint to open. With `auto`, probe for one; the result is
@@ -2199,6 +2226,39 @@ class Bridge:
         self._broadcast({"type": "statustext", "severity": severity,
                          "text": text.rstrip("\x00").strip(), "t": _now_ms()})
 
+    def _trim_stream(self, conn: Any, t: str) -> None:
+        """Ask the vehicle to stop sending a message gs never reads.
+
+        Triggered by RECEIVING one, which makes it self-limiting and
+        self-healing: if PX4 honours the request the message stops arriving and
+        we stop asking, and if the vehicle reboots onto its defaults the next
+        one that arrives asks again. Backs off the same way _request_message
+        does, so a firmware that ignores the request costs a message a minute
+        rather than one per arrival.
+
+        The flight log loses these messages, which is the real cost. PX4's own
+        onboard ulog keeps far more than this ever would, and on the radio link
+        this is written for they would not have been sent at all."""
+        msg_id = _TRIMMABLE.get(t)
+        if msg_id is None or not self.trim_streams or self._vehicle is None:
+            return
+        now = _mono_ms()
+        tries = self._trim_tries.get(msg_id, 0)
+        wait = min(STREAM_REQ_MIN_MS * (2 ** tries), STREAM_REQ_MAX_MS)
+        if now - self._trim_at.get(msg_id, 0) < wait:
+            return
+        self._trim_at[msg_id] = now
+        self._trim_tries[msg_id] = tries + 1
+        try:
+            conn.mav.command_long_send(
+                self._vehicle[0], self._vehicle[1],
+                mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
+                msg_id, -1,          # -1 = stop sending it on this channel
+                0, 0, 0, 0, 0,
+            )
+        except Exception as exc:
+            print(f"[gs] could not trim {t}: {exc}")
+
     def _on_mav_protocol(self, conn: Any, now: int, t: str, msg: Any) -> None:
         """The protocol state machines (statustext, param, command-ack, mission)
         and every message request. Called with the lock RELEASED, because all of
@@ -2206,6 +2266,9 @@ class Bridge:
         if self._reboot_pending is not None:
             self._on_vehicle_reboot(now, self._reboot_pending)
             self._reboot_pending = None
+        if t in _TRIMMABLE:
+            self._trim_stream(conn, t)
+            return      # nothing below reads these
         if t == "STATUSTEXT":
             self._on_statustext(msg)
 

@@ -144,6 +144,11 @@ def main() -> int:
                         help="ask a RUNNING daemon what it decided and exit. The "
                              "same snapshot the console can request, over the same "
                              "socket -- a field hub has ssh, not a browser.")
+    parser.add_argument("--keep-all-streams", action="store_true",
+                        help="do not ask the vehicle to stop sending messages "
+                             "gs never reads. Keeps them in the flight log, at "
+                             "about 12 kB/s and half the hub's decode CPU on a "
+                             "USB or HITL link.")
     parser.add_argument("--command-token",
                         default=os.environ.get("GS_COMMAND_TOKEN", ""),
                         help="secret a console must present to take command "
@@ -185,6 +190,7 @@ def main() -> int:
         budget_bps=args.link_budget,
         log_dir=None if args.no_log else args.log_dir,
         command_token=args.command_token,
+        trim_streams=not args.keep_all_streams,
     ).run()
     return 0
 

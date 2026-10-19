@@ -222,3 +222,75 @@ def test_the_position_handler_still_refuses_a_reordered_frame():
     # suspect and its position must not land.
     b._on_mav_state(0, "GLOBAL_POSITION_INT", Gpi(29_000, 99.9))
     assert b.latest["lat"] == 37.2, "a reordered frame moved the aircraft"
+
+
+# --- asking the vehicle to stop sending what gs never reads ------------------
+
+class _TrimConn:
+    def __init__(self):
+        self.sent = []
+        self.mav = self
+
+    def command_long_send(self, tsys, tcomp, cmd, conf, p1, p2, *rest):
+        self.sent.append((cmd, int(p1), int(p2)))
+
+
+def test_streams_gs_never_reads_are_turned_off_at_the_source():
+    """MEASURED against real PX4 over a fat pipe: 7986 messages in 30 s, of
+    which HIGHRES_IMU, ATTITUDE_QUATERNION, LOCAL_POSITION_NED and ODOMETRY
+    were 3984 -- half the traffic, decoded and discarded. 11.9 kB/s, 43 MB an
+    hour, and 5.5% of a core here (an estimated 28% of a Pi 4's).
+
+    Trimming them took the same rig to 131 msg/s and 3.4% of a core."""
+    from gs.bridge import STREAM_REQ_MIN_MS, _TRIMMABLE
+    import gs.bridge as mod
+
+    b, _ = _b()
+    b._vehicle = (1, 1)
+    conn = _TrimConn()
+    b._trim_stream(conn, "ODOMETRY")
+    assert len(conn.sent) == 1, "did not ask the vehicle to stop"
+    cmd, msg_id, interval = conn.sent[0]
+    assert cmd == 511, "not SET_MESSAGE_INTERVAL"
+    assert msg_id == _TRIMMABLE["ODOMETRY"]
+    assert interval == -1, "-1 is the value that means stop; anything else is a rate"
+
+
+def test_a_message_gs_does_read_is_never_trimmed():
+    b, _ = _b()
+    b._vehicle = (1, 1)
+    conn = _TrimConn()
+    for t in ("ATTITUDE", "GLOBAL_POSITION_INT", "SYS_STATUS", "STATUSTEXT"):
+        b._trim_stream(conn, t)
+    assert conn.sent == [], f"asked to stop a stream gs uses: {conn.sent}"
+
+
+def test_trimming_can_be_turned_off_for_a_fuller_log():
+    """The flight log loses what is trimmed, which is the real cost of this.
+    PX4's own onboard ulog keeps far more, but the choice belongs to whoever is
+    flying."""
+    b, _ = _b()
+    b._vehicle = (1, 1)
+    b.trim_streams = False
+    conn = _TrimConn()
+    b._trim_stream(conn, "ODOMETRY")
+    assert conn.sent == []
+
+
+def test_a_firmware_that_ignores_the_request_is_not_asked_forever():
+    """Triggered by RECEIVING the message, so a firmware that does not honour
+    it would otherwise be asked once per arrival -- 25 times a second for
+    ODOMETRY, which is worse than the problem."""
+    from gs.bridge import _TRIMMABLE
+    import gs.bridge as mod
+
+    b, _ = _b()
+    b._vehicle = (1, 1)
+    conn = _TrimConn()
+    now = 0
+    for _ in range(25 * 60):            # a minute of ODOMETRY at 25 Hz
+        now += 40
+        mod._mono_ms = lambda n=now: n
+        b._trim_stream(conn, "ODOMETRY")
+    assert len(conn.sent) < 12, f"asked {len(conn.sent)} times in a minute"
+    assert len(conn.sent) >= 1
