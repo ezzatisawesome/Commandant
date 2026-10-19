@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import { useStore } from "@nanostores/react";
+import { $mapImagery, $mapTerrain } from "@/stores/map.store";
 import { Viewer, Ion, createWorldTerrainAsync, ArcGisMapServerImageryProvider } from "cesium";
 
 import envs from "@/lib/envs";
@@ -83,6 +84,13 @@ export default function Globe() {
 		// destroyed before the promise settles (fast unmount / Strict Mode).
 		createWorldTerrainAsync().then((terrainProvider) => {
 			if (!viewer.isDestroyed()) viewer.terrainProvider = terrainProvider;
+			$mapTerrain.set("ok");
+		}).catch(() => {
+			// No internet, which on this hub is the NORMAL field condition.
+			// The viewer keeps its flat ellipsoid, which is a worse map and a
+			// perfectly good globe; what matters is that nobody is left
+			// guessing why the hills are missing.
+			$mapTerrain.set("unavailable");
 		});
 
 		// Swap the muddy default (Bing/Cesium World Imagery) for Esri World
@@ -94,6 +102,14 @@ export default function Globe() {
 			if (viewer.isDestroyed()) return;
 			viewer.imageryLayers.removeAll();
 			viewer.imageryLayers.addImageryProvider(esri);
+			$mapImagery.set("ok");
+		}).catch(() => {
+			// Unhandled before this, so an offline hub produced a blank sphere
+			// and a rejected promise nobody saw. The default Ion layer beneath
+			// needs the network too, so there is no imagery to fall back to --
+			// only the truth, said plainly, while the aircraft, mission and
+			// fence keep being drawn over it.
+			$mapImagery.set("unavailable");
 		});
 
 		// Quality settings, chosen rather than inherited. See lib/renderQuality.ts

@@ -19,6 +19,7 @@ const CommandsPanel = dynamic(() => import("@/components/flight/CommandsPanel"),
 const Hud = dynamic(() => import("@/components/flight/Hud"), { ssr: false });
 const Alerts = dynamic(() => import("@/components/flight/Alerts"), { ssr: false });
 const TokenPrompt = dynamic(() => import("@/components/flight/TokenPrompt"), { ssr: false });
+const MapStatus = dynamic(() => import("@/components/flight/MapStatus"), { ssr: false });
 const TelemetryStrip = dynamic(() => import("@/components/flight/TelemetryStrip").then((m) => m.TelemetryStrip), { ssr: false });
 const ViewControls = dynamic(() => import("@/components/flight/ViewControls"), { ssr: false });
 const AirframeConfig = dynamic(() => import("@/components/flight/AirframeConfig"), { ssr: false });
@@ -130,6 +131,8 @@ export default function FlightPage() {
 			<ErrorBoundary name="Alerts"><Alerts /></ErrorBoundary>
 			{/* Only renders when gs has refused a claim for want of its token. */}
 			<ErrorBoundary name="TokenPrompt"><TokenPrompt /></ErrorBoundary>
+			{/* Only renders when the map itself could not be fetched. */}
+			<ErrorBoundary name="MapStatus"><MapStatus /></ErrorBoundary>
 
 			<Dock items={items} />
 		</>
