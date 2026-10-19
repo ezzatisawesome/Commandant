@@ -142,6 +142,60 @@ fixed (`packages/gs/tests/test_flight_ready.py`, 14 tests).
    the EKF wind estimate are simply never populated, with no error. The dialect
    is now rebound explicitly.
 
+**Is the whole platform working? (2026-10-18, fourth pass)** Asked properly for
+the first time. **Not one of the 402 console tests renders a component**, so
+"is the UI functional" was a question nothing here could answer — and neither
+was "does a mission round-trip through the UI", because every mission test
+stopped at a store or at gs's socket. The one e2e script that existed covered
+the legacy JSON path and the Track button, printed its results, and was wired
+into nothing.
+
+`packages/console/scripts/e2e-functional.mjs` starts a real gs in front of the
+stand-in autopilot, serves the production build, and drives real Chromium
+through the operator's own sequence. **29 checks, all passing:**
+
+| | verified in a browser, end to end |
+|---|---|
+| **ingestion** | page renders with no errors, Cesium up with the aircraft drawn, live MAVLink telemetry on the HUD, link reads alive |
+| **mission planning** | panel opens, an unread plan says so, Download reads the vehicle, **globe clicks author waypoints**, Upload accepted, the draft then matches the vehicle, and a *cleared* draft refills from a re-Download |
+| **geofence** | vertices drawn by clicking, a 3-vertex polygon accepted, upload accepted, and the fence reads back carrying the count **gs derived** |
+| **mission execution** | Arm, MISSION → AUTO.MISSION, the current waypoint highlighted, RTL → AUTO.RTL, Disarm — each confirmed from the vehicle's own telemetry rather than from the click |
+
+So yes: planning, execution, ingestion, geofence and the UI all work, against a
+real daemon and a real browser. What that does *not* cover is real PX4 — the
+autopilot is still the stand-in, and `--attach` remains the way to close that.
+
+**Three faults it found, two of them mine:**
+
+1. **One globe click added a waypoint AND a fence vertex.** `$missionEdit` and
+   `$geoEdit` were independent, and the layers guard only on their own, neither
+   excluding the other. Both toggles are labelled "Edit map", in two tabs of the
+   same panel — so turning the second on without noticing the first is the
+   normal way to use it, and the operator draws a fence while silently growing
+   their mission, which is then no longer the plan the vehicle holds.
+   `setPlacingTarget()` makes it one globe, one click, one target.
+2. **Two sources sharing a sysid drove a reboot storm.** MEASURED: two clocks at
+   sysid 1, both *ascending*, produced **40 `vehicle_reboot` events from 80
+   frames** and zero genuine reboots — each aborting every in-flight handshake
+   and clearing the console's param table, so nothing ever completed. gs now
+   recognises the pattern and names it: *"two sources appear to share sysid 1."*
+   A real misconfiguration (two controllers at the factory id, or a router
+   merging streams), and one gs cannot fix but can diagnose.
+3. **My own H24 discriminator was too permissive in a vehicle's first seconds.**
+   Every test it applies is trivially satisfied at tiny uptimes, so loopback
+   jitter read as a reboot — three declared at 200, 400 and 600 ms. Below a 5 s
+   uptime a backward jump now resyncs the clock *without* announcing a reboot:
+   there is nothing to invalidate that early, so the announcement bought nothing
+   and cost a storm. The H24 test asserted that announcement; it now asserts the
+   property that mattered, which was never the announcement but the freeze.
+
+**And two false positives in the test itself, worth recording:** an assertion
+counting `/incl/i` in the page matched GeoPanel's *button label* and reported a
+fence drawn when nothing had been — so the checks now read the panels' own
+counts, which are data the component rendered, not chrome around it. And a
+truncated diagnostic made a button named `"MISSION ▲"` look like a closed panel,
+which sent me after the wrong cause twice.
+
 **The draft and the vehicle were one list (2026-10-18, third pass):** the
 console had one mission and one fence where it needed two — the operator's
 editable draft, and what the aircraft actually holds. Everything that described
