@@ -985,6 +985,80 @@ sim's JSON feed can no longer vouch for a dead autopilot, and every frame carrie
 `dataAgeMs`. The console shows a red `stale Ns` badge past 3 s. Before that fix
 the console reported `alive` for an hour while redrawing one frozen position.
 
+## Fifth pass — measured against real PX4, not against our own stand-in
+
+Everything before this was validated against `packages/gs/scripts/radio_soak.py`'s
+stand-in autopilot, which implements the protocol as we understand it — so it
+could only ever confirm our own reading. `packages/gs/scripts/px4_sitl.sh`
+builds the actual firmware (no simulator: `PX4_SIM_MODEL=none` boots it with no
+airframe and a complete MAVLink stack). Four faults surfaced within an hour, all
+of them invisible to the stand-in by construction.
+
+**Chunked status messages were never reassembled.** STATUSTEXT holds 50
+characters; longer messages arrive as several sharing an `id`, numbered by
+`chunk_seq`. Measured: refusing to arm sends `id=15 chunk_seq=0 "Arming denied:
+Resolve system health failures firs"` and `chunk_seq=1 "t"`. The operator saw
+the reason a command was refused broken mid-word across two log lines — and the
+longest messages are exactly the ones that explain a refusal.
+
+**Stream requests never backed off.** gs re-asked for any stream it had not seen
+on every heartbeat. Real PX4 *accepts* and then sends nothing when the vehicle
+has no such data — 66 COMMAND_ACKs in 25 s, all ACCEPTED, for three streams that
+never came. On a 57600 half-duplex radio: 201 B/s, 5.8% of air time,
+permanently. Now backs off to once a minute: 12 ACKs in 25 s, 3.3 B/s.
+
+**Reboot detection required a position.** The uptime clock was read from
+`GLOBAL_POSITION_INT` alone. Measured on a vehicle with no position estimate:
+22 `SYSTEM_TIME` and **zero** `GLOBAL_POSITION_INT` in 25 s. So on a bench,
+indoors, on a HITL rig, or before GPS lock, a reboot went undetected — the one
+event that invalidates every cached parameter. `SYSTEM_TIME` now feeds the same
+discriminator; verified by restarting real PX4 under a running gs.
+
+**Parameter writes vanished on a type mismatch.** PX4 silently ignores a
+PARAM_SET whose type does not match: no refusal, no ack. gs retried, timed out
+and reported `timeout`, pointing the operator at the radio. gs now remembers
+each name's type from the PARAM_VALUEs it already forwards.
+
+Half the link was being decoded and discarded — `HIGHRES_IMU`,
+`ATTITUDE_QUATERNION`, `LOCAL_POSITION_NED` and `ODOMETRY` were 3984 of 7986
+messages in 30 s (11.9 kB/s, 43 MB/hour, 5.5% of a core here and an estimated
+28% of a Pi 4's). gs now asks PX4 to stop sending them on its channel: 266 →
+131 msg/s, 5.54% → 3.37% of a core.
+
+Pointing a real browser at real PX4 then found the worst one. With 720
+parameters instead of the stand-in's 400, the table came up holding **121** of
+them — on another run 361 — while gs reported `done, 720 of 720` and the editor
+showed no error at all. `refreshParams()` cleared the table at the moment it
+*sent* the request, and gs dedupes a refresh while a walk is already running, so
+the table kept only whatever arrived after the clear. For a table you consult
+before flying, that is the worst available failure. After the fix: 721 in 706 ms.
+
+### Also closed this pass
+
+- **No flight log.** gs decoded every frame and dropped it, so a field anomaly
+  was unreproducible. Now a standard `.tlog` (8-byte big-endian microseconds +
+  the raw frame) that pymavlink, MAVExplorer and QGC read directly, written off
+  the link thread behind a bounded queue, rotated and capped. Measured over 15
+  minutes of real PX4: 131,154 records, none dropped, 24 MB/hour.
+- **No authentication on the gs WebSocket.** gs binds `0.0.0.0` and the hub runs
+  an open WiFi on a flight line, so anyone in range could claim authority and
+  arm the aircraft. Command authority now takes a token, gated at the claim —
+  the only door to authority. Telemetry stays open, because watching the
+  aircraft is what the hub is for.
+- **A blank globe with no internet.** Imagery (ArcGIS) and terrain (Ion) are
+  fetched over the WAN an isolated hub does not have, and neither promise had a
+  `.catch`. The console now says so, and says that the aircraft, mission and
+  geofence are still drawn to scale.
+
+### Still open
+
+- Nothing has flown. The firmware rig has no simulator, so there is no position,
+  no arming and no mission execution — `day_in_the_life.py --attach auto --net`
+  against a HITL rig or an airframe remains the unclosed gap.
+- The hub has never been provisioned on real hardware.
+- Phase 3 (SIL rehearsal gateway).
+- The flight log records MAVLink only; the JSON ingest path is not captured.
+
 ## Deferred (post-MVP)
 
 - Flight log download & playback / scrub — `LOG_REQUEST_*`.
