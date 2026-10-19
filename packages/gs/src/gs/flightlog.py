@@ -47,10 +47,27 @@ MAX_TOTAL_BYTES = 512 * 1024 * 1024
 # Bounded so a stalled disk cannot grow it without limit. At 100 Hz of traffic
 # this is ~80 seconds of slack, far more than any plausible flush.
 QUEUE_MAX = 8192
-# Buffered writes, flushed on a timer: flushing every record would wear the card
-# and stall the writer, never flushing loses the tail on a power cut -- which is
-# the failure a flight recorder exists for.
+# Two different timers, because they buy two different things and conflating
+# them is how the first version of this file justified the wrong one.
+#
+# flush() moves our userspace buffer into the OS page cache. It does NOT reach
+# the card, so it protects against gs DYING -- kill -9, OOM, a systemd restart,
+# an unhandled crash -- and not against power loss. At a 57600 radio's ~3.5 kB/s
+# the 64 kB buffer holds ~18 seconds of flight, which is how much a crash would
+# otherwise take with it. It also makes the file readable while gs is running.
 FLUSH_INTERVAL_S = 1.0
+# fsync() is the one that reaches the device, and it is the only thing that
+# survives the battery coming off -- which is the flight you most want the log
+# from. It costs real write amplification on an SD card, so it runs on a much
+# longer timer and bounds loss to that interval rather than eliminating it.
+# A filesystem's own commit (ext4 defaults to 5 s) already bounds this; doing it
+# here makes the bound ours rather than a mount option nobody checked. Set to 0
+# to leave durability entirely to the filesystem.
+#
+# NOT MEASURED ON A REAL PI SD CARD: the cost here is reasoned, not timed. It
+# runs on the writer thread behind the queue, so a slow fsync shows up as queue
+# depth and then as `dropped`, never as a stalled link.
+FSYNC_INTERVAL_S = 10.0
 # Below this the wall clock has obviously never been set (2020-01-01).
 CLOCK_SANE_EPOCH = 1_577_836_800
 
@@ -62,11 +79,14 @@ class FlightLog:
                  max_file_bytes: int = MAX_FILE_BYTES,
                  max_total_bytes: int = MAX_TOTAL_BYTES,
                  queue_max: int = QUEUE_MAX,
-                 flush_interval_s: float = FLUSH_INTERVAL_S) -> None:
+                 flush_interval_s: float = FLUSH_INTERVAL_S,
+                 fsync_interval_s: float = FSYNC_INTERVAL_S) -> None:
         self.dir = Path(directory)
         self.max_file_bytes = max_file_bytes
         self.max_total_bytes = max_total_bytes
         self.flush_interval_s = flush_interval_s
+        self.fsync_interval_s = fsync_interval_s
+        self.fsyncs = 0
         self._q: queue.Queue[tuple[int, bytes] | None] = queue.Queue(maxsize=queue_max)
         self._thread: threading.Thread | None = None
         self._fh = None
@@ -128,8 +148,22 @@ class FlightLog:
         self._close_file()
 
     # --- the writer thread's half -----------------------------------------
+    def _sync(self) -> None:
+        """Push the page cache to the device. Flush first: fsync does not know
+        about our userspace buffer."""
+        if self._fh is None or not self.fsync_interval_s:
+            return
+        if not self._safely(self._fh.flush):
+            return
+        try:
+            fd = self._fh.fileno()
+        except Exception:
+            return      # not a real file (a closed handle, or a test double)
+        if self._safely(os.fsync, fd):
+            self.fsyncs += 1
+
     def _run(self) -> None:
-        last_flush = time.monotonic()
+        last_flush = last_sync = time.monotonic()
         while True:
             try:
                 item = self._q.get(timeout=self.flush_interval_s)
@@ -138,6 +172,9 @@ class FlightLog:
                 if self._fh is not None:
                     self._safely(self._fh.flush)
                     last_flush = time.monotonic()
+                    if time.monotonic() - last_sync >= self.fsync_interval_s:
+                        self._sync()
+                        last_sync = time.monotonic()
                 continue
             if item is None:
                 break
@@ -154,8 +191,11 @@ class FlightLog:
             if time.monotonic() - last_flush >= self.flush_interval_s:
                 self._safely(self._fh.flush)
                 last_flush = time.monotonic()
+            if time.monotonic() - last_sync >= self.fsync_interval_s:
+                self._sync()
+                last_sync = time.monotonic()
         if self._fh is not None:
-            self._safely(self._fh.flush)
+            self._sync()
 
     def _open_file(self) -> None:
         if self.clock_was_set:
@@ -187,7 +227,7 @@ class FlightLog:
 
     def _close_file(self) -> None:
         if self._fh is not None:
-            self._safely(self._fh.flush)
+            self._sync()
             self._safely(self._fh.close)
             self._fh = None
 
@@ -243,6 +283,7 @@ class FlightLog:
             "dropped": self.dropped,
             "bytes": self.bytes_written,
             "rotations": self.rotations,
+            "fsyncs": self.fsyncs,
             "pruned": self.pruned,
             "clockWasSet": self.clock_was_set,
             "error": self.error,

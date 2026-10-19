@@ -113,6 +113,7 @@ def test_a_disk_error_stops_logging_without_stopping_gs(tmp_path):
         def flush(self): pass
         def tell(self): return 0
         def close(self): pass
+        def fileno(self): raise OSError("No space left on device")
 
     log._fh = Exploding()
     log.write(_frames(1)[0])
@@ -147,4 +148,71 @@ def test_an_unset_clock_is_named_as_such_not_dated_1970(monkeypatch, tmp_path):
     log = FlightLog(tmp_path).start()
     assert not log.clock_was_set
     assert "nortc" in log.path.name, log.path.name
+    log.stop()
+
+
+def test_the_log_is_pushed_to_the_device_not_just_to_the_page_cache(tmp_path):
+    """flush() moves our buffer into the OS; only fsync() reaches the card.
+    The first version of this file flushed on a timer and said in a comment
+    that this protected the tail "on a power cut" -- it did not, and the whole
+    point of a flight recorder is the flight where the power went away. The
+    distinction is invisible in the file's contents, so it is asserted on the
+    syscall."""
+    import gs.flightlog as fl
+
+    synced = []
+    real = fl.os.fsync
+    fl.os.fsync = lambda fd: (synced.append(fd), real(fd))[1]
+    try:
+        log = fl.FlightLog(tmp_path, flush_interval_s=0.01, fsync_interval_s=0.02)
+        log.start()
+        for f in _frames(10):
+            log.write(f)
+        time.sleep(0.2)
+        _drain(log)
+    finally:
+        fl.os.fsync = real
+    assert synced, "never reached the device"
+    assert log.fsyncs > 0
+
+
+def test_durability_can_be_left_to_the_filesystem(tmp_path):
+    """fsync costs write amplification on an SD card, and a filesystem's own
+    commit interval may already be the bound somebody wants. Zero means do not
+    do it -- and must not mean 'do it constantly'."""
+    import gs.flightlog as fl
+
+    synced = []
+    real = fl.os.fsync
+    fl.os.fsync = lambda fd: synced.append(fd)
+    try:
+        log = fl.FlightLog(tmp_path, flush_interval_s=0.01, fsync_interval_s=0)
+        log.start()
+        for f in _frames(10):
+            log.write(f)
+        time.sleep(0.15)
+        _drain(log)
+    finally:
+        fl.os.fsync = real
+    assert not synced, f"fsynced {len(synced)} times with the interval off"
+    # Still readable: turning off fsync must not turn off flushing.
+    assert sorted(tmp_path.glob("*.tlog"))[0].stat().st_size > 0
+
+
+def test_a_crash_loses_at_most_the_flush_interval_not_the_whole_buffer(tmp_path):
+    """The real justification for the 1 s flush, stated as a test: without it
+    the 64 kB buffer holds ~18 seconds of a 57600 link, and a kill -9 takes all
+    of it. Read the file back WITHOUT closing the log, which is what a reader
+    would see if gs were killed right now."""
+    log = FlightLog(tmp_path, flush_interval_s=0.01, fsync_interval_s=0)
+    log.start()
+    for f in _frames(30):
+        log.write(f)
+    time.sleep(0.2)                      # a flush interval or two, no stop()
+
+    conn = mavutil.mavlink_connection(str(log.path))
+    n = 0
+    while conn.recv_match(blocking=False) is not None:
+        n += 1
+    assert n >= 25, f"only {n} of 30 frames were readable before shutdown"
     log.stop()
