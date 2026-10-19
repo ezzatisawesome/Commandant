@@ -81,6 +81,39 @@ BOOT_WRAP_MARGIN_MS = 60_000   # "near" either end of the counter
 #     the stream ASCENDS FROM THE NEW LOW VALUE. So a candidate is dropped and
 #     remembered, and confirmed only when the next frame continues from it.
 BOOT_REBOOT_RATIO = 2          # candidate must be < last/2 to be a reboot at all
+# ...and the vehicle must have been up at least this long for a backward jump to
+# be a reboot candidate at all.
+#
+# Without this the discriminator is far too permissive in the first seconds of a
+# vehicle's life, because every test it applies is trivially satisfied there:
+# 200 ms against 600 ms "loses more than half the uptime", and any later frame
+# "ascends from the suspect". So ordinary jitter -- two interleaved clocks, or
+# UDP frames arriving out of order on loopback -- reads as a reboot. MEASURED in
+# the browser end-to-end test: reboots declared at uptimes 200, 400 and 600 ms,
+# immediately after the vehicle locked, which then tripped the shared-sysid storm
+# warning and left the console believing it did not know the vehicle's mission.
+#
+# Below the floor the frame is simply dropped as a reorder, which costs nothing:
+# a vehicle that really did restart two seconds in has nothing worth
+# invalidating yet, and `_last_pos_boot_ms` catches up on the next frame either
+# way.
+BOOT_REBOOT_MIN_UPTIME_MS = 5_000
+# A vehicle cannot reboot repeatedly in a few seconds, so a RUN of reboot
+# conclusions is not a vehicle rebooting -- it is TWO SOURCES sharing a sysid,
+# each with its own uptime clock, and gs reading the alternation as a clock that
+# keeps restarting. MEASURED: two stand-ins at sysid 1 with both clocks
+# ascending produced 40 `vehicle_reboot` events from 80 frames and zero genuine
+# reboots. Each one aborts every in-flight command, param set and mission
+# handshake and tells the console to discard its parameter table, so at that rate
+# nothing completes and the console is unusable.
+#
+# This happens for real: two flight controllers at the factory MAV_SYS_ID on one
+# bench, or mavlink-router merging two streams. It is a misconfiguration gs
+# cannot fix, and therefore one it has to NAME -- an operator can act on "two
+# vehicles are claiming sysid 1", and cannot act on a console that keeps
+# clearing itself.
+REBOOT_STORM_WINDOW_MS = 10_000
+REBOOT_STORM_MAX = 3
 # How long a MAVLink setpoint keeps ownership of the commanded-path overlay after
 # it last arrived. Within this window the sim's JSON target is ignored.
 #
@@ -928,6 +961,9 @@ class Bridge:
         # A backward uptime jump too small to be unambiguous, held for one frame
         # so the next one can say whether it was a reorder or a reboot.
         self._boot_suspect: int | None = None
+        # Recent reboot conclusions, for the storm check (see REBOOT_STORM_MAX).
+        self._reboot_times: list[int] = []
+        self._storm_reported = False
         # Per-message-group freshness; see _AGE_GROUPS. Mav-thread writes under
         # the lock, the broadcast loop reads it there too.
         self._src_at: dict[str, int] = {}
@@ -977,6 +1013,8 @@ class Bridge:
         self._vehicle = None
         self._last_pos_boot_ms = -1
         self._boot_suspect = None
+        self._reboot_times.clear()
+        self._storm_reported = False
         self._src_at.clear()        # the new link's streams have their own ages
         self._last_req_at.clear()   # re-request the extra streams on the new link
 
@@ -1285,6 +1323,26 @@ class Bridge:
         showing the pre-reboot values will show an edit as applied when the
         vehicle has dropped it. gs holds no param cache of its own, so this is
         broadcast rather than handled here."""
+        now_mono = _mono_ms()
+        self._reboot_times = [t for t in self._reboot_times
+                              if now_mono - t < REBOOT_STORM_WINDOW_MS]
+        self._reboot_times.append(now_mono)
+        if len(self._reboot_times) > REBOOT_STORM_MAX:
+            # Not a vehicle rebooting. See REBOOT_STORM_MAX.
+            if not self._storm_reported:
+                self._storm_reported = True
+                sysid = self._vehicle[0] if self._vehicle else "?"
+                text = (f"two sources appear to share sysid {sysid}: the uptime "
+                        f"clock keeps restarting, which one vehicle cannot do. "
+                        f"Look for a second autopilot on the link, or a router "
+                        f"merging two streams.")
+                print(f"[gs] {text}")
+                self._broadcast({"type": "statustext", "severity": 3,
+                                 "text": f"gs: {text}", "t": _now_ms()})
+            # Abort nothing: the aborting is what made this unusable, and there
+            # is no reboot to recover from.
+            return
+        self._storm_reported = False
         print(f"[gs] vehicle rebooted (uptime restarted at {boot_ms} ms)")
         aborted = []
         if self._param_refresh_active:
@@ -1683,6 +1741,21 @@ class Bridge:
                     # say which, so a candidate is held and confirmed only when
                     # the next frame continues from it. See BOOT_REBOOT_RATIO.
                     suspect = self._boot_suspect
+                    if last < BOOT_REBOOT_MIN_UPTIME_MS:
+                        # Only just booted: ACCEPT the frame and resync, without
+                        # declaring a reboot. Dropping it instead was the first
+                        # version of this guard, and it reintroduced the H24
+                        # freeze -- every post-jump frame dropped, the watermark
+                        # never advancing, the position stuck forever. Accepting
+                        # costs nothing here: a vehicle two seconds old has
+                        # nothing worth invalidating, so there is no reboot to
+                        # announce, only a clock to follow.
+                        self._boot_suspect = None
+                        self._last_pos_boot_ms = boot
+                        L["bootMs"] = boot
+                        L["lat"] = msg.lat / 1e7
+                        L["lon"] = msg.lon / 1e7
+                        return
                     if suspect is not None and suspect <= boot < suspect + REBOOT_GAP_MS:
                         rebooted = True            # ascending from the low value
                         self._boot_suspect = None

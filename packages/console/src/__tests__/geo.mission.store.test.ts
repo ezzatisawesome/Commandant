@@ -6,10 +6,11 @@ import {
 	$fenceItems, addFencePoint, fenceItemsForPush, clearFence, removeFenceItem,
 	setFenceItems, fenceGeometryProblem,
 	setVehicleFence, fenceMatchesVehicle, updateFenceItem,
+	$geoEdit, setPlacingTarget,
 } from "@/stores/geo.store";
 import {
 	$missionItems, addWaypoint, removeItem, reorderItem, clearMission, updateItem,
-	$planRead, markPlanRead, clearPlanRead,
+	$planRead, markPlanRead, clearPlanRead, $missionEdit,
 	setMissionItems, setVehicleMission, missionMatchesVehicle,
 } from "@/stores/mission.store";
 
@@ -228,5 +229,47 @@ describe("the drawn fence and the enforced fence", () => {
 		expect(fenceMatchesVehicle()).toBe(true);
 		updateFenceItem(0, { params: { radius: 900 } });
 		expect(fenceMatchesVehicle()).toBe(false);
+	});
+});
+
+describe("one globe, one click, one placing target", () => {
+	// $missionEdit and $geoEdit were independent, and the layers guard only on
+	// their own: MissionLayer checks $missionEdit, GeoLayer checks $geoEdit,
+	// neither excludes the other. With both on, ONE click on the globe added a
+	// waypoint AND a fence vertex — and both toggles are labelled "Edit map", in
+	// two tabs of the same panel, so turning the second on without noticing the
+	// first is the normal way to use it.
+	//
+	// Found by a browser end-to-end test, where a mission that had been uploaded
+	// and read back went on to diverge from the vehicle while the operator was
+	// drawing a fence, because every fence click was also appending a waypoint.
+	it("turning on fence placing turns off mission placing", () => {
+		setPlacingTarget("mission");
+		expect($missionEdit.get()).toBe(true);
+		expect($geoEdit.get()).toBe(false);
+		setPlacingTarget("fence");
+		expect($missionEdit.get()).toBe(false);
+		expect($geoEdit.get()).toBe(true);
+	});
+
+	it("and the other way round", () => {
+		setPlacingTarget("fence");
+		setPlacingTarget("mission");
+		expect($geoEdit.get()).toBe(false);
+		expect($missionEdit.get()).toBe(true);
+	});
+
+	it("null turns both off, for leaving edit mode entirely", () => {
+		setPlacingTarget("mission");
+		setPlacingTarget(null);
+		expect($missionEdit.get()).toBe(false);
+		expect($geoEdit.get()).toBe(false);
+	});
+
+	it("both can never be on at once, whatever the order", () => {
+		for (const t of ["mission", "fence", null, "fence", "mission"] as const) {
+			setPlacingTarget(t);
+			expect($missionEdit.get() && $geoEdit.get()).toBe(false);
+		}
 	});
 });

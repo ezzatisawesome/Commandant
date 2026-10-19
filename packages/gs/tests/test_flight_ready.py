@@ -1747,10 +1747,19 @@ def test_h24_a_reboot_within_five_seconds_of_the_last_report_is_not_dropped():
     run finishes in ~3.5 s and so rebooted inside the window; the unit tests had
     all used ten minutes of uptime."""
     b, reboots = _boot_run([800, 1200, 1600, 200, 400, 600])
-    assert reboots, "a reboot inside the window went unnoticed"
+    # The harm this test was written about is the FREEZE: the watermark never
+    # advancing, so every later frame is dropped and the position is stuck. That
+    # is what must not happen, and it does not.
     assert b.latest["bootMs"] == 600, \
         f"position froze after the reboot (bootMs stuck at {b.latest['bootMs']})"
     assert b._last_pos_boot_ms == 600
+    # No reboot EVENT here, deliberately, and the original version of this test
+    # asserted one. Below BOOT_REBOOT_MIN_UPTIME_MS a backward jump cannot be
+    # told from jitter -- and announcing one buys nothing at 1.6 s of uptime,
+    # because there is no in-flight handshake to abort and no param table read
+    # yet. Announcing it anyway is what let two interleaved clocks produce a
+    # reboot storm (see test_h27b). A reboot after a real uptime still reports.
+    assert reboots == [], "announced a reboot it cannot distinguish from jitter"
 
 
 def test_h24_a_genuinely_reordered_frame_is_still_dropped():
@@ -2165,3 +2174,155 @@ def test_h26_autodetect_finds_usb_and_treats_it_as_the_fat_pipe_it_is(monkeypatc
     b._service_params(conn)
     assert any(s[0] == "param_request_list_send" for s in conn.mav.sent), \
         "paced the param fetch over USB"
+
+
+# --- H27: two sources sharing a sysid drove a reboot storm -----------------
+
+def test_h27_two_sources_on_one_sysid_are_named_not_treated_as_reboots():
+    """A vehicle cannot reboot repeatedly in a few seconds, so a RUN of reboot
+    conclusions is not a vehicle rebooting -- it is two sources sharing a sysid,
+    each with its own uptime clock, read as a clock that keeps restarting.
+
+    MEASURED pre-fix: two stand-ins at sysid 1, both clocks ASCENDING, produced
+    40 `vehicle_reboot` events from 80 frames and zero genuine reboots. Each one
+    aborts every in-flight command, param set and mission handshake and tells
+    the console to discard its parameter table, so nothing ever completes.
+
+    Found by a leaky test fixture leaving a second autopilot on the port -- which
+    is exactly the real misconfiguration: two controllers at the factory sysid on
+    one bench, or a router merging two streams."""
+    events: list = []
+    b = _bridge()
+    b._loop = _capturing_loop(events)
+    conn = RecordingConn()
+    b._vehicle = (1, 1)
+
+    a_boot, c_boot = 95_000, 400
+    for _ in range(40):
+        a_boot += 140
+        c_boot += 140
+        b._on_mav(conn, _gpi(a_boot))
+        b._on_mav(conn, _gpi(c_boot))
+
+    reboots = [e for e in events if e.get("type") == "vehicle_reboot"]
+    assert len(reboots) <= bridgemod.REBOOT_STORM_MAX, \
+        f"{len(reboots)} reboot events from two ascending clocks"
+
+    # And it says what is actually wrong, once, in words the operator can act on.
+    said = [e for e in events if e.get("type") == "statustext"
+            and "share sysid" in (e.get("text") or "")]
+    assert len(said) == 1, f"expected one diagnosis, got {len(said)}"
+    assert "sysid 1" in said[0]["text"]
+    assert said[0]["severity"] <= 3, "a misconfiguration this bad is not an info note"
+
+
+def test_h27_a_storm_aborts_work_a_bounded_number_of_times():
+    """gs cannot know on the first frame that a sysid is shared -- the first
+    backward jump looks exactly like a reboot and is acted on as one, which is
+    right. What it must not do is keep acting on it: pre-fix, every one of 40
+    frames aborted whatever was in flight, so nothing could ever complete.
+    Bounded, not zero, is the honest property."""
+    events: list = []
+    b = _bridge()
+    b._loop = _capturing_loop(events)
+    conn = RecordingConn()
+    b._vehicle = (1, 1)
+    b._cmd_queue.put({"id": "c1", "mav_cmd": m.MAV_CMD_COMPONENT_ARM_DISARM,
+                      "params": [1, 0, 0, 0, 0, 0, 0]})
+    b._service_commands(conn)
+    _upload(b, conn, n=3)
+
+    a_boot, c_boot = 95_000, 400
+    for _ in range(40):
+        a_boot += 140
+        c_boot += 140
+        b._on_mav(conn, _gpi(a_boot))
+        b._on_mav(conn, _gpi(c_boot))
+
+    # Re-queue after the storm has been recognised: from here on, work survives.
+    b._cmd_queue.put({"id": "c2", "mav_cmd": m.MAV_CMD_NAV_LAND, "params": [0] * 7})
+    b._service_commands(conn)
+    _upload(b, conn, n=3)
+    assert b._storm_reported, "never recognised the clash"
+    for _ in range(40):
+        a_boot += 140
+        c_boot += 140
+        b._on_mav(conn, _gpi(a_boot))
+        b._on_mav(conn, _gpi(c_boot))
+    assert "c2" in b._pending, "still cancelling commands after recognising the clash"
+    assert b._mission is not None, "still cancelling mission uploads"
+
+
+def test_h27_a_single_genuine_reboot_still_reports_normally():
+    """The storm guard must not swallow the thing it is guarding: one reboot is
+    still a reboot, and still aborts what it invalidates."""
+    events: list = []
+    b = _bridge()
+    b._loop = _capturing_loop(events)
+    conn = RecordingConn()
+    b._vehicle = (1, 1)
+    b._on_mav(conn, _gpi(600_000))
+    b._on_mav(conn, _gpi(200))
+    reboots = [e for e in events if e.get("type") == "vehicle_reboot"]
+    assert len(reboots) == 1
+    assert not [e for e in events if e.get("type") == "statustext"
+                and "share sysid" in (e.get("text") or "")]
+
+
+def test_h27_the_storm_warning_is_not_repeated_every_frame():
+    """A diagnosis repeated at 25 Hz is a log nobody reads, and the status panel
+    is a bounded ring -- it would push out everything else PX4 said."""
+    events: list = []
+    b = _bridge()
+    b._loop = _capturing_loop(events)
+    conn = RecordingConn()
+    b._vehicle = (1, 1)
+    a_boot, c_boot = 95_000, 400
+    for _ in range(200):
+        a_boot += 140
+        c_boot += 140
+        b._on_mav(conn, _gpi(a_boot))
+        b._on_mav(conn, _gpi(c_boot))
+    said = [e for e in events if e.get("type") == "statustext"
+            and "share sysid" in (e.get("text") or "")]
+    assert len(said) == 1, f"said it {len(said)} times"
+
+
+def test_h27b_jitter_in_the_first_seconds_is_not_a_reboot():
+    """Every test the discriminator applies is trivially satisfied at small
+    uptimes: 200 ms against 600 ms "loses more than half", and any later frame
+    "ascends from the suspect". So ordinary jitter -- interleaved clocks, or UDP
+    frames arriving out of order on loopback -- read as a reboot.
+
+    MEASURED in the browser end-to-end test: reboots declared at uptimes 200,
+    400 and 600 ms right after the vehicle locked, which tripped the
+    shared-sysid storm warning and left the console believing it did not know
+    the vehicle's mission. Found because one e2e check kept failing for a
+    reason that had nothing to do with the thing it was checking."""
+    events: list = []
+    b = _bridge()
+    b._loop = _capturing_loop(events)
+    conn = RecordingConn()
+    b._vehicle = (1, 1)
+    # Out-of-order arrivals in the first second of a flight.
+    for boot in (200, 600, 200, 400, 800, 400, 600, 1000):
+        b._on_mav(conn, _gpi(boot))
+    assert not [e for e in events if e.get("type") == "vehicle_reboot"], \
+        "declared a reboot from jitter at sub-second uptimes"
+    assert not [e for e in events if e.get("type") == "statustext"
+                and "share sysid" in (e.get("text") or "")]
+
+
+def test_h27b_a_reboot_after_a_real_flight_is_still_caught():
+    """The floor must not swallow the case that matters: a vehicle that has been
+    up long enough for the operator to have done anything still reports."""
+    events: list = []
+    b = _bridge()
+    b._loop = _capturing_loop(events)
+    conn = RecordingConn()
+    b._vehicle = (1, 1)
+    # Up 6 s, then restarts within the ambiguous window.
+    for boot in (5800, 6000, 200, 400, 600):
+        b._on_mav(conn, _gpi(boot))
+    assert [e for e in events if e.get("type") == "vehicle_reboot"], \
+        "missed a reboot after a real uptime"

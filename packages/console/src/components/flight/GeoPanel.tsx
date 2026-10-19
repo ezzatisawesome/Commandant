@@ -19,6 +19,7 @@ import {
 	clearRally,
 	$vehicleFence,
 	fenceMatchesVehicle,
+	setPlacingTarget,
 } from "@/stores/geo.store";
 import { $linkState, $commander } from "@/stores/link.store";
 import { telemetryClient } from "@/services/telemetry";
@@ -100,7 +101,7 @@ export default function GeoPanel() {
 					Geofence &amp; rally{count ? ` (${count})` : ""}
 				</span>
 				<Button size="sm" variant={edit ? "default" : "outline"}
-					onClick={() => $geoEdit.set(!edit)} className="h-6 px-2 text-[10px]"
+					onClick={() => setPlacingTarget(edit ? null : "fence")} className="h-6 px-2 text-[10px]"
 					title="Click the globe to place the selected kind; drag corners, edge midpoints and the circle rim to adjust">
 					{edit ? "Editing map" : "Edit map"}
 				</Button>

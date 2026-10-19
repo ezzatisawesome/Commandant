@@ -14,7 +14,9 @@ import {
 	updateItem,
 	clearMission,
 } from "@/stores/mission.store";
-import { $fenceItems } from "@/stores/geo.store";
+import { $fenceItems,
+	setPlacingTarget,
+} from "@/stores/geo.store";
 import { $planRead, $vehicleMission, missionMatchesVehicle } from "@/stores/mission.store";
 import { $linkState, $commander } from "@/stores/link.store";
 import { telemetryClient } from "@/services/telemetry";
@@ -130,7 +132,7 @@ export default function MissionPanel() {
 				</span>
 				<div className="flex items-center gap-2">
 					<Button size="sm" variant={edit ? "default" : "outline"}
-						onClick={() => $missionEdit.set(!edit)} className="h-6 px-2 text-[10px]"
+						onClick={() => setPlacingTarget(edit ? null : "mission")} className="h-6 px-2 text-[10px]"
 						title="Click the globe to add waypoints; drag ▲ to set altitude and the ring to set radius">
 						{edit ? "Editing map" : "Edit map"}
 					</Button>

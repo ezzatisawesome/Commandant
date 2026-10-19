@@ -1,6 +1,7 @@
 import { atom } from "nanostores";
 
 import type { FenceItem, FenceKind, RallyItem } from "@/types/app";
+import { $missionEdit } from "@/stores/mission.store";
 
 // Phase-4 extension: geofence + rally authoring, mirroring mission.store. Fences
 // and rally points ride the same MISSION_COUNT/REQUEST/ITEM/ACK handshake in gs,
@@ -51,6 +52,26 @@ export const $rallyItems = atom<RallyItem[]>([]);
 // Geo authoring mode (separate from mission edit so the two don't fight over
 // clicks) and which kind a globe click places while it's on.
 export const $geoEdit = atom<boolean>(false);
+
+/** Turn on exactly one globe-placing mode, or none.
+ *
+ *  `$missionEdit` and `$geoEdit` were independent, and the layers that consume
+ *  them guard only on their own: MissionLayer checks `$missionEdit`, GeoLayer
+ *  checks `$geoEdit`, neither excludes the other. So with both on, ONE click on
+ *  the globe added a waypoint AND a fence vertex — and both toggles are labelled
+ *  "Edit map", in two tabs of the same panel, so turning the second on without
+ *  noticing the first is the normal way to use it.
+ *
+ *  The operator placing a fence vertex has not asked for a waypoint. There is
+ *  one globe and one click, so there is one target.
+ *
+ *  (Found by a browser end-to-end test: a mission uploaded, read back and
+ *  matching went on to diverge from the vehicle while the operator was drawing
+ *  a fence, because each fence click was also appending a waypoint.) */
+export function setPlacingTarget(target: "mission" | "fence" | null) {
+	$missionEdit.set(target === "mission");
+	$geoEdit.set(target === "fence");
+}
 export const $geoPlaceKind = atom<FenceKind | "rally">("fence_inclusion");
 
 const POLYGON_KINDS: FenceKind[] = ["fence_inclusion", "fence_exclusion"];

@@ -103,10 +103,10 @@ split dev setup. The console↔gs message contract is `docs/ws-contract.md`.
 ## Tests
 
 ```sh
-cd packages/gs      && uv run pytest -q   # 150 — protocol state machines vs a fake PX4
+cd packages/gs      && uv run pytest -q   # 156 — protocol state machines vs a fake PX4
 cd packages/relay   && uv run pytest -q   # 17 — fan-out, slow-viewer shedding, read-only guarantee
 cd packages/cli     && uv run --group dev pytest -q   # 19 — hub installer, the systemd units, the lifecycle verbs
-cd packages/console && npm test           # 394 — stores, WS client, validation (vitest)
+cd packages/console && npm test           # 402 — stores, WS client, validation (vitest)
 cd packages/console && npm run typecheck
 ```
 
@@ -123,6 +123,18 @@ the gate was seven commands, and a seven-command gate gets run as two — and
 because checking a suite by grepping its summary line misses a suite that passes
 every test and still exits non-zero, which is how two unhandled rejections hid
 in the console suite until this script checked the exit code.
+
+**Does the UI actually work?** Not one unit test renders a component, so this
+was a question nothing in the repo could answer. `e2e-functional.mjs` starts a
+real gs, serves the production build, and drives real Chromium through the
+operator's own sequence — ingest telemetry, read the vehicle's plan back, author
+waypoints by clicking the globe, upload, do the same for a geofence, then arm
+and run the mission from the command bar. 29 checks; exits nonzero.
+
+```sh
+cd packages/console && node scripts/e2e-functional.mjs      # starts everything
+HEADED=1 node scripts/e2e-functional.mjs                    # watch it
+```
 
 Two things the unit suites cannot ask, both against a simulated autopilot behind
 a simulated telemetry radio (bandwidth, latency, packet loss) — which is where
