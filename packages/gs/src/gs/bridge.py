@@ -2520,6 +2520,11 @@ class Bridge:
             "commanderHeld": self._commander is not None,
             # Whether a secret is required, never the secret itself.
             "commandTokenRequired": bool(self.command_token),
+            # What gs asked the vehicle to STOP sending, so a missing message
+            # in a log is attributable rather than mysterious. See _TRIMMABLE.
+            "trimmedStreams": (sorted(k for k, v in _TRIMMABLE.items()
+                                      if v in self._trim_at)
+                               if self.trim_streams else []),
             "clients": len(self._clients),
             "pendingCommands": len(self._pending),
             "pendingParamSets": len(self._param_set_pending),

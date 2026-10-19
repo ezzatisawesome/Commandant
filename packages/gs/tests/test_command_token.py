@@ -236,3 +236,37 @@ def test_an_empty_offer_is_not_equal_to_an_unset_token():
     assert b._token_ok(None) is False
     assert b._token_ok(0) is False
     assert b._token_ok(TOKEN) is True
+
+
+def test_status_says_whether_a_token_is_required_without_leaking_it():
+    """`commandant status` is what somebody runs on a flight line when the
+    console will not let them arm. "command token: REQUIRED" answers that in
+    one line; the token itself must never be in a snapshot that is also
+    broadcast to every connected client."""
+    from gs.__main__ import _print_status
+    import io, contextlib
+
+    for token, expected in ((TOKEN, "REQUIRED"), ("", "not set")):
+        snap = _b(command_token=token).status()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            _print_status(snap)
+        out = buf.getvalue()
+        assert expected in out, out
+        assert TOKEN not in out, "printed the token itself"
+
+
+def test_status_names_the_streams_gs_asked_the_vehicle_to_stop():
+    """Otherwise someone hunts for a message in a flight log that gs
+    deliberately turned off, which is a long afternoon."""
+    from gs.bridge import _TRIMMABLE
+    from gs.__main__ import _print_status
+    import io, contextlib
+
+    b = _b()
+    b._trim_at[_TRIMMABLE["ODOMETRY"]] = 1
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        _print_status(b.status())
+    assert "ODOMETRY" in buf.getvalue()
+    assert "reads none of these" in buf.getvalue()

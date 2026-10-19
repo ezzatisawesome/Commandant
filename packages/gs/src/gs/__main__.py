@@ -70,6 +70,10 @@ def _print_status(s: dict) -> None:
     ages = s.get("streamAges") or {}
     if ages:
         line("streams", ", ".join(f"{g} {ms / 1000:.1f}s" for g, ms in sorted(ages.items())))
+    print("\n authority")
+    # The field question this answers: "why will it not let me arm?"
+    line("command token", "REQUIRED" if s.get("commandTokenRequired")
+         else "not set — anyone who can reach this port can command")
     print("\n clients")
     line("connected", s.get("clients"))
     line("commander held", s.get("commanderHeld"))
@@ -85,6 +89,11 @@ def _print_status(s: dict) -> None:
     print("\n quietly survived")
     line("link reopens", f"{reopens}" + ("" if not reopens else "   <-- the link has been dropping"))
     line("handler errors", f"{errors}" + ("" if not errors else "   <-- check the daemon log"))
+    trimmed = s.get("trimmedStreams")
+    if trimmed:
+        # Said plainly, because the alternative is someone hunting a message in
+        # a flight log that gs deliberately turned off.
+        line("trimmed streams", ", ".join(trimmed) + "  (gs reads none of these)")
     fl = s.get("flightLog") or {}
     print("\n flight log")
     if not fl.get("enabled") and fl.get("error"):
