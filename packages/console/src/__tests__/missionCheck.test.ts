@@ -372,3 +372,29 @@ describe("the MISSION button must reason about the plan the VEHICLE holds", () =
 		expect(missionBlockers([], needsLandingParam)).toEqual([]);
 	});
 });
+
+describe("a draft on screen with the vehicle's plan unknown", () => {
+	// After a reconnect, $vehicleMission is null — gs cannot report what it did
+	// not witness. The empty-state message cannot say so, because there IS a
+	// draft to show, so the operator saw their waypoints with nothing hinting
+	// that the aircraft may hold something else entirely.
+	//
+	// Pinned as the condition the panel renders on.
+	const wp = (seq: number) => ({ seq, kind: "waypoint" as const, lat: 37.4, lon: -122.1, alt: 80 });
+	const unknownClaim = (items: unknown[], vehicle: unknown | null) =>
+		items.length > 0 && vehicle === null;
+
+	it("is announced when there is a draft and no known vehicle plan", () => {
+		expect(unknownClaim([wp(0)], null)).toBe(true);
+	});
+
+	it("is not announced when the vehicle's plan IS known", () => {
+		// Then the divergence check does the talking instead, which is a
+		// different and more specific message.
+		expect(unknownClaim([wp(0)], [wp(0)])).toBe(false);
+	});
+
+	it("is not announced for an empty draft, which has its own message", () => {
+		expect(unknownClaim([], null)).toBe(false);
+	});
+});

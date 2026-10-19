@@ -199,6 +199,18 @@ export default function MissionPanel() {
 				    the globe is not what the aircraft will fly and its execution
 				    highlight has been dropped (it indexes the vehicle's mission,
 				    which is a different list now). */}
+				{/* The draft is on screen and what the vehicle holds is UNKNOWN —
+				    nothing read back or uploaded this session, or a reconnect
+				    since. The empty-state message below cannot say it, because
+				    there is a plan to show; without this the operator sees their
+				    waypoints and nothing hints that the aircraft may hold
+				    something else entirely. */}
+				{items.length > 0 && vehicleMission === null ? (
+					<div className="px-1 pb-1 text-[10px] text-white/45">
+						▲ the vehicle's plan is not known — this is your draft. Download to
+						see what it is flying, or Upload to make them the same.
+					</div>
+				) : null}
 				{items.length > 0 && vehicleMission !== null && !matches ? (
 					<div className="px-1 pb-1 text-[10px] text-amber-300">
 						▲ edited since the vehicle last took it — the globe is showing your

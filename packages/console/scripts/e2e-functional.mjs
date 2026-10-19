@@ -18,7 +18,7 @@
 // is deliberately indistinguishable from SITL/HITL/the airframe on the wire --
 // but the browser, the console build, gs and the whole protocol path are real.
 
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:net";
 import path from "node:path";
@@ -55,6 +55,17 @@ async function check(name, fn, note = () => "") {
  *  and matched GeoPanel's "incl poly" BUTTON LABEL, so "four fence vertices
  *  drawn" passed while nothing had been drawn at all. An assertion that can be
  *  satisfied by the chrome around the data is worse than no assertion. */
+// Open the mission/geofence dock panel, or leave it open if it already is.
+// The button is a TOGGLE and the panel stays open across sections, so a second
+// bare click closes it -- which reads in the DOM exactly like a panel that
+// never rendered the thing being asserted. One section-7 failure was that and
+// not the app.
+async function openMissionPanel() {
+	if (await page.getByText(/^Mission \(/).count()) return;
+	await page.getByRole("button", { name: /mission and geofence/i }).click();
+	await until(() => page.getByText(/^Mission \(/).count().then((n) => n > 0), { timeout: 10000 });
+}
+
 async function panelCount(re) {
 	const txt = await page.textContent("body");
 	const m = txt.match(re);
@@ -222,6 +233,10 @@ page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
 const pageErrors = [];
 page.on("pageerror", (e) => pageErrors.push(e.message));
 page.on("console", (m) => { if (m.type() === "error") pageErrors.push(m.text()); });
+// Name the resource. "Failed to load resource: 404" without the URL is a
+// finding nobody can act on.
+page.on("requestfailed", (r) => pageErrors.push(`requestfailed ${r.url()}`));
+page.on("response", (r) => { if (r.status() >= 400) pageErrors.push(`HTTP ${r.status()} ${r.url()}`); });
 
 await page.goto(`http://localhost:${webPort}/flight`, { waitUntil: "domcontentloaded" });
 
@@ -264,7 +279,7 @@ await check("the link reads alive, not connecting",
 console.log("\n mission planning");
 
 await check("the mission panel opens from the dock", async () => {
-	await page.getByRole("button", { name: /mission and geofence/i }).click();
+	await openMissionPanel();
 	return await until(async () => (await missionCount()) !== null
 		|| /not read from the vehicle yet/i.test(await page.textContent("body")),
 	{ timeout: 10000 });
@@ -488,7 +503,177 @@ await check("Disarm works and the UI reflects it", async () => {
 	}, { timeout: 20000 });
 }, (v) => v || "");
 
-// --- 5. nothing broke along the way ---------------------------------------
+// --- 5. parameters --------------------------------------------------------
+// An entire subsystem the unit tests cover at the store and gs never saw a
+// browser: a 400-value refresh, an edit that goes to the vehicle and comes back
+// confirmed, and the snapshot diff.
+console.log("\n parameters");
+
+await check("the parameter editor opens", async () => {
+	await page.getByRole("button", { name: /vehicle configuration/i }).click();
+	await page.getByRole("button", { name: /^Parameters$/ }).click();
+	return await until(() => page.getByRole("button", { name: /^Refresh$/ })
+		.isVisible().catch(() => false), { timeout: 10000 });
+}, () => "Refresh on screen");
+
+await check("Refresh downloads the whole parameter set", async () => {
+	await page.getByRole("button", { name: /^Refresh$/ }).click();
+	// The header prints the count, which is data rather than chrome.
+	return await until(async () => {
+		const m = (await page.textContent("body")).match(/(\d+) loaded/);
+		return m && Number(m[1]) >= 100 ? Number(m[1]) : null;
+	}, { timeout: 40000 });
+}, (n) => `${n} parameters loaded`);
+
+await check("a parameter can be found by searching", async () => {
+	await page.getByPlaceholder(/search params/i).fill("P_001");
+	return await until(() => page.textContent("body")
+		.then((t) => /P_001/.test(t)), { timeout: 8000 });
+}, () => "search filters the table");
+
+await check("editing a parameter writes it and the vehicle confirms", async () => {
+	// The row's input, then Enter. gs awaits the echoed PARAM_VALUE before it
+	// acks, so a value that sticks here came back from the vehicle.
+	// The row's value field is a plain text input (no `type`), so a
+	// type=number selector matched nothing; scope it by the class it carries.
+	const input = page.locator("input.w-20").first();
+	await input.fill("42");
+	await input.press("Enter");
+	return await until(async () => {
+		const v = await page.locator("input.w-20").first().inputValue();
+		return v === "42" ? "42 confirmed by the vehicle" : null;
+	}, { timeout: 20000 });
+}, (v) => v || "");
+
+await check("Save and Compare are offered once there is a set to snapshot",
+	async () => {
+		const save = page.getByRole("button", { name: /^Save$/ }).first();
+		const cmp = page.getByRole("button", { name: /^Compare$/ }).first();
+		const sd = await save.isDisabled();
+		const cd = await cmp.isDisabled();
+		if (sd || cd) throw new Error(`Save disabled=${sd} Compare disabled=${cd}`);
+		return true;
+	}, () => "both enabled");
+
+// --- 6. recovery when the daemon goes away --------------------------------
+// The hub is a Raspberry Pi; gs restarts. What the console does then is the
+// difference between a reconnect and a lie.
+console.log("\n recovery");
+
+await check("killing gs is reported, not hidden", async () => {
+	try { process.kill(-gs.pid, "SIGKILL"); } catch { /* already gone */ }
+	return await until(() => page.textContent("body")
+		.then((t) => /lost|stale|connecting/i.test(t.slice(0, 600))), { timeout: 25000 });
+}, () => "the link indicator changed");
+
+// Bring it back. Recovery is the part that matters: a console that notices the
+// daemon left but cannot pick it up again has only noticed.
+const gs2 = spawnLogged("gs2", "uv",
+	["run", "python", "-u", "scripts/e2e_fixture.py", "--ws-port", String(WS_PORT)],
+	{ cwd: GS_DIR });
+
+await check("gs comes back", () => waitForLine(gs2, /^READY$/, 40000),
+	() => "fixture up again");
+
+// Section 6 is the only place two fixtures could ever overlap, and a run that
+// overlaps them sees gs report two clocks on sysid 1 -- correctly -- which then
+// clears the console's view of the vehicle and fails checks three sections
+// later. A process-group kill of the first fixture was measured to take both
+// the `uv` wrapper and its python child, so the surviving second clock is NOT
+// an orphaned wrapper child and its origin is still unknown. Record the live
+// processes here so the next occurrence names the source instead of inviting
+// another theory.
+try {
+	const ps = execSync('ps -o pid,ppid,command -ax | grep "[e]2e_fixture.py" || true')
+		.toString().trim();
+	console.log(`  note after the restart, fixtures alive:\n${ps || "    (none)"}`);
+} catch { /* diagnostic only */ }
+
+await check("the console reconnects on its own", () =>
+	until(() => page.textContent("body")
+		.then((t) => /Airspeed/i.test(t) && !/connecting/i.test(t.slice(0, 400))),
+	{ timeout: 40000 }),
+	() => "telemetry flowing again");
+
+await check("the parameter table is marked unverified, not silently kept",
+	async () => {
+		// gs cannot report what it did not witness, and the gap is exactly where
+		// it was not watching: the vehicle may have rebooted, or this may be a
+		// different aircraft. The values stay on screen; the claim that they are
+		// current does not.
+		//
+		// The parameter editor is still open from the section above, deliberately:
+		// it refreshes on first open, and a refresh clears the table AND the
+		// stale flag — so reopening it here to look for the banner destroyed the
+		// banner, which is how the first version of this check "failed".
+		const found = await until(() => page.textContent("body")
+			.then((t) => /unverified|predate/i.test(t)), { timeout: 25000 });
+		if (!found) {
+			const t = await page.textContent("body");
+			const loaded = (t.match(/(\d+) loaded/) || [])[1];
+			throw new Error(`no stale banner; ${loaded} params loaded`);
+		}
+		return found;
+	}, () => "'these values predate it'");
+
+await check("the plan pane stops claiming to know the vehicle's plan", async () => {
+	// The draft is NOT cleared — it is the operator's work. What must change is
+	// the claim: before this, a non-empty draft after a reconnect was shown with
+	// nothing saying the vehicle's plan was now unknown, because the
+	// empty-state message cannot appear while there is a plan to show.
+	await openMissionPanel();
+	return await until(() => page.textContent("body")
+		.then((t) => /the vehicle's plan is not known|not read from the vehicle yet/i.test(t)),
+	{ timeout: 20000 });
+}, () => "'the vehicle's plan is not known'");
+
+// --- 7. command authority across two consoles -----------------------------
+// The hub serves several viewers at once, and only one may command. Tested
+// here with two real browser contexts, which is the only way the claim and the
+// takeover are exercised the way they are used.
+console.log("\n command authority");
+
+// The first console lost and re-won authority across the gs restart above, so
+// settle that before a second console contends for it — otherwise the test is
+// racing the reconnect rather than exercising the takeover.
+await page.getByRole("button", { name: /^Commands$/i }).click().catch(() => {});
+await until(() => page.textContent("body").then((t) => /IN CONTROL/i.test(t)),
+	{ timeout: 20000 });
+
+const second = await browser.newContext();
+const tab2 = await second.newPage();
+await tab2.goto(`http://localhost:${webPort}/flight`, { waitUntil: "domcontentloaded" });
+
+await check("a second console connects and sees telemetry", () =>
+	until(() => tab2.textContent("body").then((t) => /Airspeed/i.test(t)),
+		{ timeout: 30000 }),
+	() => "second tab live");
+
+await check("the second console is told another holds command", async () => {
+	await tab2.getByRole("button", { name: /^Commands$/i }).click().catch(() => {});
+	return await until(() => tab2.textContent("body")
+		.then((t) => /another console holds command/i.test(t)), { timeout: 20000 });
+}, () => "'another console holds command'");
+
+await check("Take command transfers authority to the second console", async () => {
+	// Labelled "Take" in the command bar and "Take command" in the plan panels.
+	await tab2.getByRole("button", { name: /^Take( command)?$/i }).first().click();
+	return await until(() => tab2.textContent("body")
+		.then((t) => !/another console holds command/i.test(t)), { timeout: 20000 });
+}, () => "second console now commands");
+
+await check("the first console is told it lost command", async () => {
+	// It has to be on a surface that reports authority: the parameter editor
+	// does not, and that is what the first tab had open.
+	await page.getByRole("button", { name: /^Commands$/i }).click().catch(() => {});
+	return await until(() => page.textContent("body")
+		.then((t) => /another console (holds|took) command/i.test(t)), { timeout: 20000 });
+}, () => "first console greyed out");
+
+await tab2.close();
+await second.close();
+
+// --- 8. nothing broke along the way ---------------------------------------
 console.log("\n over the whole run");
 step("no uncaught page errors", pageErrors.length === 0,
 	pageErrors.length ? pageErrors.slice(0, 2).join(" | ") : "none");

@@ -47,6 +47,7 @@ export default function ParamEditor() {
 	const [snapDiff, setSnapDiff] = useState<
 		{ label: string; takenAt: string; diffs: ParamDiff[] } | null>(null);
 	const [snapError, setSnapError] = useState<string | null>(null);
+	const [defaultsNote, setDefaultsNote] = useState<string | null>(null);
 
 	function saveSnapshot() {
 		const snap = makeSnapshot($params.get(), { label: "" });
@@ -94,10 +95,24 @@ export default function ParamEditor() {
 		fetchedOnce.current = true;
 		telemetryClient.refreshParams();
 		loadParamMeta().then(setMeta).catch(() => { /* metadata is optional */ });
+		// The airframe defaults drive the ● "changed from default" markers. They
+		// were fetched and the failure swallowed, so when the path broke the
+		// markers simply stopped appearing and nothing said why — an operator
+		// cannot tell "nothing has changed from default" from "the comparison is
+		// not happening". Say which it is.
 		fetch("/api/airframe")
-			.then((r) => (r.ok ? r.json() : null))
-			.then((j) => { if (j?.content) setDefaults(parseDefaults(j.content as string)); })
-			.catch(() => { /* defaults are optional */ });
+			.then((r) => r.json())
+			.then((j) => {
+				if (j?.content) {
+					setDefaults(parseDefaults(j.content as string));
+					setDefaultsNote(null);
+				} else {
+					setDefaultsNote("airframe defaults unavailable — the ● "
+						+ "changed-from-default markers are off");
+				}
+			})
+			.catch(() => setDefaultsNote("airframe defaults could not be read — the "
+				+ "● changed-from-default markers are off"));
 	}, [open]);
 
 	const rows = useMemo(() => {
@@ -227,6 +242,11 @@ export default function ParamEditor() {
 								{snapDiff.diffs.length} difference{snapDiff.diffs.length === 1 ? "" : "s"}
 								{" · "}editing is per-parameter below, as always
 							</div>
+						</div>
+					) : null}
+					{defaultsNote ? (
+						<div className="px-3 pt-2 text-[10px] text-white/45">
+							▲ {defaultsNote}
 						</div>
 					) : null}
 					{paramsStale ? (

@@ -60,6 +60,26 @@ def main() -> int:
         print("READY", flush=True)
     threading.Thread(target=announce, daemon=True).start()
 
+    def die_with_parent() -> None:
+        """Exit when whoever started us goes away.
+
+        `uv run python` is a wrapper, so killing the process the test spawned can
+        leave this Python alive — and an orphaned stand-in autopilot still
+        streaming at sysid 1 makes gs see two clocks on one sysid. It reports
+        that correctly, which then clears the console's view of the vehicle and
+        fails unrelated checks three sections later. Five runs of the browser
+        test were debugged against that before the pattern was clear.
+        Process-group kills and `pkill` both missed it at least once; noticing
+        our own reparenting does not."""
+        parent = os.getppid()
+        while True:
+            time.sleep(0.5)
+            if os.getppid() != parent:
+                print("[fixture] parent gone; exiting", flush=True)
+                px4.stop()
+                os._exit(0)
+    threading.Thread(target=die_with_parent, daemon=True).start()
+
     try:
         b.run()
     except KeyboardInterrupt:
