@@ -112,6 +112,7 @@ BOOT_REBOOT_MIN_UPTIME_MS = 5_000
 # cannot fix, and therefore one it has to NAME -- an operator can act on "two
 # vehicles are claiming sysid 1", and cannot act on a console that keeps
 # clearing itself.
+POS_PEERS_MAX = 16       # distinct senders remembered for the storm report
 REBOOT_STORM_WINDOW_MS = 10_000
 REBOOT_STORM_MAX = 3
 # How long a MAVLink setpoint keeps ownership of the commanded-path overlay after
@@ -961,6 +962,18 @@ class Bridge:
         # A backward uptime jump too small to be unambiguous, held for one frame
         # so the next one can say whether it was a reorder or a reboot.
         self._boot_suspect: int | None = None
+        # Where position frames arrive FROM, counted per peer. On a UDP or TCP
+        # link pymavlink exposes the sender's address, and when two sources
+        # share a sysid that address is the only thing that tells them apart --
+        # so the storm report names them instead of asking the operator to go
+        # looking. Bounded: a handful of peers on any real link, and a flood of
+        # spoofed sources would be the finding, not a leak.
+        self._pos_peers: dict[str, int] = {}
+        # The peer the frame being folded arrived from, or None on a link that
+        # has no such notion (serial). Set by the receive loop, read under the
+        # lock by the folder; a plain attribute is enough since only the one
+        # loop writes it and it is only ever a diagnostic.
+        self._mav_peer: str | None = None
         # Recent reboot conclusions, for the storm check (see REBOOT_STORM_MAX).
         self._reboot_times: list[int] = []
         self._storm_reported = False
@@ -1066,6 +1079,11 @@ class Bridge:
         while True:
             try:
                 msg = conn.recv_match(blocking=True, timeout=0.5)
+                # UDP/TCP connections expose the sender; serial has no peer.
+                addr = getattr(conn, "last_address", None)
+                self._mav_peer = (f"{addr[0]}:{addr[1]}"
+                                  if isinstance(addr, tuple) and len(addr) >= 2
+                                  else None)
                 errors = 0
             except Exception as exc:  # malformed packet / transient socket error
                 errors += 1
@@ -1332,10 +1350,15 @@ class Bridge:
             if not self._storm_reported:
                 self._storm_reported = True
                 sysid = self._vehicle[0] if self._vehicle else "?"
+                peers = sorted(self._pos_peers.items(), key=lambda kv: -kv[1])
+                where = (", ".join(f"{a} ({n} frames)" for a, n in peers)
+                         if peers else "a link that does not report peer addresses")
                 text = (f"two sources appear to share sysid {sysid}: the uptime "
                         f"clock keeps restarting, which one vehicle cannot do. "
-                        f"Look for a second autopilot on the link, or a router "
-                        f"merging two streams.")
+                        f"Position frames came from: {where}. Two addresses means "
+                        f"a second autopilot or a router merging streams; one "
+                        f"address means one sender whose clock really is "
+                        f"restarting, or a serial link that cannot say.")
                 print(f"[gs] {text}")
                 self._broadcast({"type": "statustext", "severity": 3,
                                  "text": f"gs: {text}", "t": _now_ms()})
@@ -1717,6 +1740,8 @@ class Bridge:
         if group is not None:
             self._src_at[group] = now
         if t == "GLOBAL_POSITION_INT":
+            if self._mav_peer is not None and len(self._pos_peers) < POS_PEERS_MAX:
+                self._pos_peers[self._mav_peer] = self._pos_peers.get(self._mav_peer, 0) + 1
             # Drop stale/reordered frames; a large backward jump is a reboot.
             boot = msg.time_boot_ms
             last = self._last_pos_boot_ms

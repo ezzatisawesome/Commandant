@@ -60,10 +60,31 @@ async function check(name, fn, note = () => "") {
 // bare click closes it -- which reads in the DOM exactly like a panel that
 // never rendered the thing being asserted. One section-7 failure was that and
 // not the app.
-async function openMissionPanel() {
-	if (await page.getByText(/^Mission \(/).count()) return;
-	await page.getByRole("button", { name: /mission and geofence/i }).click();
-	await until(() => page.getByText(/^Mission \(/).count().then((n) => n > 0), { timeout: 10000 });
+async function openMissionPanel(tabName = "waypoints") {
+	// Ask the dock, not the panel contents. Guessing from text ("Mission (n)")
+	// fails twice over: the header drops the count when the draft is empty, and
+	// the dock keeps only ONE panel open, so the parameter section closes this
+	// one behind your back. Both read in the DOM exactly like a panel that
+	// rendered nothing -- and a bare click on an already-open panel closes it,
+	// which is the same thing a third time. aria-pressed is the component's own
+	// answer about its own state.
+	const btn = page.getByRole("button", { name: /mission and geofence/i });
+	if ((await btn.getAttribute("aria-pressed")) !== "true") {
+		await btn.click();
+		await until(() => btn.getAttribute("aria-pressed").then((v) => v === "true"),
+			{ timeout: 10000 });
+	}
+	// And the panel has TABS, of which only the active one is MOUNTED. The fence
+	// sections leave "Fence / rally" selected, so a later assertion about the
+	// waypoints pane was being made against a component that was not rendered
+	// at all -- which looks exactly like a component that rendered the wrong
+	// thing. Select the tab explicitly; aria-selected is its own answer.
+	const tab = page.getByRole("tab", { name: new RegExp(tabName, "i") });
+	if ((await tab.count()) && (await tab.getAttribute("aria-selected")) !== "true") {
+		await tab.click();
+		await until(() => tab.getAttribute("aria-selected").then((v) => v === "true"),
+			{ timeout: 10000 });
+	}
 }
 
 async function panelCount(re) {
@@ -189,6 +210,16 @@ if (!await waitForLine(gs, /^READY$/, 40000)) {
 	process.exit(1);
 }
 step("gs up, locked onto the vehicle", true, `ws://localhost:${WS_PORT}`);
+
+// `next start` serves the PREBUILT .next, so without this the script tests
+// whatever bundle happens to be on disk. A build nearly four hours stale was
+// what three "app" failures in this file actually were: the code under test had
+// never been compiled, so a component's new notice could not appear and no
+// amount of reading the component explained why. Build unconditionally -- a
+// freshness heuristic over a directory tree is the kind of thing that is wrong
+// once and costs another evening.
+console.log("\n building the console — next start serves a build, not the source");
+execSync("npx next build", { cwd: CONSOLE_DIR, stdio: "inherit" });
 
 const web = spawnLogged("next", "npx",
 	["next", "start", "-p", String(webPort)],
@@ -622,9 +653,17 @@ await check("the plan pane stops claiming to know the vehicle's plan", async () 
 	// nothing saying the vehicle's plan was now unknown, because the
 	// empty-state message cannot appear while there is a plan to show.
 	await openMissionPanel();
-	return await until(() => page.textContent("body")
+	const ok = await until(() => page.textContent("body")
 		.then((t) => /the vehicle's plan is not known|not read from the vehicle yet/i.test(t)),
 	{ timeout: 20000 });
+	if (!ok) {
+		const pressed = await page.getByRole("button", { name: /mission and geofence/i })
+			.getAttribute("aria-pressed");
+		const hdr = (await page.textContent("body")).match(/Mission(?: \(\d+\))?/)?.[0];
+		const diverged = /edited since the vehicle took it/i.test(await page.textContent("body"));
+		throw new Error(`panel pressed=${pressed} header=${hdr} divergedNotice=${diverged}`);
+	}
+	return ok;
 }, () => "'the vehicle's plan is not known'");
 
 // --- 7. command authority across two consoles -----------------------------

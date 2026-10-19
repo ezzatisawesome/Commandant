@@ -2326,3 +2326,83 @@ def test_h27b_a_reboot_after_a_real_flight_is_still_caught():
         b._on_mav(conn, _gpi(boot))
     assert [e for e in events if e.get("type") == "vehicle_reboot"], \
         "missed a reboot after a real uptime"
+
+
+def test_h28_the_storm_report_names_the_senders_it_blames():
+    """"Look for a second autopilot on the link" sent me looking for an orphaned
+    process five times, and the fifth time there was none: the message asserts a
+    cause it has not checked, and I believed it over the evidence.
+
+    On UDP and TCP, pymavlink reports the sender, so gs can say whether the
+    frames came from one address or two -- which is the whole question. Two
+    addresses is a second autopilot or a merging router. ONE address is a single
+    sender whose clock really is restarting, which is a different fault needing
+    a different fix, and the old wording actively pointed away from it."""
+    events: list = []
+    b = _bridge()
+    b._loop = _capturing_loop(events)
+    conn = RecordingConn()
+    b._vehicle = (1, 1)
+
+    a_boot, c_boot = 95_000, 400
+    for _ in range(12):
+        a_boot += 140
+        c_boot += 140
+        b._mav_peer = "127.0.0.1:41001"
+        b._on_mav(conn, _gpi(a_boot))
+        b._mav_peer = "127.0.0.1:52002"
+        b._on_mav(conn, _gpi(c_boot))
+
+    assert b._storm_reported, "never recognised the clash"
+    said = [e["text"] for e in events
+            if e.get("type") == "statustext" and "share sysid" in (e.get("text") or "")]
+    assert said, "the storm was never announced"
+    assert "41001" in said[0] and "52002" in said[0], \
+        f"named neither sender: {said[0]}"
+    assert "frames" in said[0], "no frame counts to weigh the two by"
+
+
+def test_h28_one_sender_with_a_restarting_clock_is_not_blamed_on_two():
+    """The same storm from a SINGLE address. Pre-fix this printed "two sources
+    appear to share sysid 1" and told the operator to look for a second
+    autopilot -- for a fault that has nothing to do with one."""
+    events: list = []
+    b = _bridge()
+    b._loop = _capturing_loop(events)
+    conn = RecordingConn()
+    b._vehicle = (1, 1)
+    b._mav_peer = "127.0.0.1:41001"
+
+    boot = 95_000
+    for _ in range(12):
+        boot += 140
+        b._on_mav(conn, _gpi(boot))
+        b._on_mav(conn, _gpi(300))      # same peer, clock keeps resetting
+
+    assert b._storm_reported
+    said = [e["text"] for e in events
+            if e.get("type") == "statustext" and "share sysid" in (e.get("text") or "")][0]
+    assert said.count("127.0.0.1") == 1, f"invented a second sender: {said}"
+    assert "one address" in said, f"did not offer the single-sender reading: {said}"
+
+
+def test_h28_a_serial_link_says_it_cannot_tell_rather_than_guessing():
+    """On the hub the link is a serial port and there is no peer address at all.
+    Saying so is honest; naming an address would be fiction."""
+    events: list = []
+    b = _bridge()
+    b._loop = _capturing_loop(events)
+    conn = RecordingConn()
+    b._vehicle = (1, 1)
+    b._mav_peer = None                  # serial: no such notion
+
+    a_boot, c_boot = 95_000, 400
+    for _ in range(12):
+        a_boot += 140
+        c_boot += 140
+        b._on_mav(conn, _gpi(a_boot))
+        b._on_mav(conn, _gpi(c_boot))
+
+    said = [e["text"] for e in events
+            if e.get("type") == "statustext" and "share sysid" in (e.get("text") or "")][0]
+    assert "does not report peer addresses" in said, said
