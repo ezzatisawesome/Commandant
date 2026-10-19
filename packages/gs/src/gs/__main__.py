@@ -85,6 +85,23 @@ def _print_status(s: dict) -> None:
     print("\n quietly survived")
     line("link reopens", f"{reopens}" + ("" if not reopens else "   <-- the link has been dropping"))
     line("handler errors", f"{errors}" + ("" if not errors else "   <-- check the daemon log"))
+    fl = s.get("flightLog") or {}
+    print("\n flight log")
+    if not fl.get("enabled") and fl.get("error"):
+        line("state", f"STOPPED — {fl['error']}")
+    elif not fl.get("enabled"):
+        line("state", "off (--no-log)")
+    else:
+        line("writing", fl.get("path"))
+        line("records", f"{fl.get('records', 0)}"
+                        + (f"   <-- {fl['dropped']} DROPPED, the disk is not keeping up"
+                           if fl.get("dropped") else ""))
+        line("on disk", f"{fl.get('bytes', 0) / 1e6:.1f} MB"
+                        + (f", {fl['rotations']} rotation(s)" if fl.get("rotations") else "")
+                        + (f", {fl['pruned']} pruned" if fl.get("pruned") else ""))
+        if not fl.get("clockWasSet"):
+            # Worth saying before someone correlates this log with a video.
+            line("clock", "was NOT set when this log opened — times are relative")
     if s.get("relay") is not None:
         r = s["relay"]
         print("\n relay uplink")
@@ -127,6 +144,12 @@ def main() -> int:
                         help="ask a RUNNING daemon what it decided and exit. The "
                              "same snapshot the console can request, over the same "
                              "socket -- a field hub has ssh, not a browser.")
+    parser.add_argument("--log-dir", default=os.environ.get("GS_LOG_DIR", "logs"),
+                        metavar="DIR",
+                        help="where to write replayable .tlog flight logs "
+                             "(default: ./logs, or $GS_LOG_DIR)")
+    parser.add_argument("--no-log", action="store_true",
+                        help="do not record a flight log")
     parser.add_argument("--flight-id", default="",
                         help="label for this flight on the relay (default: a UTC timestamp)")
     args = parser.parse_args()
@@ -154,6 +177,7 @@ def main() -> int:
         baud=args.baud,
         relay=relay,
         budget_bps=args.link_budget,
+        log_dir=None if args.no_log else args.log_dir,
     ).run()
     return 0
 

@@ -45,6 +45,7 @@ import websockets
 os.environ.setdefault("MAVLINK20", "1")
 from pymavlink import mavutil  # noqa: E402
 
+from .flightlog import FlightLog
 from . import __version__  # noqa: E402
 
 if not hasattr(mavutil.mavlink, "MAVLINK_MSG_ID_ACTUATOR_OUTPUT_STATUS"):
@@ -885,12 +886,16 @@ class Bridge:
         baud: int = DEFAULT_SERIAL_BAUD,
         relay: Any = None,
         budget_bps: float | None = None,
+        log_dir: str | None = None,
     ) -> None:
         self.mavlink_endpoint = mavlink_endpoint
         self.json_port = json_port
         self.ws_host = ws_host
         self.ws_port = ws_port
         self.baud = baud
+        # Everything that crosses the link, written where someone can replay it.
+        # None disables it; the daemon still flies, it just forgets.
+        self.flight_log = FlightLog(log_dir) if log_dir else None
         # Optional outbound-only uplink to the public relay (see gs/relay.py).
         # It is handed every payload the local clients get; it rate-limits and
         # reconnects on its own, and nothing it does can block this daemon.
@@ -1062,6 +1067,7 @@ class Bridge:
                 time.sleep(delay)
                 delay = min(delay * 2, LINK_REOPEN_MAX_S)
                 continue
+            self._record_sends(conn)
             # The link budget follows the transport we actually got, not the one
             # configured -- under `auto` they are only known now, and asking a
             # 57600 radio for 25 Hz is the fault H2 fixed.
@@ -1073,12 +1079,44 @@ class Bridge:
                   f"({self.link_budget_bps:.0f} B/s budget)")
             return conn
 
+    def _record_sends(self, conn: Any) -> None:
+        """Log what gs transmits, by wrapping the one place it leaves.
+
+        Every send helper in pymavlink -- command_long_send, param_set_send,
+        mission_item_int_send -- ends at `conn.write`, so wrapping that covers
+        all of them and cannot be forgotten when a new one is added. Wrapping
+        each call site instead would have been a list to keep in step with the
+        code, and that list is wrong the first time somebody adds a message.
+
+        Commands are the half of a debrief that says what the OPERATOR did; a
+        log of only what arrived answers "what did the aircraft do" and leaves
+        "what were we asking it to do" to memory."""
+        if self.flight_log is None or getattr(conn, "_gs_logged", False):
+            return
+        inner = conn.write
+
+        def logged_write(buf):
+            try:
+                self.flight_log.write(buf)
+            except Exception:
+                pass            # logging never breaks a transmit
+            return inner(buf)
+
+        conn.write = logged_write
+        conn._gs_logged = True
+
     def _mav_loop(self) -> None:
         conn = self._open_with_retry()
         errors = 0
         while True:
             try:
                 msg = conn.recv_match(blocking=True, timeout=0.5)
+                if self.flight_log is not None and msg is not None:
+                    # The raw frame, not a re-encode: a log is evidence, and a
+                    # re-encode records what gs believes rather than what the
+                    # aircraft said. The two differing is the kind of thing a
+                    # log exists to settle.
+                    self.flight_log.write(msg.get_msgbuf())
                 # UDP/TCP connections expose the sender; serial has no peer.
                 addr = getattr(conn, "last_address", None)
                 self._mav_peer = (f"{addr[0]}:{addr[1]}"
@@ -2204,6 +2242,8 @@ class Bridge:
                           if (mav_at or json_at) else None),
             "streamAges": {g: mono - at for g, at in src_at.items()},
             "bootMs": self.latest.get("bootMs"),
+            "flightLog": (self.flight_log.status() if self.flight_log
+                          else {"enabled": False, "path": None}),
             # --- what it is in the middle of ------------------------------
             "commanderHeld": self._commander is not None,
             "clients": len(self._clients),
@@ -2531,6 +2571,14 @@ class Bridge:
             await server_cm.__aexit__(None, None, None)
 
     def run(self) -> None:
+        if self.flight_log is not None:
+            self.flight_log.start()
         threading.Thread(target=self._mav_loop, daemon=True).start()
         threading.Thread(target=self._json_loop, daemon=True).start()
-        asyncio.run(self._serve())
+        try:
+            asyncio.run(self._serve())
+        finally:
+            # The tail of a log is usually the interesting part, so flush it on
+            # the way out rather than leaving the last second in a buffer.
+            if self.flight_log is not None:
+                self.flight_log.stop()

@@ -170,6 +170,24 @@ def test_gs_env_ships_an_endpoint_so_the_unit_never_gets_an_empty_flag():
     assert next(l for l in env.splitlines() if l.startswith("GS_WS_PORT=")).split("=")[1].strip()
 
 
+def test_the_flight_log_has_somewhere_to_go_without_a_provisioning_step():
+    """gs.service passes --log-dir ${GS_LOG_DIR} the same unquoted way, so the
+    same hazard applies: an unset value hands argparse a bare flag and the
+    daemon will not start. And the directory has to EXIST, owned by the service
+    user -- StateDirectory makes systemd create it, which is one less step for
+    somebody to forget at 6am on a flight line."""
+    env = (Path(hub.TEMPLATES) / "gs.env").read_text()
+    line = next(l for l in env.splitlines() if l.startswith("GS_LOG_DIR="))
+    log_dir = line.split("=", 1)[1].strip()
+    assert log_dir, "GS_LOG_DIR ships empty"
+
+    unit = (Path(hub.TEMPLATES) / "systemd" / "gs.service").read_text()
+    assert "--log-dir ${GS_LOG_DIR}" in unit, "the unit never passes it"
+    assert "StateDirectory=commandant" in unit, "nothing creates the directory"
+    assert log_dir.startswith("/var/lib/commandant"), \
+        f"{log_dir} is not what StateDirectory creates"
+
+
 # --- the rest of the lifecycle, which the package promised and did not have --
 
 def test_every_verb_the_package_description_claims_actually_exists():
