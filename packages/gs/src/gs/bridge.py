@@ -228,7 +228,10 @@ STATUSTEXT_MAX_CHUNKS = 20
 # minute. See _request_message for what this costs on a radio when it does not
 # back off at all.
 STREAM_REQ_MIN_MS = 1_000
-STREAM_REQ_MAX_MS = 60_000   # narrower than this => pace, don't flood
+STREAM_REQ_MAX_MS = 60_000
+# Parameter TYPES remembered from PARAM_VALUE, so a write cannot be dropped for
+# a type mismatch. PX4 has ~720; the cap is for a vehicle that invents names.
+PARAM_TYPES_MAX = 4_000   # narrower than this => pace, don't flood
 PARAM_LINK_SHARE = 0.30          # of the link a paced refresh may use
 PARAM_READ_BURST = 8             # max reads issued in one service tick
 PARAM_READ_RETRY_MS = 3000       # re-request an index that never answered
@@ -959,6 +962,8 @@ class Bridge:
         self._last_req_at: dict[int, int] = {}
         # Attempts per message id, for the backoff in _request_message.
         self._req_tries: dict[int, int] = {}
+        # name -> MAV_PARAM_TYPE, learned from the vehicle. See _start_param_set.
+        self._param_types: dict[str, int] = {}
 
         self._clients: set[Any] = set()
 
@@ -1076,6 +1081,7 @@ class Bridge:
         self._src_at.clear()        # the new link's streams have their own ages
         self._last_req_at.clear()   # re-request the extra streams on the new link
         self._req_tries.clear()     # ...promptly, not at the backed-off rate
+        self._param_types.clear()   # a different airframe may type names differently
 
     def _resolve_endpoint(self) -> str | None:
         """The endpoint to open. With `auto`, probe for one; the result is
@@ -1294,6 +1300,10 @@ class Bridge:
             self.relay.offer(payload, kind)
 
     def _report_param_ack(self, job: dict[str, Any], ok: bool, text: str) -> None:
+        if ok and job.get("retyped"):
+            # Worth saying: the client's idea of this parameter's type was
+            # wrong, and silently fixing it would leave that bug in place.
+            text = f"{text} (sent as the vehicle's own type)"
         """Route a param_set result back to the originating client."""
         loop = self._loop
         if loop is not None:
@@ -1592,7 +1602,29 @@ class Bridge:
                "value": item.get("value"), "tries": 0, "last_send_ms": 0}
         try:
             job["value"] = float(item["value"])
-            job["ptype"] = int(item.get("ptype") or mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
+            # The type the VEHICLE reported for this parameter beats the one the
+            # client offered. PX4 compares the type on a PARAM_SET and silently
+            # IGNORES a write whose type does not match -- no refusal, no ack,
+            # nothing. gs then retried, timed out, and told the operator
+            # "timeout", which points at the radio for what is actually a type
+            # mismatch. MEASURED against real PX4: writing the int parameter
+            # MAV_SYS_ID as REAL32 produced exactly that.
+            #
+            # This is not the value cache gs deliberately does not keep. A
+            # value is state that a reboot invalidates; a parameter's TYPE is a
+            # property of the firmware, and gs has already seen it on every
+            # PARAM_VALUE it forwarded. Using it costs a dict and removes a
+            # whole class of silent failure, including for clients that cannot
+            # know the type -- a script, or a console that has not read the
+            # table yet, where `ptype` is optional and defaults to REAL32.
+            name = str(item.get("name") or "")
+            known = self._param_types.get(name)
+            offered = item.get("ptype")
+            if known is not None:
+                job["ptype"] = known
+                job["retyped"] = (offered is not None and int(offered) != known)
+            else:
+                job["ptype"] = int(offered or mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
             if not job["name"] or len(job["name"]) > 16:
                 raise ValueError("param name must be 1-16 chars")
             job["name"].encode("ascii")
@@ -1844,6 +1876,73 @@ class Bridge:
             self._on_mav_state(now, t, msg)
         self._on_mav_protocol(conn, now, t, msg)
 
+    def _note_boot_ms(self, boot: int) -> bool:
+        """Fold the vehicle's uptime clock forward. Returns False if this frame
+        is a reordered straggler the caller should ignore.
+
+        Lifted out of the GLOBAL_POSITION_INT handler without changing a line of
+        its reasoning, because that was the ONLY message feeding it -- and real
+        PX4 does not always send it. MEASURED against the firmware with no
+        position estimate: 22 SYSTEM_TIME and ZERO GLOBAL_POSITION_INT in 25
+        seconds. A vehicle on the bench, indoors, on a HITL rig, or simply
+        before GPS lock therefore had NO reboot detection at all -- and a reboot
+        is the event that invalidates every cached parameter, which is the whole
+        reason gs announces it. SYSTEM_TIME carries the same clock at 1 Hz and
+        PX4 sends it unconditionally, so it feeds this too."""
+        last = self._last_pos_boot_ms
+        # One decision about the vehicle's own uptime clock going backward:
+        # a reordered frame (drop it), a counter wrap (keep it, say nothing),
+        # or a reboot (keep it, and tell everyone -- see _on_vehicle_reboot).
+        rebooted = False
+        if last >= 0 and boot <= last:
+            if last - boot >= REBOOT_GAP_MS:
+                # Unambiguous -- unless the counter simply wrapped: it was
+                # about to overflow and has come back around (BOOT_MS_WRAP).
+                if (last >= BOOT_MS_WRAP - BOOT_WRAP_MARGIN_MS
+                        and boot <= BOOT_WRAP_MARGIN_MS):
+                    print(f"[gs] vehicle uptime counter wrapped at 49.7 days "
+                          f"({last} -> {boot} ms); not a reboot")
+                else:
+                    rebooted = True
+                self._boot_suspect = None
+            else:
+                # Ambiguous: a reordered frame, or a reboot that happened
+                # within REBOOT_GAP_MS of the last report. One frame cannot
+                # say which, so a candidate is held and confirmed only when
+                # the next frame continues from it. See BOOT_REBOOT_RATIO.
+                suspect = self._boot_suspect
+                if last < BOOT_REBOOT_MIN_UPTIME_MS:
+                    # Only just booted: ACCEPT the frame and resync, without
+                    # declaring a reboot. Dropping it instead was the first
+                    # version of this guard, and it reintroduced the H24
+                    # freeze -- every post-jump frame dropped, the watermark
+                    # never advancing, the position stuck forever.
+                    self._boot_suspect = None
+                    self._last_pos_boot_ms = boot
+                    self.latest["bootMs"] = boot
+                    return True
+                if suspect is not None and suspect <= boot < suspect + REBOOT_GAP_MS:
+                    rebooted = True            # ascending from the low value
+                    self._boot_suspect = None
+                else:
+                    # Only a jump that loses most of the uptime is even a
+                    # candidate; a true reorder is a small blip.
+                    self._boot_suspect = (boot if boot * BOOT_REBOOT_RATIO < last
+                                          else None)
+                    return False
+        else:
+            self._boot_suspect = None
+        if rebooted:
+            # Flagged here, acted on in _on_mav_protocol, because reacting
+            # means transmitting and this runs under the lock.
+            self._reboot_pending = boot
+        self._last_pos_boot_ms = boot
+        # PX4's own uptime clock, surfaced for diagnostics: when the
+        # simulator stalls this is the value PX4's clock stops at, which
+        # is what distinguishes a counter overflow from a race.
+        self.latest["bootMs"] = boot
+        return True
+
     def _on_mav_state(self, now: int, t: str, msg: Any) -> None:
         """Fold a message into `latest`. Called with `self._lock` held, so this
         must stay pure bookkeeping -- no sends, no broadcasts, no blocking."""
@@ -1851,68 +1950,16 @@ class Bridge:
         group = _AGE_GROUPS.get(t)
         if group is not None:
             self._src_at[group] = now
-        if t == "GLOBAL_POSITION_INT":
+        if t == "SYSTEM_TIME":
+            # Carries the same uptime clock as GLOBAL_POSITION_INT, at 1 Hz,
+            # whether or not the vehicle knows where it is. See _note_boot_ms.
+            self._note_boot_ms(msg.time_boot_ms)
+
+        elif t == "GLOBAL_POSITION_INT":
             if self._mav_peer is not None and len(self._pos_peers) < POS_PEERS_MAX:
                 self._pos_peers[self._mav_peer] = self._pos_peers.get(self._mav_peer, 0) + 1
-            # Drop stale/reordered frames; a large backward jump is a reboot.
-            boot = msg.time_boot_ms
-            last = self._last_pos_boot_ms
-            # One decision about the vehicle's own uptime clock going backward:
-            # a reordered frame (drop it), a counter wrap (keep it, say nothing),
-            # or a reboot (keep it, and tell everyone -- see _on_vehicle_reboot).
-            rebooted = False
-            if last >= 0 and boot <= last:
-                if last - boot >= REBOOT_GAP_MS:
-                    # Unambiguous -- unless the counter simply wrapped: it was
-                    # about to overflow and has come back around (BOOT_MS_WRAP).
-                    if (last >= BOOT_MS_WRAP - BOOT_WRAP_MARGIN_MS
-                            and boot <= BOOT_WRAP_MARGIN_MS):
-                        print(f"[gs] vehicle uptime counter wrapped at 49.7 days "
-                              f"({last} -> {boot} ms); not a reboot")
-                    else:
-                        rebooted = True
-                    self._boot_suspect = None
-                else:
-                    # Ambiguous: a reordered frame, or a reboot that happened
-                    # within REBOOT_GAP_MS of the last report. One frame cannot
-                    # say which, so a candidate is held and confirmed only when
-                    # the next frame continues from it. See BOOT_REBOOT_RATIO.
-                    suspect = self._boot_suspect
-                    if last < BOOT_REBOOT_MIN_UPTIME_MS:
-                        # Only just booted: ACCEPT the frame and resync, without
-                        # declaring a reboot. Dropping it instead was the first
-                        # version of this guard, and it reintroduced the H24
-                        # freeze -- every post-jump frame dropped, the watermark
-                        # never advancing, the position stuck forever. Accepting
-                        # costs nothing here: a vehicle two seconds old has
-                        # nothing worth invalidating, so there is no reboot to
-                        # announce, only a clock to follow.
-                        self._boot_suspect = None
-                        self._last_pos_boot_ms = boot
-                        L["bootMs"] = boot
-                        L["lat"] = msg.lat / 1e7
-                        L["lon"] = msg.lon / 1e7
-                        return
-                    if suspect is not None and suspect <= boot < suspect + REBOOT_GAP_MS:
-                        rebooted = True            # ascending from the low value
-                        self._boot_suspect = None
-                    else:
-                        # Only a jump that loses most of the uptime is even a
-                        # candidate; a true reorder is a small blip.
-                        self._boot_suspect = (boot if boot * BOOT_REBOOT_RATIO < last
-                                              else None)
-                        return
-            else:
-                self._boot_suspect = None
-            if rebooted:
-                # Flagged here, acted on in _on_mav_protocol, because reacting
-                # means transmitting and this runs under the lock.
-                self._reboot_pending = boot
-            self._last_pos_boot_ms = boot
-            # PX4's own uptime clock, surfaced for diagnostics: when the
-            # simulator stalls this is the value PX4's clock stops at, which
-            # is what distinguishes a counter overflow from a race.
-            L["bootMs"] = boot
+            if not self._note_boot_ms(msg.time_boot_ms):
+                return      # a reordered straggler; its position is stale too
             L["lat"] = msg.lat / 1e7
             L["lon"] = msg.lon / 1e7
             L["alt"] = msg.alt / 1000.0  # mm -> m (MSL)
@@ -2172,6 +2219,11 @@ class Bridge:
             if not self._param_batch:
                 self._param_batch_at = now
             value = param_decode(msg.param_value, msg.param_type)
+            # Remember the TYPE the vehicle reports (not the value -- see
+            # _start_param_set). Bounded by the vehicle's parameter count, ~720
+            # on the PX4 this was measured against.
+            if name and len(self._param_types) < PARAM_TYPES_MAX:
+                self._param_types[name] = int(msg.param_type)
             self._param_batch.append({"name": name, "value": value,
                                       "ptype": msg.param_type, "index": idx, "count": count})
             if len(self._param_batch) >= PARAM_BATCH_MAX:

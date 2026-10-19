@@ -173,3 +173,52 @@ def test_a_vehicle_reboot_asks_again_promptly_not_at_the_backed_off_rate():
     b._vehicle = (1, 1)
     b._on_vehicle_reboot(0, 1234)
     assert b._req_tries == {}, "a reboot inherited the old backoff"
+
+
+def test_a_reboot_is_noticed_on_a_vehicle_that_never_reports_a_position():
+    """gs read the vehicle's uptime clock from GLOBAL_POSITION_INT and nowhere
+    else. MEASURED against real PX4 with no position estimate: 22 SYSTEM_TIME
+    and ZERO GLOBAL_POSITION_INT in 25 seconds. So on a bench, indoors, on a
+    HITL rig, or simply before GPS lock, gs could not detect a reboot at all --
+    and a reboot is the event that invalidates every cached parameter, which is
+    the entire reason gs announces one."""
+    b, events = _b()
+    b._vehicle = (1, 1)
+
+    class SysTime:
+        def __init__(self, boot):
+            self.time_boot_ms = boot
+        def get_type(self): return "SYSTEM_TIME"
+        def get_srcSystem(self): return 1
+        def get_srcComponent(self): return 1
+
+    for boot in (30_000, 31_000, 32_000):
+        b._on_mav_state(0, "SYSTEM_TIME", SysTime(boot))
+    assert b._reboot_pending is None, "called a rising clock a reboot"
+    assert b.latest["bootMs"] == 32_000
+
+    b._on_mav_state(0, "SYSTEM_TIME", SysTime(400))      # the vehicle restarted
+    assert b._reboot_pending == 400, "a reboot went unnoticed without a position"
+
+
+def test_the_position_handler_still_refuses_a_reordered_frame():
+    """The discriminator moved; its judgement must not have. A straggler's
+    POSITION is as stale as its clock, so the frame is dropped whole."""
+    b, _ = _b()
+    b._vehicle = (1, 1)
+
+    class Gpi:
+        def __init__(self, boot, lat):
+            self.time_boot_ms, self.lat = boot, int(lat * 1e7)
+            self.lon, self.alt, self.relative_alt = 0, 0, 0
+            self.vx = self.vy = self.vz = 0
+            self.hdg = 0
+        def get_type(self): return "GLOBAL_POSITION_INT"
+
+    for boot, lat in ((30_000, 37.1), (31_000, 37.2)):
+        b._on_mav_state(0, "GLOBAL_POSITION_INT", Gpi(boot, lat))
+    assert b.latest["lat"] == 37.2
+    # A straggler from 2 s earlier: below REBOOT_GAP_MS, so it is held as a
+    # suspect and its position must not land.
+    b._on_mav_state(0, "GLOBAL_POSITION_INT", Gpi(29_000, 99.9))
+    assert b.latest["lat"] == 37.2, "a reordered frame moved the aircraft"
