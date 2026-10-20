@@ -969,6 +969,10 @@ class Bridge:
         self.command_token = command_token
         # Ask PX4 to stop sending what gs never reads. See _TRIMMABLE.
         self.trim_streams = trim_streams
+        # True while serving a recorded flight. Carried on every frame, because
+        # a console that cannot tell a replay from a live aircraft is a console
+        # that will eventually be read as live while something is on fire.
+        self.replaying = False
         # Everything that crosses the link, written where someone can replay it.
         # None disables it; the daemon still flies, it just forgets.
         self.flight_log = FlightLog(log_dir) if log_dir else None
@@ -2482,37 +2486,47 @@ class Bridge:
                 continue
             if not isinstance(obj, dict):
                 continue
-            now = _mono_ms()
-            with self._lock:
-                self.last_json_at = now
-                # PX4 owns the setpoint whenever it is streaming one; the sim's
-                # own target is projected about a different origin and would drag
-                # the commanded path off by that difference.
-                mav_owns_target = (now - self._mav_target_at) < TARGET_SOURCE_TTL_MS
-                for k, v in obj.items():
-                    if k in JSON_KEYS and v is not None:
-                        # Two independent gates, and neither subsumes the other.
-                        # `mav_owns_target` is PX4's claim on the commanded-path
-                        # overlay while it is streaming one (it measured 2310 m of
-                        # error when the sim won that argument). `_json_owns` is the
-                        # broader rule that a locked autopilot owns flight state at
-                        # all, which the target keys are deliberately NOT part of --
-                        # they stay JSON-ownable so a flightdyn-only run, where no
-                        # vehicle ever locks, still draws the overlay.
-                        if mav_owns_target and k in _TARGET_KEYS:
-                            continue
-                        if not self._json_owns(k):
-                            continue
-                        self.latest[k] = v
-                if obj.get("targetLat") is not None and not mav_owns_target:
-                    # The setpoint stream is alive from SOME source, so hold off
-                    # re-requesting message 87. (A `_json_target_at` was kept
-                    # here too, as the JSON feed's claim on the overlay -- but
-                    # its only reader was the yield-to-JSON branch that PX4
-                    # ownership replaced, so the writes outlived the read.)
-                    self._last_target_at = now
-                if any(obj.get(k) is not None for k in ("voltage", "current", "batteryRemaining")):
-                    self._json_battery_at = now
+            self._apply_json(obj)
+
+    def _apply_json(self, obj: dict[str, Any]) -> None:
+        """Fold one JSON telemetry frame into `latest`, ownership rules and all.
+
+        Lifted out of the socket loop so that replaying a recorded flight can
+        use exactly this, rather than a second implementation of the same
+        arbitration that would drift from it. A replay whose ownership rules
+        differed from the live ones would be showing a flight that never
+        happened, which is worse than having no replay at all."""
+        now = _mono_ms()
+        with self._lock:
+            self.last_json_at = now
+            # PX4 owns the setpoint whenever it is streaming one; the sim's
+            # own target is projected about a different origin and would drag
+            # the commanded path off by that difference.
+            mav_owns_target = (now - self._mav_target_at) < TARGET_SOURCE_TTL_MS
+            for k, v in obj.items():
+                if k in JSON_KEYS and v is not None:
+                    # Two independent gates, and neither subsumes the other.
+                    # `mav_owns_target` is PX4's claim on the commanded-path
+                    # overlay while it is streaming one (it measured 2310 m of
+                    # error when the sim won that argument). `_json_owns` is the
+                    # broader rule that a locked autopilot owns flight state at
+                    # all, which the target keys are deliberately NOT part of --
+                    # they stay JSON-ownable so a flightdyn-only run, where no
+                    # vehicle ever locks, still draws the overlay.
+                    if mav_owns_target and k in _TARGET_KEYS:
+                        continue
+                    if not self._json_owns(k):
+                        continue
+                    self.latest[k] = v
+            if obj.get("targetLat") is not None and not mav_owns_target:
+                # The setpoint stream is alive from SOME source, so hold off
+                # re-requesting message 87. (A `_json_target_at` was kept
+                # here too, as the JSON feed's claim on the overlay -- but
+                # its only reader was the yield-to-JSON branch that PX4
+                # ownership replaced, so the writes outlived the read.)
+                self._last_target_at = now
+            if any(obj.get(k) is not None for k in ("voltage", "current", "batteryRemaining")):
+                self._json_battery_at = now
 
     def status(self) -> dict[str, Any]:
         """A snapshot of what this daemon currently believes.
@@ -2903,6 +2917,8 @@ class Bridge:
                 frame["upMs"] = mono - _MONO_ORIGIN_MS
                 frame["linkState"] = state
                 frame["connected"] = (state == "alive")
+                if self.replaying:
+                    frame["replay"] = True
                 # How old the newest vehicle data actually is, so the UI can say
                 # "frozen 42 s ago" instead of quietly showing a stale position.
                 # Both sides monotonic, so a clock step cannot make it negative.
@@ -2932,6 +2948,21 @@ class Bridge:
                 self._last_link_state = state
         finally:
             await server_cm.__aexit__(None, None, None)
+
+    def run_replay(self, path: str, speed: float = 1.0, loop: bool = False) -> None:
+        """Serve a recorded flight to the console instead of a live link.
+
+        No MAVLink or JSON socket is opened at all: there is nothing to talk to,
+        and a replay that bound the live ports would collide with the daemon
+        actually flying the aircraft."""
+        from .replay import replay as _replay
+        self.replaying = True
+        if self.flight_log is not None:
+            # Recording a replay would be recording our own echo.
+            self.flight_log = None
+        threading.Thread(target=_replay, args=(self, path, speed, loop),
+                         daemon=True).start()
+        asyncio.run(self._serve())
 
     def run(self) -> None:
         if self.flight_log is not None:

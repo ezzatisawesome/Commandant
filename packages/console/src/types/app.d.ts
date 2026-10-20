@@ -96,6 +96,10 @@ export interface TelemetryFrame {
     windDown?: number,
     /** 1-sigma horizontal uncertainty of the wind estimate, m/s. */
     windSigma?: number,  // richer link state (connected == linkState === "alive")
+    /** Present and true only when gs is serving a RECORDED flight (--replay).
+     *  Carried on every frame rather than announced once, so a console that
+     *  joins mid-replay cannot mistake it for a live aircraft. */
+    replay?: boolean,
     // Health / status (see docs/ws-contract.md), merged into the frame by gs.
     ekfOk?: boolean,        // EKF_STATUS_REPORT flags nominal
     gpsFix?: number,        // GPS_RAW_INT.fix_type (0 none … 3 3D … 6 RTK-fixed)

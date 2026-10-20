@@ -24,6 +24,7 @@ import { pushFrame } from "@/stores/aircraft.store";
 import { $viewerStore } from "@/stores/cesium.store";
 import { $linkState, $commander } from "@/stores/link.store";
 import { $commandToken, $tokenRequired } from "@/stores/token.store";
+import { $replay } from "@/stores/replay.store";
 import { pushStatus } from "@/stores/statustext.store";
 /** MAV_SEVERITY_WARNING — what gs uses for its own operator notices. */
 const SEVERITY_WARNING = 4;
@@ -310,6 +311,9 @@ export class TelemetryClient {
 		// Prefer the daemon's explicit linkState; fall back to `connected` for the
 		// pre-link-manager bridge.
 		$linkState.set(frame.linkState ?? (frame.connected ? "alive" : "stale"));
+		// Every frame of a replay says so, so joining or reloading mid-replay
+		// still tells the truth. Latched off only by a frame that is not one.
+		$replay.set(frame.replay === true);
 		pushFrame(frame as TelemetryFrame);
 
 		if (frame.sunEpochMs !== undefined) {

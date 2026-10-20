@@ -158,6 +158,15 @@ def main() -> int:
                         help="ask a RUNNING daemon what it decided and exit. The "
                              "same snapshot the console can request, over the same "
                              "socket -- a field hub has ssh, not a browser.")
+    parser.add_argument("--replay", metavar="FILE.tlog",
+                        help="serve a recorded flight instead of a live link. "
+                             "The console connects as usual and every frame is "
+                             "marked as a replay. The .jsonl sidecar beside the "
+                             "file is interleaved automatically.")
+    parser.add_argument("--replay-speed", type=float, default=1.0,
+                        metavar="X", help="replay faster or slower (default 1x)")
+    parser.add_argument("--replay-loop", action="store_true",
+                        help="start again at the end")
     parser.add_argument("--keep-all-streams", action="store_true",
                         help="do not ask the vehicle to stop sending messages "
                              "gs never reads. Keeps them in the flight log, at "
@@ -194,6 +203,12 @@ def main() -> int:
               f"({args.relay_hz:g} Hz, outbound only)")
 
     print(f"gs {__version__} — telemetry bridge")
+    if args.replay:
+        # No live link: a replay serves the console and talks to no vehicle.
+        Bridge(
+            ws_host=args.ws_host, ws_port=args.ws_port, json_port=args.json_port,
+        ).run_replay(args.replay, args.replay_speed, args.replay_loop)
+        return 0
     Bridge(
         mavlink_endpoint=args.mavlink,
         json_port=args.json_port,
