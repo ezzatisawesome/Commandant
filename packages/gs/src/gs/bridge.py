@@ -472,9 +472,18 @@ MSG_WIND_COV = mavutil.mavlink.MAVLINK_MSG_ID_WIND_COV  # 231 — EKF wind estim
 # name rather than by msg.get_msgId() so that anything shaped like a message
 # works here -- the id is a pymavlink implementation detail and the name is the
 # thing the rest of this file already dispatches on.
-# Messages real PX4 streams to a GCS by default that gs never reads. MEASURED
-# against the firmware over a fat pipe: 8595 messages in 30 s, of which these
-# four were 4290 -- half the traffic decoded and discarded, at 189 us each.
+# Messages real PX4 streams to a GCS by default that gs never reads, and that
+# nothing else is known to want. MEASURED against the firmware over a fat pipe,
+# quiet machine, a fresh PX4 for each run:
+#   off: 286 msg/s, 3.41% of a core here (an estimated 17.1% of a Pi 4's)
+#   on:  168 msg/s, 1.14%                                          (5.7%)
+# 41% fewer messages, 67% less CPU, and ~10.9 kB/s of link.
+#
+# NOTE the trim is STICKY: PX4 holds a channel's stream settings until the
+# vehicle reboots, so turning it back off with --keep-all-streams does not
+# restore the streams on an already-running autopilot. Measuring one setting
+# after the other without restarting PX4 in between reads as "no effect",
+# which cost a confused measurement before this was understood.
 # ATTITUDE_QUATERNION duplicates ATTITUDE, which gs does use; the other three
 # are estimator and IMU detail for a simulator or a companion computer, not for
 # a ground station.
@@ -486,8 +495,16 @@ MSG_WIND_COV = mavutil.mavlink.MAVLINK_MSG_ID_WIND_COV  # 231 — EKF wind estim
 _TRIMMABLE = {
     "HIGHRES_IMU": mavutil.mavlink.MAVLINK_MSG_ID_HIGHRES_IMU,
     "ATTITUDE_QUATERNION": mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE_QUATERNION,
-    "LOCAL_POSITION_NED": mavutil.mavlink.MAVLINK_MSG_ID_LOCAL_POSITION_NED,
     "ODOMETRY": mavutil.mavlink.MAVLINK_MSG_ID_ODOMETRY,
+    # LOCAL_POSITION_NED is NOT here, though gs reads it no more than the
+    # others. This airframe's own px4-rc.mavlink carries a deliberate
+    #   mavlink stream -r 50 -s LOCAL_POSITION_NED -u $udp_gcs_port_local
+    # and nobody now remembers what consumes it. SET_MESSAGE_INTERVAL is scoped
+    # to the CHANNEL, not to the client that asked, so switching it off would
+    # switch it off for every other tool on that link as well -- silently, and
+    # from inside a ground station that has no business deciding what else on
+    # the network needs. The CPU this costs is a known quantity; what the trim
+    # would break is not, and that asymmetry decides it.
 }
 
 _REQUESTED_IDS = {

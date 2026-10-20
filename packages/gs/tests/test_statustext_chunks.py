@@ -294,3 +294,29 @@ def test_a_firmware_that_ignores_the_request_is_not_asked_forever():
         b._trim_stream(conn, "ODOMETRY")
     assert len(conn.sent) < 12, f"asked {len(conn.sent)} times in a minute"
     assert len(conn.sent) >= 1
+
+
+def test_local_position_ned_is_never_trimmed_because_this_airframe_wants_it():
+    """gs reads LOCAL_POSITION_NED no more than it reads the other three, so by
+    the logic of the trim it belongs in that list. It is deliberately not,
+    because this aircraft's own px4-rc.mavlink carries
+
+        mavlink stream -r 50 -s LOCAL_POSITION_NED -u $udp_gcs_port_local
+
+    and nobody now remembers what consumes it. SET_MESSAGE_INTERVAL is scoped to
+    the CHANNEL rather than to the client that asked, so switching it off would
+    switch it off for every other tool on that link -- silently, decided by a
+    ground station with no knowledge of what else is listening. The CPU it costs
+    is measured and bounded; what the trim would break is unknown, and that
+    asymmetry is the whole argument.
+
+    If it is ever established that nothing needs it, adding one line here is the
+    change -- and it is worth 18 more messages a second."""
+    from gs.bridge import _TRIMMABLE
+
+    assert "LOCAL_POSITION_NED" not in _TRIMMABLE
+    b, _ = _b()
+    b._vehicle = (1, 1)
+    conn = _TrimConn()
+    b._trim_stream(conn, "LOCAL_POSITION_NED")
+    assert conn.sent == [], "asked the vehicle to stop a stream it was told to send"

@@ -1019,11 +1019,25 @@ PARAM_SET whose type does not match: no refusal, no ack. gs retried, timed out
 and reported `timeout`, pointing the operator at the radio. gs now remembers
 each name's type from the PARAM_VALUEs it already forwards.
 
-Half the link was being decoded and discarded — `HIGHRES_IMU`,
-`ATTITUDE_QUATERNION`, `LOCAL_POSITION_NED` and `ODOMETRY` were 3984 of 7986
-messages in 30 s (11.9 kB/s, 43 MB/hour, 5.5% of a core here and an estimated
-28% of a Pi 4's). gs now asks PX4 to stop sending them on its channel: 266 →
-131 msg/s, 5.54% → 3.37% of a core.
+Much of the link was being decoded and discarded — `HIGHRES_IMU`,
+`ATTITUDE_QUATERNION` and `ODOMETRY` are ~3480 of 8579 messages in 30 s
+(10.9 kB/s, 39 MB/hour). gs now asks PX4 to stop sending them on its channel.
+Measured on a quiet machine with a fresh PX4 for each run: **286 → 168 msg/s,
+3.41% → 1.14% of a core** (an estimated 17.1% → 5.7% of a Pi 4's).
+
+`LOCAL_POSITION_NED` is deliberately NOT trimmed, though gs reads it no more
+than the others: this aircraft's own `px4-rc.mavlink` carries
+`mavlink stream -r 50 -s LOCAL_POSITION_NED -u $udp_gcs_port_local` and nobody
+now remembers what consumes it. `SET_MESSAGE_INTERVAL` is scoped to the
+CHANNEL, not to the client that asked, so trimming it would silently remove it
+for every other tool on that link. The CPU it costs is measured and bounded;
+what the trim would break is not.
+
+Two properties of the trim worth knowing: it is **sticky** (PX4 holds a
+channel's stream settings until the vehicle reboots, so `--keep-all-streams`
+does not restore them on a running autopilot), and AircraftSim is unaffected
+because it attaches to the **offboard** link on 14540 while gs uses the GCS
+link.
 
 Pointing a real browser at real PX4 then found the worst one. With 720
 parameters instead of the stand-in's 400, the table came up holding **121** of
