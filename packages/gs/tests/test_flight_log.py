@@ -8,6 +8,7 @@ need. Only the second one survives a bad day in the field.
 
 from __future__ import annotations
 
+import json
 import os
 import struct
 import time
@@ -216,3 +217,75 @@ def test_a_crash_loses_at_most_the_flush_interval_not_the_whole_buffer(tmp_path)
         n += 1
     assert n >= 25, f"only {n} of 30 frames were readable before shutdown"
     log.stop()
+
+
+# --- the JSON ingest path, which the tlog could not hold --------------------
+
+def test_the_json_feed_is_recorded_beside_the_mavlink_log(tmp_path):
+    """On a flightdyn-only rig this feed IS the flight: the solar and power
+    model, the sim's wind, and on a run with no autopilot locked, the whole of
+    the vehicle state. A log that recorded only MAVLink was missing its own data
+    source on exactly the runs it was written for.
+
+    It cannot go in the .tlog -- these are not MAVLink frames, and inventing a
+    message id to smuggle them in would break every reader that makes a .tlog
+    worth writing. So: JSON Lines beside it, sharing the basename."""
+    log = FlightLog(tmp_path).start()
+    log.write(_frames(3)[0])
+    for i in range(4):
+        log.write_json(json.dumps({"genW": 120 + i, "windN": 2.5}).encode())
+    _drain(log)
+
+    assert log.json_path.name.endswith(".jsonl")
+    assert log.json_path.stem == log.path.stem, "the two halves do not pair up"
+    lines = [json.loads(l) for l in log.json_path.read_text().splitlines()]
+    assert len(lines) == 4, lines
+    assert [l["frame"]["genW"] for l in lines] == [120, 121, 122, 123]
+    assert all(l["tUs"] > 1_577_836_800_000_000 for l in lines), "no usable timestamp"
+    # And the MAVLink half is untouched and still replayable.
+    conn = mavutil.mavlink_connection(str(log.path))
+    assert conn.recv_match(type="GLOBAL_POSITION_INT", blocking=False) is not None
+
+
+def test_a_malformed_datagram_is_kept_rather_than_dropped(tmp_path):
+    """The feed coming out wrong is a fault worth seeing. Keeping it must not
+    cost the file its line-by-line readability."""
+    log = FlightLog(tmp_path).start()
+    log.write_json(b'{"genW": 120}')
+    log.write_json(b'{"genW": not-json')
+    log.write_json(b'\xff\xfe binary nonsense')
+    _drain(log)
+
+    lines = [json.loads(l) for l in log.json_path.read_text().splitlines()]
+    assert len(lines) == 3, "a malformed frame was dropped"
+    assert lines[0]["frame"]["genW"] == 120
+    assert "invalid" in lines[1] and "not-json" in lines[1]["invalid"]
+    assert "invalid" in lines[2], "binary input broke the line"
+
+
+def test_both_streams_share_one_bound_so_neither_can_starve_the_link(tmp_path):
+    """One queue, one writer thread, one drop counter. Two independent bounds
+    would mean a flood on one path could still fill memory while the other
+    looked healthy."""
+    log = FlightLog(tmp_path, queue_max=4)      # never started: nothing drains
+    for _ in range(50):
+        log.write(_frames(1)[0])
+        log.write_json(b'{"genW": 1}')
+    assert log.dropped >= 90, log.dropped
+    assert log._q.qsize() <= 4
+
+
+def test_pruning_takes_the_json_sidecars_with_the_tlogs(tmp_path):
+    """Otherwise the cap counts half the bytes and the SD card fills anyway."""
+    log = FlightLog(tmp_path, max_file_bytes=2000, max_total_bytes=6000,
+                    flush_interval_s=0.01, fsync_interval_s=0)
+    log.start()
+    for f in _frames(400):
+        log.write(f)
+        log.write_json(b'{"genW": 100}')
+    _drain(log)
+
+    total = sum(p.stat().st_size for p in tmp_path.glob("commandant-*"))
+    assert log.pruned > 0, "never pruned"
+    assert total <= 6000 + 2000 + 600, f"{total} bytes over a 6000 cap"
+    assert any(p.suffix == ".jsonl" for p in tmp_path.glob("commandant-*"))

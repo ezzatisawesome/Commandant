@@ -102,6 +102,11 @@ def _print_status(s: dict) -> None:
         line("state", "off (--no-log)")
     else:
         line("writing", fl.get("path"))
+        if fl.get("jsonRecords"):
+            # Only when the feed is actually in use, so a plain PX4 flight is
+            # not told about a file it has no reason to care about.
+            line("json sidecar", f"{fl['jsonRecords']} frames  "
+                                 f"({os.path.basename(fl.get('jsonPath') or '')})")
         line("records", f"{fl.get('records', 0)}"
                         + (f"   <-- {fl['dropped']} DROPPED, the disk is not keeping up"
                            if fl.get("dropped") else ""))

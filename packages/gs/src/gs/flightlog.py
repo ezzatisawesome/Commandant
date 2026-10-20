@@ -29,6 +29,7 @@ day, and blocking the link to avoid it would be a worse one.
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import struct
@@ -87,13 +88,19 @@ class FlightLog:
         self.flush_interval_s = flush_interval_s
         self.fsync_interval_s = fsync_interval_s
         self.fsyncs = 0
-        self._q: queue.Queue[tuple[int, bytes] | None] = queue.Queue(maxsize=queue_max)
+        # Items are (kind, stamp_us, payload); kind picks the destination file.
+        # One queue and one writer thread for both streams, so they share the
+        # bound and the drop accounting rather than each having their own.
+        self._q: queue.Queue[tuple[str, int, bytes] | None] = queue.Queue(maxsize=queue_max)
         self._thread: threading.Thread | None = None
         self._fh = None
+        self._jfh = None
         self.path: Path | None = None
+        self.json_path: Path | None = None
         # Counters, read by status(). Dropped is the one that matters: a log
         # with a silent hole in it is worse than one that admits the hole.
         self.written = 0
+        self.json_written = 0
         self.dropped = 0
         self.bytes_written = 0
         self.rotations = 0
@@ -116,7 +123,29 @@ class FlightLog:
         if not self.enabled or not frame:
             return
         try:
-            self._q.put_nowait((self.stamp_us(), bytes(frame)))
+            self._q.put_nowait(("mav", self.stamp_us(), bytes(frame)))
+        except queue.Full:
+            self.dropped += 1
+
+    def write_json(self, datagram: bytes | bytearray | None) -> None:
+        """Queue one JSON telemetry datagram, for the sidecar.
+
+        The MAVLink log could not hold these: they are not MAVLink frames, and
+        inventing a message id to smuggle them into a .tlog would break every
+        reader that makes the log worth writing. They go to a JSON Lines file
+        beside it, sharing its basename so a reader can pair them.
+
+        This path carries what MAVLink has no carrier for -- the solar and power
+        model, the sim's modelled wind -- and on a flightdyn-only rig it carries
+        the whole flight. A log that omitted it would be missing its own data
+        source on exactly the runs it was written for.
+
+        The raw datagram is kept even when it is not valid JSON, because a feed
+        sending malformed frames is a thing somebody will need to see."""
+        if not self.enabled or not datagram:
+            return
+        try:
+            self._q.put_nowait(("json", self.stamp_us(), bytes(datagram)))
         except queue.Full:
             self.dropped += 1
 
@@ -153,6 +182,8 @@ class FlightLog:
         about our userspace buffer."""
         if self._fh is None or not self.fsync_interval_s:
             return
+        if self._jfh is not None:
+            self._safely(self._jfh.flush)
         if not self._safely(self._fh.flush):
             return
         try:
@@ -178,10 +209,28 @@ class FlightLog:
                 continue
             if item is None:
                 break
-            stamp, frame = item
+            kind, stamp, payload = item
+            if kind == "json":
+                if self._jfh is None:
+                    continue
+                try:
+                    body = json.loads(payload.decode("utf-8"))
+                    line = json.dumps({"tUs": stamp, "frame": body},
+                                      separators=(",", ":"))
+                except Exception:
+                    # Not valid JSON. Keep it anyway, marked, so the file stays
+                    # readable line by line and the malformed input survives.
+                    line = json.dumps({"tUs": stamp,
+                                       "invalid": payload[:400].decode("utf-8", "replace")},
+                                      separators=(",", ":"))
+                if not self._safely(self._jfh.write, line + "\n"):
+                    continue
+                self.json_written += 1
+                self.bytes_written += len(line) + 1
+                continue
             if self._fh is None:
                 continue
-            rec = struct.pack(">Q", stamp) + frame
+            rec = struct.pack(">Q", stamp) + payload
             if not self._safely(self._fh.write, rec):
                 continue
             self.written += 1
@@ -215,6 +264,9 @@ class FlightLog:
             candidate = self.dir / f"{name}-{n}.tlog"
         self.path = candidate
         self._fh = open(self.path, "ab", buffering=1024 * 64)
+        # Same basename, so a reader can pair the two halves of one flight.
+        self.json_path = candidate.with_suffix(".jsonl")
+        self._jfh = open(self.json_path, "a", buffering=1024 * 16)
         self._prune()
 
     def _rotate(self) -> None:
@@ -230,13 +282,18 @@ class FlightLog:
             self._sync()
             self._safely(self._fh.close)
             self._fh = None
+        if self._jfh is not None:
+            self._safely(self._jfh.flush)
+            self._safely(self._jfh.close)
+            self._jfh = None
 
     def _prune(self) -> None:
         """Keep the directory under its cap, oldest first. The current file is
         never pruned: deleting what is being written to would lose the flight in
         progress to save the one before it."""
         try:
-            logs = sorted(self.dir.glob("commandant-*.tlog"),
+            logs = sorted([p for p in self.dir.glob("commandant-*")
+                           if p.suffix in (".tlog", ".jsonl")],
                           key=lambda p: p.stat().st_mtime)
         except OSError:
             return
@@ -249,8 +306,8 @@ class FlightLog:
         for p in logs:
             if total <= self.max_total_bytes:
                 break
-            if self.path is not None and p == self.path:
-                continue
+            if p in (self.path, self.json_path):
+                continue        # never the files being written to
             try:
                 size = p.stat().st_size
                 p.unlink()
@@ -280,6 +337,8 @@ class FlightLog:
             "path": str(self.path) if self.path else None,
             "enabled": self.enabled,
             "records": self.written,
+            "jsonRecords": self.json_written,
+            "jsonPath": str(self.json_path) if self.json_path else None,
             "dropped": self.dropped,
             "bytes": self.bytes_written,
             "rotations": self.rotations,

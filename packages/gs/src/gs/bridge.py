@@ -2468,6 +2468,15 @@ class Bridge:
         while True:
             try:
                 data, _ = sock.recvfrom(65535)
+            except Exception:
+                continue
+            # Recorded BEFORE parsing, and whatever it is: on a flightdyn-only
+            # rig this feed is the entire flight, and a feed sending malformed
+            # frames is a thing somebody will need to see rather than a thing to
+            # discard quietly. See FlightLog.write_json.
+            if self.flight_log is not None:
+                self.flight_log.write_json(data)
+            try:
                 obj = json.loads(data.decode("utf-8"))
             except Exception:
                 continue
