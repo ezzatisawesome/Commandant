@@ -21,7 +21,10 @@ import sys
 from typing import Optional
 
 from . import __version__
-from .hub import DEFAULTS, cmd_install, cmd_update
+from .hub import (
+    DEFAULTS, cmd_down, cmd_install, cmd_logs, cmd_status, cmd_up, cmd_uninstall,
+    cmd_update,
+)
 
 
 def _add_provision_opts(p: argparse.ArgumentParser) -> None:
@@ -50,6 +53,31 @@ def main(argv: Optional[list[str]] = None) -> int:
     _add_provision_opts(p)
     p.add_argument("--no-pull", action="store_true", help="Don't git-pull before re-running")
     p.set_defaults(fn=cmd_update)
+
+    # The rest of the lifecycle. These were in the package description and the
+    # roadmap but not in the code, so `commandant status` -- the thing you type
+    # in a field when the page does not load -- was an argparse error.
+    p = sub.add_parser("status", help="What is running, and where to look next")
+    _add_provision_opts(p)
+    p.set_defaults(fn=cmd_status)
+
+    p = sub.add_parser("up", help="Start the hub's services")
+    _add_provision_opts(p)
+    p.set_defaults(fn=cmd_up)
+
+    p = sub.add_parser("down", help="Stop them (the WiFi AP stays up)")
+    _add_provision_opts(p)
+    p.set_defaults(fn=cmd_down)
+
+    p = sub.add_parser("logs", help="Follow both services' journals together")
+    p.add_argument("-n", "--lines", type=int, default=200, help="History to show")
+    p.add_argument("-f", "--follow", action="store_true", help="Keep following")
+    p.set_defaults(fn=cmd_logs)
+
+    p = sub.add_parser("uninstall", help="Remove the services and AP config")
+    _add_provision_opts(p)
+    p.add_argument("--yes", action="store_true", help="Required; this is destructive")
+    p.set_defaults(fn=cmd_uninstall)
 
     args = parser.parse_args(argv)
     try:

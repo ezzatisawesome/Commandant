@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from "uuid";
 
 import type {
 	AckMessage,
+	StatusMessage,
 	CommandName,
 	FenceAckMessage,
 	FenceItem,
@@ -22,15 +23,24 @@ import type {
 import { pushFrame } from "@/stores/aircraft.store";
 import { $viewerStore } from "@/stores/cesium.store";
 import { $linkState, $commander } from "@/stores/link.store";
+import { $commandToken, $tokenRequired } from "@/stores/token.store";
+import { $replay } from "@/stores/replay.store";
 import { pushStatus } from "@/stores/statustext.store";
-import { upsertParam, upsertParams, setParamProgress, clearParams } from "@/stores/params.store";
+/** MAV_SEVERITY_WARNING — what gs uses for its own operator notices. */
+const SEVERITY_WARNING = 4;
+import {
+	upsertParam, upsertParams, setParamProgress, clearParams, markParamsStale,
+} from "@/stores/params.store";
 import {
 	$missionCurrent,
 	$missionProgress,
 	$missionReached,
 	setMissionItems,
+	markPlanRead,
+	clearPlanRead,
+	setVehicleMission,
 } from "@/stores/mission.store";
-import { setFenceItems, setRallyItems } from "@/stores/geo.store";
+import { setFenceItems, setRallyItems, setVehicleFence } from "@/stores/geo.store";
 import envs, { IS_VIEW } from "@/lib/envs";
 
 // How long a command waits for its ack before we give up (gs retries internally
@@ -99,6 +109,13 @@ export class TelemetryClient {
 	private pendingParams = new Map<string, PendingParam>();
 	// mission_push requests awaiting their mission_ack, keyed by id.
 	private pendingMissions = new Map<string, PendingMission>();
+	// One in-flight status request. There is no id on the wire because there is
+	// never more than one outstanding: it is a human asking a question.
+	private pendingStatus: {
+		resolve: (s: StatusMessage) => void;
+		reject: (e: Error) => void;
+		timer: ReturnType<typeof setTimeout>;
+	} | null = null;
 	// fence_push / rally_push requests awaiting their ack, keyed by id.
 	private pendingFence = new Map<string, PendingGeo>();
 	private pendingRally = new Map<string, PendingGeo>();
@@ -132,10 +149,25 @@ export class TelemetryClient {
 			if (IS_VIEW) $commander.set(false); // watching, never commanding
 			if (this.hadSession) {
 				// Live-execution state from the previous socket is unknown now; the
-				// plan/params the operator was editing are left alone.
+				// plan the operator was editing is their own work and is left alone.
 				$missionCurrent.set(null);
 				$missionReached.set(null);
 				$missionProgress.set(null);
+				// The param table is NOT the operator's work — it is a read of the
+				// vehicle, and gs cannot announce an event it missed. A dropped
+				// socket is exactly a window where it was not watching: the daemon
+				// may have restarted, the vehicle may have rebooted and reverted
+				// unsaved writes, the radio may have been moved to another
+				// aircraft. Keep the values, stop claiming they are current.
+				markParamsStale();
+				// Same reasoning for the plan panes: what the vehicle holds may
+				// have changed while nobody was listening, so an empty panel
+				// must go back to meaning "not asked" rather than "none".
+				clearPlanRead();
+				// And what the vehicle holds is no longer known: it may have
+				// rebooted, or this may be a different aircraft.
+				setVehicleMission(null);
+				setVehicleFence(null);
 			}
 			this.hadSession = true;
 			// Bid to be the single active commander as soon as the socket is up, so
@@ -180,6 +212,10 @@ export class TelemetryClient {
 			} else if (type === "mission") {
 				// Readback after a pull: replace the editable plan wholesale.
 				setMissionItems((msg as MissionMessage).items);
+				markPlanRead("mission");
+				// A readback is the one moment the draft and the vehicle provably
+				// agree, so record it as what the vehicle holds.
+				setVehicleMission((msg as MissionMessage).items);
 				$missionProgress.set(null);
 			} else if (type === "mission_progress") {
 				const p = msg as { phase: "upload" | "download"; seq: number; count: number };
@@ -193,12 +229,47 @@ export class TelemetryClient {
 				$missionReached.set((msg as { seq: number }).seq);
 			} else if (type === "fence") {
 				setFenceItems((msg as FenceMessage).items);
+				markPlanRead("fence");
+				setVehicleFence((msg as FenceMessage).items);
 			} else if (type === "rally") {
 				setRallyItems((msg as RallyMessage).items);
+				markPlanRead("rally");
 			} else if (type === "fence_ack") {
 				this.resolveGeoAck(this.pendingFence, msg as FenceAckMessage);
 			} else if (type === "rally_ack") {
 				this.resolveGeoAck(this.pendingRally, msg as RallyAckMessage);
+			} else if (type === "status") {
+				const p = this.pendingStatus;
+				if (p) {
+					clearTimeout(p.timer);
+					this.pendingStatus = null;
+					p.resolve(msg as StatusMessage);
+				}
+			} else if (type === "commander") {
+				// Another console took command. Said explicitly so this one can
+				// grey out, rather than leaving the operator to discover it from
+				// every action being rejected.
+				const c = msg as { held?: boolean; text?: string };
+				$commander.set(c.held === true);
+				if (c.held !== true) {
+					pushStatus(SEVERITY_WARNING,
+						c.text || "another console took command", Date.now());
+				}
+			} else if (type === "vehicle_reboot") {
+				// The autopilot restarted (on a bench or in HITL, constantly: every
+				// restart, every flash). Params are the dangerous leftover — PX4
+				// reverts anything that was not saved, so keeping the pre-reboot
+				// values on screen shows an edit as applied when the vehicle has
+				// dropped it. Drop the cache rather than show a value we cannot
+				// vouch for, and say so in the log the operator is already reading.
+				const r = msg as { bootMs?: number; t?: number };
+				clearParams();
+				$missionCurrent.set(null);
+				$missionReached.set(null);
+				$missionProgress.set(null);
+				pushStatus(SEVERITY_WARNING,
+					"vehicle rebooted — parameters cleared, re-read them before trusting any value",
+					r.t ?? Date.now());
 			} else if (type === "telemetry" || type === undefined) {
 				this.onTelemetry(msg as TelemetryFrame & { type?: string });
 			} else {
@@ -240,6 +311,9 @@ export class TelemetryClient {
 		// Prefer the daemon's explicit linkState; fall back to `connected` for the
 		// pre-link-manager bridge.
 		$linkState.set(frame.linkState ?? (frame.connected ? "alive" : "stale"));
+		// Every frame of a replay says so, so joining or reloading mid-replay
+		// still tells the truth. Latched off only by a frame that is not one.
+		$replay.set(frame.replay === true);
 		pushFrame(frame as TelemetryFrame);
 
 		if (frame.sunEpochMs !== undefined) {
@@ -313,7 +387,10 @@ export class TelemetryClient {
 	 * treats authority optimistically. Fire-and-forget from the caller's view.
 	 */
 	private claim() {
-		void this.takeCommand().catch(() => { /* no confirm — authority stays unknown */ });
+		// On connect, BID — never take. A page merely loading must not pull
+		// authority away from whoever is flying, which is exactly what would
+		// happen if this shared the "Take command" path. See bid().
+		void this.bid(false).catch(() => { /* no confirm — authority stays unknown */ });
 	}
 
 	/**
@@ -328,6 +405,17 @@ export class TelemetryClient {
 	 * cure was to find and close the other tab, with nothing on screen saying so.
 	 */
 	takeCommand(): Promise<boolean> {
+		// The operator pressed a button that says "Take command", which is them
+		// stating the intent. gs honours `force` by moving authority and telling
+		// the console that held it. Without the flag this re-sent a plain claim
+		// that gs refused for the same reason it refused the first one, so the
+		// button could not do the thing it was named after.
+		return this.bid(true);
+	}
+
+	/** Ask for command authority. `force` is an explicit takeover (see
+	 *  takeCommand); without it, gs grants only if authority is free. */
+	private bid(force: boolean): Promise<boolean> {
 		return new Promise((resolve, reject) => {
 			if (IS_VIEW) {
 				// The hosted view has no route back to the hub by design.
@@ -347,20 +435,68 @@ export class TelemetryClient {
 			this.pending.set(id, {
 				resolve: (ack) => {
 					$commander.set(ack.ok);
+					// gs says WHY it refused. "needs the hub token" is the one
+					// refusal the operator can act on, so it drives a prompt
+					// rather than the generic "another console holds command".
+					$tokenRequired.set(!ack.ok && /token/i.test(ack.text || ""));
 					resolve(ack.ok);
 				},
 				reject,
 				timer,
 			});
-			this.send({ type: "claim", id });
+			// The token rides on the claim, which is the only message gs gates:
+			// every privileged path already refuses a non-commander, so one
+			// secret at the door covers commands, parameter writes and plan
+			// uploads. Empty is normal -- a hub running without a token accepts
+			// it and announces that it is doing so.
+			const token = $commandToken.get();
+			this.send({ type: "claim", id, ...(force ? { force: true } : {}),
+				...(token ? { token } : {}) });
 		});
 	}
 
 	// --- parameters (Phase 2) ------------------------------------------------
 
+	/** Ask the daemon what it currently believes — see StatusMessage.
+	 *
+	 *  Deliberately not wired to a store or polled: this is a diagnostic for a
+	 *  person with a question, and a 1 Hz poll of it would be exactly the kind
+	 *  of idle traffic a telemetry radio does not have room for. Call it from
+	 *  the console, or read it from the daemon's own log line. */
+	status(): Promise<StatusMessage> {
+		return new Promise((resolve, reject) => {
+			if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+				reject(new Error("not connected"));
+				return;
+			}
+			const timer = setTimeout(() => {
+				this.pendingStatus = null;
+				reject(new Error("timeout"));
+			}, COMMAND_TIMEOUT_MS);
+			this.pendingStatus = { resolve, reject, timer };
+			this.send({ type: "status" });
+		});
+	}
+
 	/** Request the full PX4 parameter list; results stream into the params store. */
 	refreshParams() {
-		clearParams();
+		// NOT clearParams(). gs dedupes a refresh request while one is already
+		// walking the list (deliberately -- two tabs pressing Refresh must not
+		// double the radio load), so clearing here threw away the values
+		// already received and left the table holding only the TAIL of the walk
+		// that was already running. gs then reported done, 720 of 720, and the
+		// editor showed a partial table with no error at all.
+		//
+		// MEASURED against real PX4, 720 parameters: a raw client that was
+		// listening from the start received all 721 names, while the browser's
+		// table held 121 on one run and 361 on another -- whatever happened to
+		// arrive after the clear.
+		//
+		// Overwriting in place is correct instead: a walk sends every
+		// parameter, so the table is complete when it finishes either way. A
+		// parameter that vanished from the vehicle would linger, which cannot
+		// happen without new firmware -- and swapping vehicles reconnects the
+		// socket, which does clear it.
 		this.send({ type: "param_refresh" });
 	}
 
@@ -393,9 +529,32 @@ export class TelemetryClient {
 		});
 	}
 
-	/** Enable/disable a MAVLink stream at a rate (hz=0 disables). Fire-and-forget. */
-	setStream(msgId: number, hz: number) {
-		this.send({ type: "stream", msgId, hz });
+	/** Enable/disable a MAVLink stream at a rate (hz=0 disables).
+	 *
+	 *  Carries an `id` so the result comes back. This is not a local display
+	 *  preference: it sends SET_MESSAGE_INTERVAL, which changes what the vehicle
+	 *  transmits, for every client, out of a finite link budget — so gs gates it
+	 *  on command authority and may clamp the rate to the link's budget. Sent
+	 *  fire-and-forget, a refusal or a clamp was invisible and the operator just
+	 *  saw nothing happen. */
+	setStream(msgId: number, hz: number): Promise<AckMessage> {
+		return new Promise((resolve, reject) => {
+			if (IS_VIEW) {
+				reject(new Error("read-only view"));
+				return;
+			}
+			if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+				reject(new Error("not connected"));
+				return;
+			}
+			const id = uuidv4();
+			const timer = setTimeout(() => {
+				this.pending.delete(id);
+				reject(new Error("timeout"));
+			}, COMMAND_TIMEOUT_MS);
+			this.pending.set(id, { resolve, reject, timer });
+			this.send({ type: "stream", id, msgId, hz });
+		});
 	}
 
 	private resolveParamAck(ack: ParamAckMessage) {
@@ -432,7 +591,18 @@ export class TelemetryClient {
 				this.pendingMissions.delete(id);
 				reject(new Error("timeout"));
 			}, MISSION_TIMEOUT_MS);
-			this.pendingMissions.set(id, { resolve, reject, timer });
+			// An ACCEPTED upload is the other moment the two provably agree.
+			// Recorded from the items that were actually sent, not from the draft
+			// as it stands when the ack arrives -- the operator may have kept
+			// editing during the handshake, which over a radio takes seconds.
+			const sent = items.map((it) => ({ ...it }));
+			this.pendingMissions.set(id, {
+				resolve: (ack) => {
+					if (ack.ok) setVehicleMission(sent);
+					resolve(ack);
+				},
+				reject, timer,
+			});
 			this.send({ type: "mission_push", id, items });
 		});
 	}
@@ -509,7 +679,18 @@ export class TelemetryClient {
 				pending.delete(id);
 				reject(new Error("timeout"));
 			}, MISSION_TIMEOUT_MS);
-			pending.set(id, { resolve, reject, timer });
+			// An accepted fence push is the other moment the draft and the
+			// vehicle provably agree. From the items SENT, for the same reason as
+			// the mission: the handshake takes seconds over a radio and the
+			// operator may keep dragging vertices during it.
+			const sent = items.map((it) => ({ ...it }));
+			pending.set(id, {
+				resolve: (ack) => {
+					if (ack.ok && type === "fence_push") setVehicleFence(sent as FenceItem[]);
+					resolve(ack);
+				},
+				reject, timer,
+			});
 			this.send({ type, id, items });
 		});
 	}
@@ -545,6 +726,16 @@ export class TelemetryClient {
 				p.reject(new Error(reason));
 			}
 			m.clear();
+		}
+		// A status request outstanding when the link goes is not in `pending`
+		// (there is no id on the wire for it), so without this it would sit
+		// unsettled until its own 5 s timeout — or forever, on disconnect, where
+		// no timer fires because the socket is gone. Every other request type is
+		// settled here; this one has to be too.
+		if (this.pendingStatus) {
+			clearTimeout(this.pendingStatus.timer);
+			this.pendingStatus.reject(new Error(reason));
+			this.pendingStatus = null;
 		}
 	}
 

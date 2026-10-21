@@ -8,6 +8,7 @@ import {
 	lookupFrom,
 	metresBetween,
 	minLegalRunM,
+	blockersForSeq,
 	missionBlockers,
 	missionLooksRunnable,
 	needsEither,
@@ -16,7 +17,7 @@ import {
 	runNeededM,
 	type ParamLookup,
 } from "@/lib/missionCheck";
-import type { MissionItem } from "@/types/app";
+import type { FenceItem, MissionItem } from "@/types/app";
 
 // Both failures here were measured against a live PX4, not imagined:
 //
@@ -259,5 +260,141 @@ describe("lookupFrom", () => {
 		const look = lookupFrom({ [LND_ANG_PARAM]: { value: 5 } });
 		expect(look(LND_ANG_PARAM)).toBe(5);
 		expect(look("MISSING")).toBeUndefined();
+	});
+});
+
+describe("a plan that leaves its own geofence is a blocker, not a paragraph", () => {
+	// PX4 enforces the fence in FLIGHT, not at upload: the plan transfers
+	// cleanly, acks "accepted", and then breaches mid-mission. GF_ACTION
+	// defaults to 2 (Hold) per the bundled PX4 metadata, so the aircraft stops
+	// and loiters out there for a reason that surfaces only as a STATUSTEXT.
+	//
+	// Reported per item, like the landing findings, so the offending waypoint
+	// gets a row flag and can be dragged into compliance.
+	const square = (lat: number, lon: number, d: number): FenceItem[] =>
+		[[-d, -d], [-d, d], [d, d], [d, -d]].map(([dy, dx], i) => ({
+			seq: i, kind: "fence_inclusion" as const, lat: lat + dy, lon: lon + dx,
+		}));
+	const wp = (seq: number, lat: number, lon: number) =>
+		({ seq, kind: "waypoint" as const, lat, lon, alt: 80 });
+	const noParams: ParamLookup = () => undefined;
+
+	it("flags the offending item, with its seq so the row can carry it", () => {
+		const fence = square(37.4, -122.15, 0.01);
+		const blockers = missionBlockers([wp(0, 37.4, -122.15), wp(1, 37.5, -122.15)], noParams, fence);
+		expect(blockers).toHaveLength(1);
+		expect(blockers[0].code).toBe("fence-breach");
+		expect(blockers[0].seq).toBe(1);
+		expect(blockers[0].short).toMatch(/outside the fence/);
+		expect(blockersForSeq(blockers, 1)).toHaveLength(1);
+		expect(blockersForSeq(blockers, 0)).toHaveLength(0);
+	});
+
+	it("is silent when the plan stays inside", () => {
+		const fence = square(37.4, -122.15, 0.01);
+		expect(missionBlockers([wp(0, 37.4, -122.15)], noParams, fence)).toEqual([]);
+	});
+
+	it("catches an exclusion circle the inclusion fence allows", () => {
+		// Why this cannot use fenceProximity: the waypoint is well inside the
+		// inclusion polygon, so the NEAREST shape is the compliant one and the
+		// violation is invisible to a nearest-shape answer.
+		const fence: FenceItem[] = [
+			...square(37.4, -122.15, 0.02),
+			{ seq: 4, kind: "fence_circle_exclusion", lat: 37.4, lon: -122.15, params: { radius: 500 } },
+		];
+		const blockers = missionBlockers([wp(0, 37.4005, -122.15)], noParams, fence);
+		expect(blockers[0].short).toMatch(/exclusion/);
+	});
+
+	it("ignores rtl, which carries no position", () => {
+		const fence = square(37.4, -122.15, 0.01);
+		const items = [wp(0, 37.4, -122.15), { seq: 1, kind: "rtl" as const, lat: 0, lon: 0, alt: 0 }];
+		expect(missionBlockers(items, noParams, fence)).toEqual([]);
+	});
+
+	it("stays quiet with no fence, rather than implying the plan is clear", () => {
+		expect(missionBlockers([wp(0, 37.4, -122.15)], noParams, [])).toEqual([]);
+		expect(missionBlockers([wp(0, 37.4, -122.15)], noParams)).toEqual([]);
+	});
+
+	it("does not displace the takeoff/landing findings, which come first", () => {
+		const fence = square(37.4, -122.15, 0.01);
+		const items = [wp(0, 37.5, -122.15)];       // outside AND missing a takeoff
+		const blockers = missionBlockers(items, (n) => (n === TKO_LAND_REQ_PARAM ? 1 : undefined), fence);
+		expect(blockers.map((b) => b.code)).toEqual(["needs-takeoff", "fence-breach"]);
+	});
+
+	it("missionLooksRunnable accounts for the fence", () => {
+		const fence = square(37.4, -122.15, 0.01);
+		expect(missionLooksRunnable([wp(0, 37.5, -122.15)], noParams, fence)).toBe(false);
+		expect(missionLooksRunnable([wp(0, 37.4, -122.15)], noParams, fence)).toBe(true);
+	});
+});
+
+describe("the MISSION button must reason about the plan the VEHICLE holds", () => {
+	// Pressing MISSION switches PX4 to AUTO.MISSION, which flies what the
+	// autopilot has. Checking the draft instead inverted the warning in the case
+	// that matters: read back a plan PX4 will refuse, fix the draft without
+	// uploading, and the amber went away while the autopilot still held the bad
+	// one — the warning disappeared exactly when it was most needed.
+	//
+	// This pins the decision as data, the way the bar computes it.
+	const needsLandingParam: ParamLookup = (n) => (n === TKO_LAND_REQ_PARAM ? 2 : undefined);
+	const wp = (seq: number, lat: number) =>
+		({ seq, kind: "waypoint" as const, lat, lon: -122.1, alt: 80 });
+	const landing = (seq: number) =>
+		({ seq, kind: "land" as const, lat: 37.4, lon: -122.1, alt: 0 });
+
+	it("warns about the vehicle's plan, not the fixed draft", () => {
+		const onVehicle = [wp(0, 37.40), wp(1, 37.41)];          // no landing: refused
+		const draft = [wp(0, 37.40), wp(1, 37.41), landing(2)];  // fixed, not uploaded
+
+		// What the bar used to do — and it reads as "all clear".
+		expect(missionBlockers(draft, needsLandingParam)).toEqual([]);
+		// What it does now.
+		const real = missionBlockers(onVehicle, needsLandingParam);
+		expect(real.map((b) => b.code)).toEqual(["needs-landing"]);
+	});
+
+	it("does not warn about a draft the vehicle was never given", () => {
+		const onVehicle = [wp(0, 37.40), landing(1)];            // fine
+		const draft = [wp(0, 37.40), wp(1, 37.41)];              // being authored
+		expect(missionBlockers(onVehicle, needsLandingParam)).toEqual([]);
+		// The draft on its own would have warned, about a plan PX4 does not have.
+		expect(missionBlockers(draft, needsLandingParam)).not.toEqual([]);
+	});
+
+	it("an unknown vehicle mission yields no blockers, so the bar must say so itself", () => {
+		// missionBlockers([]) is empty by design — "nothing to say about an empty
+		// plan". That is why the bar treats null as its own case rather than
+		// letting an empty result read as approval.
+		expect(missionBlockers([], needsLandingParam)).toEqual([]);
+	});
+});
+
+describe("a draft on screen with the vehicle's plan unknown", () => {
+	// After a reconnect, $vehicleMission is null — gs cannot report what it did
+	// not witness. The empty-state message cannot say so, because there IS a
+	// draft to show, so the operator saw their waypoints with nothing hinting
+	// that the aircraft may hold something else entirely.
+	//
+	// Pinned as the condition the panel renders on.
+	const wp = (seq: number) => ({ seq, kind: "waypoint" as const, lat: 37.4, lon: -122.1, alt: 80 });
+	const unknownClaim = (items: unknown[], vehicle: unknown | null) =>
+		items.length > 0 && vehicle === null;
+
+	it("is announced when there is a draft and no known vehicle plan", () => {
+		expect(unknownClaim([wp(0)], null)).toBe(true);
+	});
+
+	it("is not announced when the vehicle's plan IS known", () => {
+		// Then the divergence check does the talking instead, which is a
+		// different and more specific message.
+		expect(unknownClaim([wp(0)], [wp(0)])).toBe(false);
+	});
+
+	it("is not announced for an empty draft, which has its own message", () => {
+		expect(unknownClaim([], null)).toBe(false);
 	});
 });

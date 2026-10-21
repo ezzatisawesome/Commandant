@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import {
-	distanceM, bearingDeg, angleDiffDeg, solveWind, trackFromFixes,
+	distanceM, bearingDeg, angleDiffDeg,
 	sunPosition, distanceToSegmentM, pointInPolygon, fenceProximity,
 	aglM, clearanceBand,
 } from "@/lib/flightGeometry";
@@ -39,49 +39,7 @@ describe("angleDiffDeg", () => {
 	});
 });
 
-describe("solveWind", () => {
-	it("reports no wind when track and heading agree at equal speeds", () => {
-		const w = solveWind(90, 12, 90, 12)!;
-		expect(w.speedMps).toBeCloseTo(0, 6);
-		expect(w.driftDeg).toBeCloseTo(0, 6);
-	});
 
-	it("names a pure headwind by the direction it blows FROM", () => {
-		// Flying east at 12 airspeed but only 8 over the ground: 4 m/s on the nose.
-		// Nose points east (090), so the wind comes FROM the east.
-		const w = solveWind(90, 12, 90, 8)!;
-		expect(w.speedMps).toBeCloseTo(4, 6);
-		expect(w.fromDeg).toBeCloseTo(90, 4);
-	});
-
-	it("names a pure tailwind as blowing from behind", () => {
-		const w = solveWind(90, 12, 90, 16)!;
-		expect(w.speedMps).toBeCloseTo(4, 6);
-		expect(w.fromDeg).toBeCloseTo(270, 4);
-	});
-
-	it("resolves a crosswind into drift", () => {
-		// Nose north at 10, but tracking 045 at 10*sqrt(2): a 10 m/s wind from the west.
-		const w = solveWind(0, 10, 45, 10 * Math.SQRT2)!;
-		expect(w.speedMps).toBeCloseTo(10, 4);
-		expect(w.fromDeg).toBeCloseTo(270, 2);
-		expect(w.driftDeg).toBeCloseTo(45, 6);   // pushed right of the nose
-	});
-
-	it("returns null rather than NaN on missing data", () => {
-		expect(solveWind(NaN, 12, 90, 8)).toBeNull();
-		expect(solveWind(90, 12, 90, undefined as unknown as number)).toBeNull();
-	});
-});
-
-describe("trackFromFixes", () => {
-	it("ignores jitter below the movement threshold", () => {
-		expect(trackFromFixes(LAT, LON, LAT + 1e-7, LON)).toBeNull();
-	});
-	it("gives the course once the aircraft has actually moved", () => {
-		expect(trackFromFixes(LAT, LON, LAT, LON + 0.001)).toBeCloseTo(90, 1);
-	});
-});
 
 describe("sunPosition", () => {
 	it("puts the sun high at local noon and below the horizon at local midnight", () => {

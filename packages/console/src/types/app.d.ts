@@ -59,6 +59,22 @@ export interface TelemetryFrame {
     // frame with a large dataAgeMs means gs is re-serving a stale fix, which is
     // what a frozen simulator or a dead autopilot looks like from here.
     dataAgeMs?: number | null,
+    // Monotonic ms since the gs daemon started. THIS is the clock to difference
+    // for anything rate-related; `t` is a wall-clock timestamp for display and
+    // the field hub is a Pi with no RTC, so `t` can step backward by an hour
+    // the moment NTP lands. Absent from frames served by an older daemon.
+    upMs?: number,
+    // Age in ms of each MESSAGE GROUP behind this frame, keyed by group
+    // ("position", "attitude", "airdata", "wind", "gps", "battery",
+    // "actuators", "health", "ekf"). `dataAgeMs` says whether the aircraft is
+    // still talking; this says whether a particular NUMBER is still true,
+    // which is not the same question: the fields arrive on different messages
+    // at different rates, and three of them are messages gs had to ask for and
+    // which a rebooted autopilot stops sending. A stopped stream's last value
+    // keeps being re-broadcast, so without this it is indistinguishable from a
+    // live one. A group that has never been seen is ABSENT rather than 0 —
+    // "no estimate yet" and "an estimate from four minutes ago" differ.
+    ages?: Record<string, number>,
 
     // --- straight from the autopilot's estimator, not reconstructed here -----
     // EKF velocity in NED (m/s), from GLOBAL_POSITION_INT vx/vy/vz. Doppler
@@ -80,6 +96,10 @@ export interface TelemetryFrame {
     windDown?: number,
     /** 1-sigma horizontal uncertainty of the wind estimate, m/s. */
     windSigma?: number,  // richer link state (connected == linkState === "alive")
+    /** Present and true only when gs is serving a RECORDED flight (--replay).
+     *  Carried on every frame rather than announced once, so a console that
+     *  joins mid-replay cannot mistake it for a live aircraft. */
+    replay?: boolean,
     // Health / status (see docs/ws-contract.md), merged into the frame by gs.
     ekfOk?: boolean,        // EKF_STATUS_REPORT flags nominal
     gpsFix?: number,        // GPS_RAW_INT.fix_type (0 none … 3 3D … 6 RTK-fixed)
@@ -107,7 +127,49 @@ export interface CommandMessage {
 }
 // Bid to be the single commander. When `id` is set, gs replies with an AckMessage
 // (text "commander" | "not commander") so the UI can confirm it holds authority.
-export interface ClaimMessage { type: "claim", id?: string }
+/** Bid for command authority. `force` is an explicit takeover — the operator
+ *  pressed "Take command". Without it gs grants only if authority is free, so a
+ *  page merely loading can never pull it away from whoever is flying. */
+export interface ClaimMessage { type: "claim", id?: string, force?: boolean }
+/** gs telling a console whether it holds command authority. Sent unprompted to
+ *  the console that just LOST it to a takeover, so its UI can grey out instead
+ *  of leaving the operator to discover it from every action being rejected. */
+export interface CommanderMessage { type: "commander", held: boolean, text?: string }
+/** Ask the daemon what it currently believes: `{ type: "status" }` in, this
+ *  back. Read-only, open to any client, and it allocates nothing — every field
+ *  is state gs already keeps. Exists for the field: when commands time out or a
+ *  stream is missing during a day-in-the-life run, the question is "what did gs
+ *  decide?", and the answers that matter are the ones it INFERRED (which
+ *  transport autodetect found, what budget it derived, which vehicle it locked
+ *  onto) because those are exactly what nobody configured. */
+export interface StatusMessage {
+    type: "status",
+    endpoint: string,              // the transport actually open
+    configuredEndpoint: string,    // what was asked for ("auto", usually)
+    linkBudgetBps: number,
+    linkBudgetPinned: boolean,
+    paramFetch: "paced" | "flood",
+    vehicle: [number, number] | null,   // locked sysid/compid
+    linkState: LinkState,
+    dataAgeMs: number | null,
+    streamAges: Record<string, number>,
+    bootMs?: number | null,
+    commanderHeld: boolean,
+    clients: number,
+    pendingCommands: number,
+    pendingParamSets: number,
+    paramRefresh: { received: number, count: number } | null,
+    missionOp: { op: string, plane: string } | null,
+    /** Both survivable by design, which is why they are worth seeing: a daemon
+     *  that reopened the link forty times is working, and is also telling you
+     *  something. */
+    linkReopens: number,
+    handlerErrors: number,
+    upMs: number,
+    version: string,
+    relay: { connected: boolean, sent: number, dropped: number } | null,
+}
+export interface StatusRequestMessage { type: "status" }
 export interface ParamRefreshMessage { type: "param_refresh" } // request the full param list
 export interface ParamSetMessage {
     type: "param_set",
@@ -118,6 +180,10 @@ export interface ParamSetMessage {
 }
 export interface StreamMessage {
     type: "stream",
+    /** Optional; when present gs replies with an `ack` under it. The request
+     *  is authority-gated and the rate may be clamped to the link budget, so a
+     *  client that wants to know what happened should send one. */
+    id?: string,
     msgId: number,          // MAVLink message id to (de)activate
     hz: number,             // rate; 0 disables the stream
 }
@@ -173,7 +239,8 @@ export interface RallyPullMessage { type: "rally_pull" }
 export type ClientMessage =
     | CommandMessage | ClaimMessage | ParamRefreshMessage | ParamSetMessage | StreamMessage
     | MissionPushMessage | MissionPullMessage | MissionSetCurrentMessage
-    | FencePushMessage | FencePullMessage | RallyPushMessage | RallyPullMessage;
+    | FencePushMessage | FencePullMessage | RallyPushMessage | RallyPullMessage
+    | StatusRequestMessage;
 
 // gs -> console
 export interface TelemetryMessage extends TelemetryFrame { type: "telemetry" }
@@ -187,6 +254,15 @@ export interface AckMessage {
     text: string,           // human-readable ("accepted" | "timeout" | "not commander" | …)
 }
 export interface LinkMessage { type: "link", state: LinkState, lastMsgMs: number }
+/** The autopilot restarted: its uptime clock jumped backward. Not a lost link —
+ *  telemetry keeps flowing — but anything the vehicle did not persist is gone,
+ *  so a cached param value can no longer be vouched for. */
+export interface VehicleRebootMessage {
+    type: "vehicle_reboot",
+    bootMs: number,         // the vehicle's uptime after the restart
+    t: number,              // wall-clock ms, for the log
+    aborted: string[],      // in-flight work gs gave up on, for the log
+}
 export interface StatusTextMessage {
     type: "statustext",
     severity: number,       // MAV_SEVERITY (0 emergency … 7 debug)
@@ -249,4 +325,7 @@ export type ServerMessage =
     | ParamValueMessage | ParamsBatchMessage | ParamProgressMessage | ParamAckMessage
     | MissionMessage | MissionProgressMessage | MissionAckMessage
     | MissionCurrentMessage | MissionReachedMessage
-    | FenceMessage | RallyMessage | FenceAckMessage | RallyAckMessage;
+    | FenceMessage | RallyMessage | FenceAckMessage | RallyAckMessage
+    | VehicleRebootMessage
+    | CommanderMessage
+    | StatusMessage;

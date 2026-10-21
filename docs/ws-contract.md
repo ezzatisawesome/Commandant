@@ -21,6 +21,43 @@ from the Phase 0 frame remain unchanged (`lat`, `lon`, `alt`, `roll`, `pitch`,
 - `connected` (bool) is kept for back-compat; `connected == (linkState === "alive")`.
 - `dataAgeMs` (int | null): age of the newest **vehicle** data. `null` before any
   arrives.
+- `t` (int): wall-clock ms since the epoch — a timestamp to **display or log**.
+- `upMs` (int): monotonic ms since the gs daemon started.
+- `ages` (object, optional): age in ms of each **message group** behind this
+  frame — `position`, `attitude`, `airdata`, `wind`, `gps`, `battery`,
+  `actuators`, `health`, `ekf`.
+
+**`dataAgeMs` and `ages` answer different questions.** `dataAgeMs` is "is the
+aircraft still talking". `ages` is "is this particular number still true", and
+it is not the same question: a frame's fields arrive on different messages at
+different rates, and three of them (`ACTUATOR_OUTPUT_STATUS`, `WIND_COV`,
+`POSITION_TARGET_GLOBAL_INT`) are messages gs had to *ask* for, which a rebooted
+or reconfigured autopilot simply stops sending. When a stream stops, its last
+value stays in the frame and is re-broadcast indefinitely, indistinguishable
+from a live reading — so losing the airspeed sensor takes EKF2's wind estimate
+with it and the operator goes on being shown the last wind the aircraft ever saw
+as the current wind. A group that has **never** been seen is absent from `ages`
+rather than reported as 0: "no estimate yet" and "an estimate from four minutes
+ago" are different things and a client should be able to say which it has. Ages
+reset when the link is reopened, since that may be a different aircraft.
+
+**Two clocks, and clients must difference the right one.** `t` is the wall
+clock. The field hub is a Raspberry Pi with no RTC: it boots with a stale or
+zero clock and steps — by an hour, or by decades — the moment it gets NTP, a GPS
+fix, or the operator sets the date. Anything a client derives by subtracting two
+`t` values therefore goes negative and *stays* negative for the length of the
+step. The console's HUD throttle did exactly that and stopped updating for the
+duration. So:
+
+- **display or log a time** → `t`;
+- **difference two frames, or decide a rate** → `upMs`, which cannot step or go
+  backward. It doubles as a daemon-uptime readout.
+
+Older daemons send no `upMs`; a client that needs to interoperate should fall
+back to `t` and treat a backward move as "act now" rather than waiting it out.
+gs's own durations (link health, retries, timeouts, TTLs) are all on the
+monotonic clock for the same reason — a backward step used to make a dead link
+report `alive` with a negative `dataAgeMs` for as long as the step lasted.
 
 **Link health is attributed per source, and this matters.** gs takes two feeds:
 MAVLink from the autopilot, and the sim's flightlink JSON. Only MAVLink speaks
@@ -31,6 +68,16 @@ lat/lon/alt/roll, only the frame timestamp advancing. So:
 
 - once any MAVLink vehicle has been seen, **only** MAVLink freshness sets
   `linkState` and `dataAgeMs`;
+- once any MAVLink vehicle has been seen, MAVLink also owns **flight state**
+  (position, attitude, air data, mode, armed). The JSON feed keeps only what
+  MAVLink has no carrier for — the solar/power model, the sim's own modelled
+  wind — plus PX4 SITL's dummy battery and the commanded-path target;
+- the **target** is arbitrated separately and more strictly: PX4's
+  `POSITION_TARGET_GLOBAL_INT` owns `targetLat/Lon/Alt` whenever it is
+  streaming one, because the sim projects its setpoint about its *own* home and
+  that measured a 2310 m constant offset against PX4's origin. JSON draws the
+  overlay only when no autopilot setpoint has arrived — which is the
+  flightdyn-only run, where there is no PX4 at all;
 - on a pure flightlink run (no PX4), the JSON feed is genuinely the only source
   and drives both.
 
@@ -42,6 +89,62 @@ past 3 s.
 ```json
 { "type": "link", "state": "stale", "lastMsgMs": 1730000000000 }
 ```
+
+### `vehicle_reboot` (on the autopilot restarting)
+```json
+{ "type": "vehicle_reboot", "bootMs": 120, "t": 1730000000000,
+  "aborted": ["command", "param refresh", "mission upload"] }
+```
+The vehicle's own uptime clock jumped backward — it restarted. On a bench or in
+HITL this happens constantly: every restart, every flash. It is **not** a lost
+link (telemetry keeps flowing) and gs keeps tracking the vehicle.
+
+gs abandons every in-flight handshake first and names them in `aborted`. Each
+was a conversation with a process that no longer exists, and left alone they
+would each sit until their own timeout and report `timeout` — which tells the
+operator the link is bad when the truth is that the vehicle rebooted, a
+different problem with a different action. The individual `ack` / `param_ack` /
+`mission_ack` carry `text: "vehicle rebooted"`. gs also re-requests the extra
+streams, since the new instance is back on PX4's defaults.
+
+**A client must treat its cached params as unusable.** PX4 reverts anything that
+was not saved, so a value read before the reboot can no longer be vouched for,
+and showing it tells the operator an edit was applied when the vehicle has
+dropped it. The console clears the cache and logs the reason. Mission execution
+state (`mission_current`, `mission_reached`) belongs to the run that ended and
+goes too; the stored plan itself usually survives in the autopilot, so it is
+left alone — pull it to be sure.
+
+### `status` (ask the daemon what it decided)
+console → gs: `{ "type": "status" }` → one `status` back.
+
+```json
+{ "type": "status", "endpoint": "serial:/dev/ttyUSB0:57600",
+  "configuredEndpoint": "auto", "linkBudgetBps": 3456, "paramFetch": "paced",
+  "vehicle": [1, 1], "linkState": "alive", "streamAges": { "position": 42 },
+  "pendingCommands": 0, "missionOp": null,
+  "linkReopens": 0, "handlerErrors": 0, "upMs": 91234, "version": "0.1.0" }
+```
+
+Read-only, open to any client, and it **allocates nothing** — every field is
+state gs already keeps, so asking cannot grow the daemon or drift from the
+behaviour it describes.
+
+This exists for the field. When something is wrong during a day-in-the-life run
+— commands timing out, a stream missing, the wrong rates on a radio — the
+question is always *"what did gs decide?"*, and there was no way to ask. The
+fields that matter are the ones gs **inferred** rather than was told: which
+transport autodetect found, what budget it derived from it, which vehicle it
+locked onto. Those are exactly what nobody configured, so nobody knows them.
+
+`linkReopens` and `handlerErrors` are both recovered from silently, which is
+precisely why they are here: a daemon that has reopened the link forty times, or
+swallowed a hundred handler exceptions, is working *and* is telling you
+something.
+
+It is deliberately a request/response for a person with a question, not a stream
+to poll — a 1 Hz poll of this is exactly the idle traffic a telemetry radio has
+no room for.
 
 ### `ack` (response to a command)
 ```json
@@ -72,12 +175,34 @@ Reuse the exact command shapes in `AircraftSim/src/px4/mavlink_io.py`
 
 ### `claim` (authority)
 ```json
-{ "type": "claim" }
+{ "type": "claim", "id": "<uuid>" }
+{ "type": "claim", "id": "<uuid>", "force": true }
 ```
-Marks this WS connection as the single active commander. gs accepts `command`
-messages only from the current commander; others get `ack` with
-`ok:false, text:"not commander"`. First claimer wins until it disconnects; a new
-`claim` after disconnect takes over. (SITL-simple; refine later.)
+Marks this WS connection as the single active commander. gs accepts `command`,
+`param_set` and the `*_push` messages only from the current commander; others
+get `ok:false, text:"not commander"`.
+
+**A plain claim takes authority only if it is free.** This is what a page sends
+on connect, and it must never pull authority away from whoever is flying.
+
+**`force: true` is an explicit takeover**, and the hub needs one. The premise is
+"join the WiFi, open the page", so several people do — and the first to load
+held command until its socket dropped. A phone in someone's pocket with the page
+open keeps answering gs's 5 s pings, so its socket never drops and the pilot at
+the laptop could not get authority: every command, mission upload and param
+write refused, with the only cure being to find that person. The console's "Take
+command" button used to re-send a plain claim, which gs refused for the same
+reason it refused the first one — a button that could not do the thing it was
+named after. The operator pressing it has stated the intent, so `force` honours
+it.
+
+### `commander` (authority moved, unprompted)
+```json
+{ "type": "commander", "held": false, "text": "another console took command" }
+```
+Sent to the console that just **lost** authority to a takeover, so its UI can
+grey out immediately rather than leaving the operator to discover it from every
+action being rejected. A client should set its own authority state from `held`.
 
 ## gs behavior
 
@@ -152,10 +277,27 @@ gs → console:
 ## Stream control (Phase 5)
 console → gs:
 ```json
-{ "type": "stream", "msgId": 30, "hz": 10 }
+{ "type": "stream", "id": "<uuid>", "msgId": 30, "hz": 10 }
 ```
 → `SET_MESSAGE_INTERVAL` (hz=0 disables). Generalizes the daemon's existing
 hardcoded extra-stream requests.
+
+**This is a write to the aircraft, not a display preference**, despite how it
+reads: it changes what the *vehicle* transmits, for every client, out of a
+shared and finite link budget. It was open to any phone on the hub's WiFi, which
+is the param-refresh contention measured above with a different trigger — a
+careless tab asking for a fat message at a high rate is the operator's commands
+competing for a radio they were already measured to lose. So it is
+**commander-only**, like a param write or a plan upload.
+
+**The rate may be clamped** to what the transport can carry (see the link
+budget). gs then sends a `statustext` saying so, because an operator picking a
+rate in a dropdown cannot know the budget and a silent clamp looks like the
+control not working.
+
+`id` is optional but a client should send one: with it gs replies with an `ack`
+under that id, so a refusal (`not commander`) or a clamp is visible instead of
+the request appearing to do nothing.
 
 ## Missions (Phase 4)
 
@@ -217,6 +359,23 @@ gs → console: `fence {count,items}` / `rally {count,items}` /
 `fence_ack {id,ok,result,text}` / `rally_ack {id,ok,result,text}`.
 (Polygon vertices of one inclusion/exclusion set share the same `vertexCount` and
 are consecutive, per the MAVLink fence convention.)
+
+**gs derives `vertexCount`; it does not trust it.** The count is structural —
+`param1` tells PX4 how many of the following vertices are one polygon, so a
+wrong or absent value mis-slices the whole fence. gs computes it from the actual
+contiguous run. A client that supplies a *different* number is refused rather
+than silently corrected: if the two ends disagree about what the fence is,
+uploading either answer without saying so is its own failure. A client may
+simply omit it.
+
+**A fence gs can prove is not a fence is refused before it goes on the wire:**
+a polygon run with fewer than 3 vertices, or a circle with radius ≤ 0. These
+used to upload and come back `accepted`, which told the operator they had a
+geofence when they had nothing — and a fence exists to be there when something
+else has already gone wrong, so `accepted` has to mean it. The `fence_ack`
+`text` names the offending item. The console applies the same rule while
+authoring (the Upload button says why), but gs is the authority: it serves
+clients other than the console.
 
 ## Param metadata (Phase 2 completion)
 PX4's `parameters.json` (name/shortDesc/longDesc/min/max/units/type/default) is

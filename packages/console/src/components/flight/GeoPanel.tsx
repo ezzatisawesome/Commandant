@@ -9,6 +9,7 @@ import {
 	$geoEdit,
 	$geoPlaceKind,
 	fenceItemsForPush,
+	fenceGeometryProblem,
 	isCircleKind,
 	updateFenceItem,
 	removeFenceItem,
@@ -16,12 +17,16 @@ import {
 	updateRallyItem,
 	clearFence,
 	clearRally,
+	$vehicleFence,
+	fenceMatchesVehicle,
+	setPlacingTarget,
 } from "@/stores/geo.store";
 import { $linkState, $commander } from "@/stores/link.store";
 import { telemetryClient } from "@/services/telemetry";
 import { Button } from "@/components/ui/button";
 import { uploadBlockedReason } from "@/components/flight/MissionPanel";
 import type { FenceKind } from "@/types/app";
+import { $planRead } from "@/stores/mission.store";
 
 // What a globe click places while "Edit map" is on.
 const PLACE_KINDS: Array<{ value: FenceKind | "rally"; label: string }> = [
@@ -77,7 +82,16 @@ export default function GeoPanel() {
 
 	const count = fence.length + rally.length;
 	// Fence and rally upload separately but are gated identically.
-	const fenceBlocked = uploadBlockedReason({ live, commander, count: fence.length });
+	// Authority/link first (what the operator can act on most often), then the
+	// geometry gs would refuse anyway — said here so they see it while authoring.
+	const planRead = useStore($planRead);
+	// The globe draws the DRAFT, which is what you want while editing — but the
+	// proximity readout and PX4 both use what the vehicle is enforcing, so when
+	// the two differ the outline on screen is not the boundary in effect.
+	const vehicleFence = useStore($vehicleFence);
+	const fenceDiverged = vehicleFence !== null && !fenceMatchesVehicle(fence, vehicleFence);
+	const fenceBlocked = uploadBlockedReason({ live, commander, count: fence.length })
+		?? fenceGeometryProblem(fence);
 	const rallyBlocked = uploadBlockedReason({ live, commander, count: rally.length });
 
 	return (
@@ -87,7 +101,7 @@ export default function GeoPanel() {
 					Geofence &amp; rally{count ? ` (${count})` : ""}
 				</span>
 				<Button size="sm" variant={edit ? "default" : "outline"}
-					onClick={() => $geoEdit.set(!edit)} className="h-6 px-2 text-[10px]"
+					onClick={() => setPlacingTarget(edit ? null : "fence")} className="h-6 px-2 text-[10px]"
 					title="Click the globe to place the selected kind; drag corners, edge midpoints and the circle rim to adjust">
 					{edit ? "Editing map" : "Edit map"}
 				</Button>
@@ -125,6 +139,12 @@ export default function GeoPanel() {
 				</div>
 			) : null}
 
+			{fenceDiverged ? (
+				<div className="pt-2 text-[10px] text-amber-300">
+					▲ edited since the vehicle took it — the outline on the globe is your
+					draft, not the boundary being enforced. Upload to make them the same.
+				</div>
+			) : null}
 			{status ? (
 				<div className={`pt-2 text-[10px] ${status.ok ? "text-emerald-400" : "text-red-400"}`}>
 					{status.ok ? "✓" : "✗"} {status.text}
@@ -145,7 +165,11 @@ export default function GeoPanel() {
 					</div>
 				</div>
 				{fence.length === 0 ? (
-					<div className="py-2 text-center text-white/30">no fence — edit map & place vertices/circles</div>
+					<div className="py-2 text-center text-white/30">
+						{planRead.fence
+							? "no fence on the vehicle — edit map & place vertices/circles"
+							: "not read from the vehicle yet — Download to see its fence"}
+					</div>
 				) : fence.map((it) => (
 					<div key={it.seq} className="flex items-center gap-1 border-b border-white/5 py-1">
 						<span className="w-4 text-white/40">{it.seq}</span>
@@ -180,7 +204,10 @@ export default function GeoPanel() {
 					</div>
 				</div>
 				{rally.length === 0 ? (
-					<div className="py-2 text-center text-white/30">no rally points</div>
+					<div className="py-2 text-center text-white/30">
+						{planRead.rally ? "no rally points on the vehicle"
+							: "not read from the vehicle yet — Download to see them"}
+					</div>
 				) : rally.map((it) => (
 					<div key={it.seq} className="flex items-center gap-1 border-b border-white/5 py-1">
 						<span className="w-4 text-cyan-300/70">R{it.seq}</span>

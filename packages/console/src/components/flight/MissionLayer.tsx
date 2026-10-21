@@ -31,6 +31,7 @@ import {
 	$missionItems,
 	$missionCurrent,
 	$missionReached,
+	missionMatchesVehicle,
 	$missionEdit,
 	addWaypoint,
 	kindHasPosition,
@@ -230,6 +231,13 @@ export default function MissionLayer() {
 				if (!kindHasPosition(it.kind) || it.lat === undefined || it.lon === undefined) continue;
 				const seq = it.seq;
 				const colour = () => {
+					// Execution state is a seq into the mission the VEHICLE holds.
+					// The draft renumbers itself on every add, remove and reorder
+					// (resequence), so applying it to a draft that has diverged
+					// highlights whichever item now carries that number — the
+					// operator watching the aircraft fly toward a point it is not
+					// flying toward. When they no longer agree, say nothing.
+					if (!missionMatchesVehicle()) return Color.WHITE.withAlpha(0.55);
 					if ($missionCurrent.get() === seq) return Color.YELLOW;
 					const reached = $missionReached.get();
 					if (reached !== null && seq <= reached) return Color.LIME.withAlpha(0.7);

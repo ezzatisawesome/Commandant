@@ -1,6 +1,7 @@
 import { atom } from "nanostores";
 
 import type { FenceItem, FenceKind, RallyItem } from "@/types/app";
+import { $missionEdit } from "@/stores/mission.store";
 
 // Phase-4 extension: geofence + rally authoring, mirroring mission.store. Fences
 // and rally points ride the same MISSION_COUNT/REQUEST/ITEM/ACK handshake in gs,
@@ -8,14 +9,74 @@ import type { FenceItem, FenceKind, RallyItem } from "@/types/app";
 // EDITABLE sets the operator authors; they're pushed via fence_push / rally_push
 // and replaced wholesale by a `fence` / `rally` reply after a pull.
 export const $fenceItems = atom<FenceItem[]>([]);
+
+/** The fence the VEHICLE is enforcing, as distinct from the draft above.
+ *
+ *  `null` means unknown — nothing read back or uploaded this session.
+ *
+ *  This matters more than the mission equivalent, because the fence drives a
+ *  live readout that says BREACHED. Computed against the draft, as it was, the
+ *  strip turned red for an aircraft outside a boundary the operator had just
+ *  drawn and never uploaded — and, far worse, went GREEN when the operator
+ *  dragged the draft outward, while PX4 went on enforcing the small one and
+ *  acting on GF_ACTION. A reassuring number for an aircraft about to be stopped
+ *  mid-mission is the worst direction for this particular error. */
+export const $vehicleFence = atom<FenceItem[] | null>(null);
+
+/** Does the draft still describe the fence the vehicle is enforcing?
+ *
+ *  `false` when that cannot be established, including when nothing has been
+ *  read back — an unverified match is not a match. Compared on the fields that
+ *  decide where the boundary is. */
+export function fenceMatchesVehicle(
+	draft: FenceItem[] = $fenceItems.get(),
+	vehicle: FenceItem[] | null = $vehicleFence.get(),
+): boolean {
+	if (vehicle === null) return false;
+	if (draft.length !== vehicle.length) return false;
+	return draft.every((d, i) => {
+		const v = vehicle[i];
+		return d.kind === v.kind
+			&& Math.abs(d.lat - v.lat) < 1e-7
+			&& Math.abs(d.lon - v.lon) < 1e-7
+			&& Math.abs((d.params?.radius ?? 0) - (v.params?.radius ?? 0)) < 0.5;
+	});
+}
+
+/** Record the fence the vehicle is enforcing: a readback, or an accepted push. */
+export function setVehicleFence(items: FenceItem[] | null) {
+	$vehicleFence.set(items === null ? null : items.map((it) => ({ ...it })));
+}
 export const $rallyItems = atom<RallyItem[]>([]);
 
 // Geo authoring mode (separate from mission edit so the two don't fight over
 // clicks) and which kind a globe click places while it's on.
 export const $geoEdit = atom<boolean>(false);
+
+/** Turn on exactly one globe-placing mode, or none.
+ *
+ *  `$missionEdit` and `$geoEdit` were independent, and the layers that consume
+ *  them guard only on their own: MissionLayer checks `$missionEdit`, GeoLayer
+ *  checks `$geoEdit`, neither excludes the other. So with both on, ONE click on
+ *  the globe added a waypoint AND a fence vertex — and both toggles are labelled
+ *  "Edit map", in two tabs of the same panel, so turning the second on without
+ *  noticing the first is the normal way to use it.
+ *
+ *  The operator placing a fence vertex has not asked for a waypoint. There is
+ *  one globe and one click, so there is one target.
+ *
+ *  (Found by a browser end-to-end test: a mission uploaded, read back and
+ *  matching went on to diverge from the vehicle while the operator was drawing
+ *  a fence, because each fence click was also appending a waypoint.) */
+export function setPlacingTarget(target: "mission" | "fence" | null) {
+	$missionEdit.set(target === "mission");
+	$geoEdit.set(target === "fence");
+}
 export const $geoPlaceKind = atom<FenceKind | "rally">("fence_inclusion");
 
 const POLYGON_KINDS: FenceKind[] = ["fence_inclusion", "fence_exclusion"];
+/** Two points bound no area. Mirrors FENCE_POLYGON_MIN_VERTICES in gs. */
+export const FENCE_POLYGON_MIN_VERTICES = 3;
 const CIRCLE_KINDS: FenceKind[] = ["fence_circle_inclusion", "fence_circle_exclusion"];
 
 export function isPolygonKind(kind: FenceKind): boolean {
@@ -95,6 +156,39 @@ export function fenceItemsForPush(): FenceItem[] {
 		}
 	}
 	return out;
+}
+
+/** Why this fence cannot be uploaded, or null if it can.
+ *
+ *  gs refuses the same geometry and says why, which is the part that matters:
+ *  a fence exists to be there when something else has already gone wrong, so
+ *  "accepted" has to mean it. This is the same rule applied at authoring time,
+ *  so the operator finds out while placing vertices instead of after a round
+ *  trip to the aircraft. Deliberately a mirror, not the only check — the
+ *  authority is gs, which serves clients other than this one. */
+export function fenceGeometryProblem(items: FenceItem[] = $fenceItems.get()): string | null {
+	let i = 0;
+	while (i < items.length) {
+		const kind = items[i].kind;
+		if (isPolygonKind(kind)) {
+			let j = i;
+			while (j < items.length && items[j].kind === kind) j++;
+			const count = j - i;
+			if (count < FENCE_POLYGON_MIN_VERTICES) {
+				const what = kind === "fence_exclusion" ? "exclusion" : "inclusion";
+				return `the ${what} polygon at #${items[i].seq} has ${count} `
+					+ `vertex${count === 1 ? "" : "es"} — a polygon needs ${FENCE_POLYGON_MIN_VERTICES}`;
+			}
+			i = j;
+			continue;
+		}
+		if (isCircleKind(kind)) {
+			const r = items[i].params?.radius ?? 0;
+			if (!(r > 0)) return `the circle at #${items[i].seq} has no radius`;
+		}
+		i++;
+	}
+	return null;
 }
 
 // --- rally ------------------------------------------------------------------

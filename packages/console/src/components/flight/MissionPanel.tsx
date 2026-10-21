@@ -14,6 +14,10 @@ import {
 	updateItem,
 	clearMission,
 } from "@/stores/mission.store";
+import { $fenceItems,
+	setPlacingTarget,
+} from "@/stores/geo.store";
+import { $planRead, $vehicleMission, missionMatchesVehicle } from "@/stores/mission.store";
 import { $linkState, $commander } from "@/stores/link.store";
 import { telemetryClient } from "@/services/telemetry";
 import { Button } from "@/components/ui/button";
@@ -85,7 +89,13 @@ export default function MissionPanel() {
 	// silent refusal later. Returns structured findings, so the chip can be two
 	// words, the offending row can carry a flag, and the globe can draw the
 	// constraint — rather than all three being one paragraph of amber text.
-	const blockers = missionBlockers(items, lookupFrom(params));
+	const planRead = useStore($planRead);
+	const vehicleMission = useStore($vehicleMission);
+	// Does the draft still describe what the aircraft is flying? Recomputed from
+	// both stores so a drag or a reorder updates it immediately.
+	const matches = missionMatchesVehicle(items, vehicleMission);
+	const fence = useStore($fenceItems);
+	const blockers = missionBlockers(items, lookupFrom(params), fence);
 
 	async function upload() {
 		setBusy(true);
@@ -122,7 +132,7 @@ export default function MissionPanel() {
 				</span>
 				<div className="flex items-center gap-2">
 					<Button size="sm" variant={edit ? "default" : "outline"}
-						onClick={() => $missionEdit.set(!edit)} className="h-6 px-2 text-[10px]"
+						onClick={() => setPlacingTarget(edit ? null : "mission")} className="h-6 px-2 text-[10px]"
 						title="Click the globe to add waypoints; drag ▲ to set altitude and the ring to set radius">
 						{edit ? "Editing map" : "Edit map"}
 					</Button>
@@ -185,9 +195,33 @@ export default function MissionPanel() {
 			) : null}
 
 			<div className="mt-2 overflow-auto font-mono text-[11px]">
+				{/* The draft has diverged from the vehicle, so the route drawn on
+				    the globe is not what the aircraft will fly and its execution
+				    highlight has been dropped (it indexes the vehicle's mission,
+				    which is a different list now). */}
+				{/* The draft is on screen and what the vehicle holds is UNKNOWN —
+				    nothing read back or uploaded this session, or a reconnect
+				    since. The empty-state message below cannot say it, because
+				    there is a plan to show; without this the operator sees their
+				    waypoints and nothing hints that the aircraft may hold
+				    something else entirely. */}
+				{items.length > 0 && vehicleMission === null ? (
+					<div className="px-1 pb-1 text-[10px] text-white/45">
+						▲ the vehicle's plan is not known — this is your draft. Download to
+						see what it is flying, or Upload to make them the same.
+					</div>
+				) : null}
+				{items.length > 0 && vehicleMission !== null && !matches ? (
+					<div className="px-1 pb-1 text-[10px] text-amber-300">
+						▲ edited since the vehicle last took it — the globe is showing your
+						draft, not what it is flying. Upload to make them the same.
+					</div>
+				) : null}
 				{items.length === 0 ? (
 					<div className="py-4 text-center text-white/30">
-						no items — turn on “Edit map” and click the globe, or Download
+						{planRead.mission
+							? "no mission on the vehicle — turn on “Edit map” and click the globe"
+							: "not read from the vehicle yet — Download to see what it is flying, or turn on “Edit map” to author one"}
 					</div>
 				) : (<>
 					{/* Header row. Four unlabelled numeric columns is a guessing

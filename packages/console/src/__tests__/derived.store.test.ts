@@ -5,7 +5,8 @@ import {
 	EMPTY_DERIVED,
 } from "@/stores/derived.store";
 import { $hudFrame, pushFrame } from "@/stores/aircraft.store";
-import { $fenceItems, setFenceItems } from "@/stores/geo.store";
+import { $fenceItems, setFenceItems, setVehicleFence } from "@/stores/geo.store";
+import { GROUP_STALE_MS, groupAgeMs } from "@/lib/flightGeometry";
 import type { TelemetryFrame } from "@/types/app";
 
 const LAT = 37.3985511, LON = -122.148853, GROUND = 111;
@@ -22,7 +23,7 @@ const frame = (over: Partial<TelemetryFrame> = {}): TelemetryFrame => ({
 
 let stop: (() => void) | null = null;
 beforeEach(() => {
-	$hudFrame.set(null); $fenceItems.set([]); $derived.set(EMPTY_DERIVED);
+	$hudFrame.set(null); $fenceItems.set([]); setVehicleFence(null); $derived.set(EMPTY_DERIVED);
 	setTerrainSampler(null);
 	pushFrame(frame({ t: 0, connected: false }));
 	resetDerived();          // module-level bookkeeping is not per-test state
@@ -85,6 +86,39 @@ describe("wind and track come from the autopilot, not from here", () => {
 		expect($derived.get().wind).toBeNull();
 	});
 
+	it("carries the estimate's age through, so a stopped WIND_COV can be shown as cold", () => {
+		// `dataAgeMs` says whether the aircraft is still talking. It cannot say
+		// whether THIS number is still true: lose the airspeed sensor and EKF2
+		// stops producing a wind estimate, WIND_COV stops, and gs goes on
+		// re-broadcasting the last value in every frame — indistinguishable from
+		// a live reading. On an aircraft that stays up on wind and sun that is
+		// the worst number on the panel to be quietly wrong.
+		pushFrame(frame({
+			t: 23_000, trackDeg: 0, yaw: 0,
+			windSpeed: 4.2, windFromDeg: 270,
+			dataAgeMs: 40,                                   // the LINK is fine
+			ages: { position: 40, wind: 240_000 },           // the stream is not
+		}));
+		const w = $derived.get().wind!;
+		expect(w.ageMs).toBe(240_000);
+		expect(w.speedMps).toBeCloseTo(4.2, 6);              // the value is kept
+		expect(w.ageMs!).toBeGreaterThan(GROUP_STALE_MS);
+	});
+
+	it("leaves the age undefined when the daemon does not report one", () => {
+		// An older gs sends no `ages`. Absent must not read as zero, which would
+		// claim the estimate is fresh.
+		pushFrame(frame({ t: 24_000, trackDeg: 0, yaw: 0, windSpeed: 4.2, windFromDeg: 270 }));
+		expect($derived.get().wind!.ageMs).toBeUndefined();
+	});
+
+	it("groupAgeMs tells 'never seen' apart from 'seen a while ago'", () => {
+		expect(groupAgeMs(undefined, "wind")).toBeNull();        // older daemon
+		expect(groupAgeMs({ position: 10 }, "wind")).toBeNull();  // never seen
+		expect(groupAgeMs({ wind: 0 }, "wind")).toBe(0);          // seen just now
+		expect(groupAgeMs({ wind: 240_000 }, "wind")).toBe(240_000);
+	});
+
 	it("still computes drift, which is geometry rather than an estimate", () => {
 		// Nose north, tracking 045: pushed 45 degrees right of the nose.
 		pushFrame(frame({
@@ -121,7 +155,12 @@ describe("sun", () => {
 	});
 });
 
-describe("fence proximity", () => {
+describe("fence proximity is about the fence the VEHICLE is enforcing", () => {
+	// It used to be computed from `$fenceItems`, the operator's draft. That
+	// readout says BREACHED, and a draft is not what PX4 acts on: it turned red
+	// for a boundary never uploaded, and — the dangerous direction — went green
+	// when the operator dragged the draft outward while the small one was still
+	// live on the aircraft and about to trigger GF_ACTION.
 	const square = [
 		{ seq: 0, kind: "fence_inclusion" as const, lat: 37.39, lon: -122.16 },
 		{ seq: 1, kind: "fence_inclusion" as const, lat: 37.39, lon: -122.14 },
@@ -130,7 +169,7 @@ describe("fence proximity", () => {
 	];
 
 	it("quantifies the nearest boundary instead of just drawing it", () => {
-		setFenceItems(square);
+		setVehicleFence(square);
 		pushFrame(frame({ t: 40_000, lat: 37.4099, lon: -122.15 }));
 		const p = $derived.get().fence!;
 		expect(p.distanceM).toBeLessThan(20);
@@ -138,18 +177,43 @@ describe("fence proximity", () => {
 	});
 
 	it("flags a breach of an inclusion fence", () => {
-		setFenceItems(square);
+		setVehicleFence(square);
 		pushFrame(frame({ t: 41_000, lat: 37.42, lon: -122.15 }));
 		expect($derived.get().fence!.violated).toBe(true);
 	});
 
-	it("recomputes when the fence changes, not only when the aircraft moves", () => {
+	it("recomputes when the vehicle's fence changes, not only when it moves", () => {
 		pushFrame(frame({ t: 42_000, lat: 37.40, lon: -122.15 }));
 		expect($derived.get().fence).toBeNull();
-		setFenceItems(square);                       // aircraft has not moved
+		setVehicleFence(square);                     // aircraft has not moved
 		expect($derived.get().fence).not.toBeNull();
 	});
+
+	it("ignores the draft entirely — drawing a fence is not uploading one", () => {
+		setVehicleFence(null);
+		setFenceItems(square);                       // drawn, never uploaded
+		pushFrame(frame({ t: 43_000, lat: 37.42, lon: -122.15 }));
+		expect($derived.get().fence).toBeNull();     // unknown, not "breached"
+	});
+
+	it("a draft dragged outward does not clear a breach of the live fence", () => {
+		// The dangerous direction, pinned: PX4 is still enforcing `square` and
+		// the aircraft is outside it. Widening the DRAFT must not turn the
+		// readout green.
+		setVehicleFence(square);
+		pushFrame(frame({ t: 44_000, lat: 37.42, lon: -122.15 }));
+		expect($derived.get().fence!.violated).toBe(true);
+		setFenceItems([
+			{ seq: 0, kind: "fence_inclusion" as const, lat: 37.30, lon: -122.30 },
+			{ seq: 1, kind: "fence_inclusion" as const, lat: 37.30, lon: -122.00 },
+			{ seq: 2, kind: "fence_inclusion" as const, lat: 37.50, lon: -122.00 },
+			{ seq: 3, kind: "fence_inclusion" as const, lat: 37.50, lon: -122.30 },
+		]);
+		pushFrame(frame({ t: 45_000, lat: 37.42, lon: -122.15 }));
+		expect($derived.get().fence!.violated).toBe(true);
+	});
 });
+
 
 describe("no fix", () => {
 	it("resets everything rather than reporting stale geometry", () => {

@@ -54,56 +54,36 @@ export interface Wind {
 	driftDeg: number;
 	/** 1-sigma horizontal uncertainty from the estimator, m/s, when known. */
 	sigmaMps?: number;
+	/** How old this estimate is, ms, when the daemon reports it. PX4 only
+	 *  produces a wind estimate while EKF2 has one — lose the airspeed sensor
+	 *  and WIND_COV stops, leaving the last value to be redrawn as the current
+	 *  wind indefinitely. On an aircraft that stays up on wind and sun that is
+	 *  the worst number on the panel to be quietly wrong, so it is carried
+	 *  through and the readout says when it has gone cold. */
+	ageMs?: number;
 }
 
-/**
- * Solve the wind triangle from heading/airspeed and track/groundspeed.
- *
- * NOT used by the app: wind comes from PX4's EKF2 via WIND_COV, which fuses the
- * same inputs with a sideslip model and reports an uncertainty. This is kept as
- * a documented fallback for a vehicle that reports no WIND_COV, and because the
- * identity below is what makes the estimator's output checkable.
- *
- *   ground velocity = air velocity + wind
- *
- * Air velocity is airspeed along the *heading* (where the nose points); ground
- * velocity is groundspeed along the *track* (where the aircraft actually goes).
- * The difference is the wind. Reported as the direction it blows FROM, because
- * that is what every wind report in aviation means.
- */
-export function solveWind(
-	headingDeg: number, airspeedMps: number,
-	trackDeg: number, groundspeedMps: number,
-): Wind | null {
-	if (![headingDeg, airspeedMps, trackDeg, groundspeedMps].every(isNum)) return null;
-	// Components in a north/east frame.
-	const ax = airspeedMps * Math.cos(headingDeg * DEG);   // north
-	const ay = airspeedMps * Math.sin(headingDeg * DEG);   // east
-	const gx = groundspeedMps * Math.cos(trackDeg * DEG);
-	const gy = groundspeedMps * Math.sin(trackDeg * DEG);
-	const wx = gx - ax, wy = gy - ay;                      // wind vector (toward)
-	const speedMps = Math.hypot(wx, wy);
-	// Blowing TOWARD atan2(wy,wx); FROM is the reciprocal.
-	const towardDeg = (Math.atan2(wy, wx) * RAD + 360) % 360;
-	return {
-		fromDeg: (towardDeg + 180) % 360,
-		speedMps,
-		driftDeg: angleDiffDeg(trackDeg, headingDeg),
-	};
-}
+/** A reading older than this is reported as cold rather than current. Chosen
+ *  well above the slowest of these streams (WIND_COV is requested at a few Hz
+ *  on a radio) so ordinary jitter never trips it. */
+export const GROUP_STALE_MS = 5000;
 
-/** Track (course over ground) from two consecutive fixes, or null if the aircraft
- *  has not moved far enough for the bearing to be meaningful rather than noise. */
-export function trackFromFixes(
-	prevLat: number, prevLon: number, lat: number, lon: number,
-	minMoveM = 1.0,
+/** Age of a message group behind a frame, or null if the daemon does not report
+ *  ages (an older gs) or has never seen that group. */
+export function groupAgeMs(
+	ages: Record<string, number> | undefined, group: string,
 ): number | null {
-	if (![prevLat, prevLon, lat, lon].every(isNum)) return null;
-	if (distanceM(prevLat, prevLon, lat, lon) < minMoveM) return null;
-	return bearingDeg(prevLat, prevLon, lat, lon);
+	const a = ages?.[group];
+	return isNum(a) ? a : null;
 }
 
-// --- solar geometry -----------------------------------------------------------
+// The hand-rolled wind triangle and the differenced-position track used to live
+// here. Both are gone, and deliberately not kept "just in case": wind now comes
+// from PX4's EKF2 (WIND_COV) and track from GLOBAL_POSITION_INT's velocity,
+// because the local versions were measured inventing 8.6 m/s of wind out of GPS
+// noise at a 1.3 m baseline. Leaving a second implementation in the tree, alive
+// only through its own tests, is how a reader comes to believe there are two
+// wind sources and starts wondering which one the HUD is showing.
 
 export interface SunPosition {
 	/** Degrees true, 0..360: the compass direction of the sun. */
@@ -213,23 +193,25 @@ interface FenceLike {
  * operator cannot tell 50 m from 500 m. Polygon vertices arrive as consecutive
  * runs of the same kind (the MAVLink convention), which is how they are grouped.
  */
-export function fenceProximity(
+/** Walk the fence shapes a flat item list describes.
+ *
+ *  Both the proximity readout and the pre-upload mission check need this, and
+ *  they must agree about what the shapes ARE — the run-slicing (a contiguous
+ *  run of one polygon kind is one ring) is the fiddly part and is not worth
+ *  having twice. `violated` is whether the given point breaks that shape:
+ *  outside an inclusion, or inside an exclusion. */
+function forEachFenceShape(
 	lat: number, lon: number, items: FenceLike[],
-): FenceProximity | null {
-	if (!isNum(lat) || !isNum(lon) || items.length === 0) return null;
-	let best: FenceProximity | null = null;
-	const consider = (d: number, kind: string, violated: boolean) => {
-		if (!best || d < best.distanceM) best = { distanceM: d, kind, violated };
-	};
-
+	cb: (kind: string, nearestM: number, violated: boolean) => void,
+): void {
 	// Circles are independent items.
 	for (const c of items) {
 		if (!c.kind.startsWith("fence_circle")) continue;
 		const r = c.params?.radius ?? 0;
+		if (!(r > 0)) continue;              // not a circle; gs refuses these too
 		const dCentre = distanceM(lat, lon, c.lat, c.lon);
 		const inside = dCentre <= r;
-		consider(Math.abs(dCentre - r), c.kind,
-			c.kind.includes("inclusion") ? !inside : inside);
+		cb(c.kind, Math.abs(dCentre - r), c.kind.includes("inclusion") ? !inside : inside);
 	}
 
 	// Polygons: each contiguous run of one kind is one ring.
@@ -248,11 +230,40 @@ export function fenceProximity(
 					distanceToSegmentM(lat, lon, a.lat, a.lon, b.lat, b.lon));
 			}
 			const inside = pointInPolygon(lat, lon, ring);
-			consider(nearest, kind, kind === "fence_inclusion" ? !inside : inside);
+			cb(kind, nearest, kind === "fence_inclusion" ? !inside : inside);
 		}
 		i = j;
 	}
+}
+
+export function fenceProximity(
+	lat: number, lon: number, items: FenceLike[],
+): FenceProximity | null {
+	if (!isNum(lat) || !isNum(lon) || items.length === 0) return null;
+	let best: FenceProximity | null = null;
+	forEachFenceShape(lat, lon, items, (kind, d, violated) => {
+		if (!best || d < best.distanceM) best = { distanceM: d, kind, violated };
+	});
 	return best;
+}
+
+/** The kind of the first fence shape this point BREAKS, or null if it breaks
+ *  none.
+ *
+ *  Distinct from `fenceProximity`, which answers "what is nearest" — and a
+ *  point can sit comfortably inside the inclusion polygon while also sitting
+ *  inside an exclusion circle. If the inclusion edge happens to be closer,
+ *  the nearest shape is the compliant one and the violation is invisible. Any
+ *  violation is a violation, so this looks at all of them. */
+export function fenceViolation(
+	lat: number, lon: number, items: FenceLike[],
+): string | null {
+	if (!isNum(lat) || !isNum(lon) || items.length === 0) return null;
+	let found: string | null = null;
+	forEachFenceShape(lat, lon, items, (kind, _d, violated) => {
+		if (violated && found === null) found = kind;
+	});
+	return found;
 }
 
 // --- terrain clearance --------------------------------------------------------

@@ -6,6 +6,16 @@ Description=Commandant gs daemon (MAVLink radio link -> WebSocket)
 After=network-online.target dev-serial0.device
 Wants=network-online.target
 
+# Restart=always means always. Without this it does not: systemd's default
+# start limit is 5 starts per 10 s, and RestartSec=2 hits exactly that, so a
+# service that crash-loops for ten seconds at boot enters `failed` and STAYS
+# there until somebody ssh's in. On a hub whose premise is "turn the plane on,
+# turn the hub on, open the page", the likeliest cause of such a loop is
+# transient -- the radio enumerating a moment late, a stale instance still
+# holding the port -- and permanently failing on it is the worst answer
+# available. Zero disables the limit, so it retries until it works.
+StartLimitIntervalSec=0
+
 [Service]
 Type=simple
 # Device/baud (and any override of the WS port) live here so the field radio can
@@ -14,7 +24,10 @@ EnvironmentFile=/etc/commandant/gs.env
 # The gs package is installed editable into its own venv on the Pi (provision.sh).
 # GS_MAVLINK is e.g. serial:/dev/serial0:57600 (telemetry radio) — pymavlink parses
 # serial:/tcp:/udpin: endpoints directly, so the plane link is just this string.
-ExecStart=/opt/commandant/packages/gs/.venv/bin/python -m gs --mavlink ${GS_MAVLINK} --ws-host 0.0.0.0 --ws-port ${GS_WS_PORT}
+ExecStart=/opt/commandant/packages/gs/.venv/bin/python -m gs --mavlink ${GS_MAVLINK} --ws-host 0.0.0.0 --ws-port ${GS_WS_PORT} --log-dir ${GS_LOG_DIR}
+# Creates /var/lib/commandant owned by the service user, so the flight log has
+# somewhere to go without a provisioning step that can be forgotten.
+StateDirectory=commandant
 Restart=always
 RestartSec=2
 User=commandant

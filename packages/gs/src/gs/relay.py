@@ -48,6 +48,13 @@ class RelayPublisher:
         self.token = token
         self.min_interval = 1.0 / hz if hz > 0 else 0.0
         self.flight_id = flight_id
+        # Captured ONCE, at construction, not per connection. The `flight`
+        # message is re-announced on every reconnect and the relay RETAINS it
+        # for late joiners, so stamping it at connect time meant a field hotspot
+        # that drops every few minutes kept moving the flight's start forward:
+        # a viewer opening the page three hours in was told the flight began
+        # seconds ago, and any elapsed time derived from it was wrong.
+        self.started_at_ms = int(time.time() * 1000)
 
         self._loop: asyncio.AbstractEventLoop | None = None
         self._latest: dict[str, str] = {}        # kind -> newest payload (state)
@@ -133,7 +140,7 @@ class RelayPublisher:
                     if self.flight_id:
                         await ws.send(json.dumps(
                             {"type": "flight", "id": self.flight_id,
-                             "startedAt": int(time.time() * 1000)}))
+                             "startedAt": self.started_at_ms}))
                         self.sent += 1
                     await self._pump(ws)
             except asyncio.CancelledError:

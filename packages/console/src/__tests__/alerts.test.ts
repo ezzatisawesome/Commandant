@@ -4,6 +4,7 @@ import {
 	isAlerting, dwellMs, selectAlerts, SEV_ERROR, SEV_WARNING,
 } from "@/lib/alerts";
 import type { StatusEntry } from "@/stores/statustext.store";
+import { GROUP_STALE_MS, groupAgeMs, isNum } from "@/lib/flightGeometry";
 
 // The alert surface exists because the status log moved behind the dock. If this
 // policy is wrong in either direction the hole is still open: too strict and a
@@ -97,5 +98,47 @@ describe("selecting what to show", () => {
 		const out = selectAlerts(log, new Set());
 		expect(out).toHaveLength(1);
 		expect(out[0].text).toContain("Geofence invalid");
+	});
+});
+
+describe("a health chip whose source has stopped must not read as healthy", () => {
+	// HealthStrip is, in its own words, "the one readout that must never need a
+	// click" — so it is the one most trusted at a glance. EKF, GPS and the
+	// battery warning come from EKF_STATUS_REPORT, GPS_RAW_INT and SYS_STATUS on
+	// their own schedules, and gs re-requests the extras after a vehicle reboot:
+	// there is a window where the frame is fresh at 25 Hz and these are not
+	// arriving at all. Drawn from the last value received, that window shows a
+	// green "EKF OK" for an estimator that stopped reporting minutes ago.
+	//
+	// Tested as the decision, the way the strip computes it.
+	const coldAfter = GROUP_STALE_MS;
+	const isCold = (ages: Record<string, number> | undefined, group: string) => {
+		const age = groupAgeMs(ages, group);
+		return isNum(age) && age > coldAfter;
+	};
+
+	it("treats a stopped stream as cold, however fresh the frame is", () => {
+		// dataAgeMs would be ~40 here: the aircraft is talking.
+		const ages = { position: 40, ekf: 240_000, gps: 180_000 };
+		expect(isCold(ages, "ekf")).toBe(true);
+		expect(isCold(ages, "gps")).toBe(true);
+		expect(isCold(ages, "position")).toBe(false);
+	});
+
+	it("does not call a live stream cold", () => {
+		expect(isCold({ ekf: 200, gps: 400 }, "ekf")).toBe(false);
+	});
+
+	it("says nothing about a group that has never been seen", () => {
+		// Absent is not 0: "no EKF report yet" and "one from four minutes ago"
+		// are different, and neither is "healthy".
+		expect(isCold({ position: 40 }, "ekf")).toBe(false);
+		expect(groupAgeMs({ position: 40 }, "ekf")).toBeNull();
+	});
+
+	it("says nothing when the daemon reports no ages at all", () => {
+		// An older gs. The chips then behave exactly as they did before, which is
+		// the right fallback: no ages means no basis to call anything stale.
+		expect(isCold(undefined, "ekf")).toBe(false);
 	});
 });

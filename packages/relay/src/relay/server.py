@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 import time
 from typing import Any
 
@@ -53,22 +54,65 @@ class Relay:
         # Diagnostics, surfaced by /healthz.
         self.frames_in = 0
         self.frames_dropped = 0
+        self.viewers_dropped = 0
 
     # --- fan-out -----------------------------------------------------------
-    def _fan_out(self, payload: str) -> None:
-        """Send to every viewer, skipping any that is not keeping up. Never
-        awaits: a blocked viewer must not delay the publisher's next frame."""
+    def _drop_slow_viewers(self) -> int:
+        """Close viewers whose write buffer is running away, and return how many.
+
+        Constraint 3 above said a slow viewer cannot affect the hub or other
+        viewers. It was implemented in a `_fan_out` helper that **nothing ever
+        called** -- every broadcast went through `websockets.broadcast`, so
+        SLOW_VIEWER_BYTES was dead code and `frames_dropped` was permanently 0,
+        which made the /healthz figure meaningless as well.
+
+        That matters because `broadcast` is explicitly not flow-controlled. From
+        its own documentation: "pushes the message synchronously to all
+        connections even if their write buffers are overflowing. There's no
+        backpressure... messages will pile up in its write buffer until the
+        connection times out." This is the one component on the public
+        internet, viewers are unauthenticated, and it runs on a single small
+        machine -- so a phone on bad cell data watching a 5 Hz stream grows a
+        buffer inside this process, and anyone can open one.
+
+        `broadcast` is still the right primitive (one serialisation, no
+        awaiting, so no viewer can delay another). What was missing is getting
+        rid of a viewer that cannot keep up. Closing it is also the better
+        outcome for that viewer: it reconnects and gets the retained state,
+        which is a correct current screen, rather than a backlog of frames that
+        were superseded while they sat in a queue."""
+        dropped = 0
         for ws in list(self._viewers):
+            transport = getattr(ws, "transport", None)
+            if transport is None:
+                continue
             try:
-                transport = getattr(ws, "transport", None)
-                if transport is not None and transport.get_write_buffer_size() > SLOW_VIEWER_BYTES:
-                    self.frames_dropped += 1
-                    continue
-                ws.send(payload, text=True)  # returns a coroutine in some versions
+                buffered = transport.get_write_buffer_size()
             except Exception:
+                continue
+            if buffered > SLOW_VIEWER_BYTES:
+                self._viewers.discard(ws)
                 self.frames_dropped += 1
+                self.viewers_dropped += 1
+                dropped += 1
+                # Fire-and-forget: closing must not delay the publisher's
+                # frame. Scheduled on the running loop rather than with
+                # ensure_future, which reaches for the "current" loop and is
+                # deprecated (and soon an error) when there isn't one -- the
+                # viewer is already out of the set, so having nowhere to
+                # schedule the close is not a reason to keep serving it.
+                try:
+                    asyncio.get_running_loop().create_task(
+                        ws.close(code=1013, reason="too slow"))
+                except RuntimeError:
+                    pass
+        if dropped:
+            print(f"[relay] dropped {dropped} viewer(s) over "
+                  f"{SLOW_VIEWER_BYTES} B of unsent data")
+        return dropped
 
     async def _broadcast(self, payload: str) -> None:
+        self._drop_slow_viewers()
         websockets.broadcast(self._viewers, payload)
 
     # --- publisher (the hub) ----------------------------------------------
@@ -76,7 +120,13 @@ class Relay:
         if self._publisher is not None:
             # A second hub claiming the stream is almost always a stale socket
             # from a reconnect; the newcomer wins and the old one is closed.
-            old, self._publisher = self._publisher, None
+            # Claim the slot BEFORE awaiting the old socket's close. Awaiting
+            # with `_publisher` set to None left a window in which a third
+            # connection saw the slot free, took it, and was then overwritten
+            # when this one resumed -- two hubs interleaving frames into one
+            # stream. Unreachable with a single hub, reachable with one
+            # reconnecting fast.
+            old, self._publisher = self._publisher, ws
             await old.close(code=4000, reason="superseded by a new publisher")
         self._publisher = ws
         print(f"[relay] publisher connected ({len(self._viewers)} viewers watching)")
@@ -139,7 +189,12 @@ class Relay:
         path = getattr(ws.request, "path", "/") if ws.request else "/"
         if path.startswith("/publish"):
             token = self._token_from(ws, path)
-            if not self.token or token != self.token:
+            # Constant-time, and fail closed on an unset token. A timing attack
+            # across a WebSocket handshake is impractical -- network jitter
+            # dwarfs a string compare -- so this is hygiene rather than a
+            # measured hole. It is also free, and this is the one component
+            # exposed to the internet.
+            if not self.token or not secrets.compare_digest(token or "", self.token):
                 await ws.close(code=4003, reason="bad token")
                 return
             await self._handle_publisher(ws)
@@ -186,8 +241,13 @@ class Relay:
                 told = False
 
     async def serve_forever(self) -> None:
+        # Short ping cycle, which is the other half of the slow-viewer defence:
+        # websockets' own docs recommend keeping these low "to prevent excessive
+        # memory usage from slow connections", since a stalled socket is only
+        # reclaimed when its ping times out. 20 s each meant up to 40 s of a
+        # 5 Hz stream buffered per dead-but-unclosed viewer.
         async with serve(self._handler, self.host, self.port,
-                         ping_interval=20, ping_timeout=20, max_size=2 ** 20):
+                         ping_interval=10, ping_timeout=10, max_size=2 ** 20):
             print(f"[relay] listening on ws://{self.host}:{self.port}"
                   f"  (publish at /publish, watch at /)")
             await self._watchdog()

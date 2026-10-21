@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 
-import { $params, $paramProgress, $paramError, upsertParam, upsertParams, setParamProgress, clearParams } from "@/stores/params.store";
+import { $params, $paramProgress, $paramError, upsertParam, upsertParams, setParamProgress, clearParams, $paramsStale, markParamsStale } from "@/stores/params.store";
 import { parseParamInput, validateParam, isIntegerPtype } from "@/lib/paramMeta";
 
 beforeEach(() => clearParams());
@@ -51,5 +51,46 @@ describe("param input validation", () => {
 		expect(validateParam(meta, -1)).toMatch(/below min/);
 		expect(validateParam(meta, 11)).toMatch(/above max/);
 		expect(validateParam(meta, 5)).toBeNull();
+	});
+});
+
+describe("a cached param table cannot be vouched for across a dropped link", () => {
+	// Params are a READ OF THE VEHICLE, not the operator's own work, and PX4
+	// reverts anything it did not save. gs announces a reboot it witnessed
+	// (vehicle_reboot) — but it cannot announce an event it missed, and a
+	// dropped socket is exactly a window where it was not watching: the daemon
+	// may have restarted, the vehicle may have rebooted, the radio may have been
+	// moved to another aircraft.
+	beforeEach(() => clearParams());
+
+	it("marks the table unverified rather than throwing it away", () => {
+		upsertParams([{ name: "FW_AIRSPD_TRIM", value: 15, ptype: 9, index: 1 }]);
+		expect($paramsStale.get()).toBe(false);
+		markParamsStale();
+		expect($paramsStale.get()).toBe(true);
+		// The values stay: a thousand of them should not vanish because the WiFi
+		// hiccuped. They just stop being presented as current.
+		expect($params.get()["FW_AIRSPD_TRIM"].value).toBe(15);
+	});
+
+	it("says nothing when there was nothing cached", () => {
+		markParamsStale();
+		expect($paramsStale.get()).toBe(false);
+	});
+
+	it("a refresh re-reading from the vehicle clears the doubt", () => {
+		upsertParams([{ name: "FW_AIRSPD_TRIM", value: 15, ptype: 9, index: 1 }]);
+		markParamsStale();
+		expect($paramsStale.get()).toBe(true);
+		setParamProgress(10, 400);
+		expect($paramsStale.get()).toBe(false);
+	});
+
+	it("clearing the table clears the flag with it", () => {
+		upsertParams([{ name: "FW_AIRSPD_TRIM", value: 15, ptype: 9, index: 1 }]);
+		markParamsStale();
+		clearParams();
+		expect($paramsStale.get()).toBe(false);
+		expect($params.get()).toEqual({});
 	});
 });

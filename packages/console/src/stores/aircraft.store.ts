@@ -16,6 +16,12 @@ const HUD_INTERVAL_MS = 100;
 export const $hudFrame = atom<TelemetryFrame | null>(null);
 let lastHudAt = 0;
 
+/** The clock to difference for rate decisions: gs's monotonic uptime when the
+ *  daemon provides it, else the wall-clock `t` it has always sent. */
+function frameClock(frame: TelemetryFrame): number {
+	return isNum(frame.upMs) ? frame.upMs! : frame.t;
+}
+
 // A finite number (gs sends `null` for a non-finite float; JSON has no NaN).
 export function isNum(v: unknown): v is number {
 	return typeof v === "number" && Number.isFinite(v);
@@ -169,16 +175,26 @@ export function pushFrame(frame: TelemetryFrame) {
 	wasConnected = frame.connected;
 
 	$aircraftStore.set(frame);
-	if (frame.t - lastHudAt >= HUD_INTERVAL_MS || !frame.connected) {
-		lastHudAt = frame.t;
+	// Throttle on gs's MONOTONE clock, not on its wall clock. `t` is a display
+	// timestamp and the hub is a Pi with no RTC: it steps -- by an hour, or by
+	// decades -- the moment NTP lands or the operator sets the date. Differencing
+	// `t` then goes negative and stays negative for the length of the step, so
+	// the HUD simply stops updating until the clock catches up. `upMs` cannot
+	// step. An older daemon sends no `upMs`, so fall back to `t` and treat any
+	// backward move of whichever clock we got as "show this frame now" -- a
+	// stalled HUD is never the safer failure.
+	const clock = frameClock(frame);
+	if (clock - lastHudAt >= HUD_INTERVAL_MS || clock < lastHudAt || !frame.connected) {
+		lastHudAt = clock;
 		$hudFrame.set(frame);
 	}
 
 	// Append to the downsampled history if enough time has passed since the
-	// last stored sample (using the frame's own bridge timestamp `t`).
+	// last stored sample, on the same monotone clock as the HUD throttle.
 	const hist = $historyStore.get();
 	const lastSample = hist[hist.length - 1];
-	if (!lastSample || frame.t - lastSample.t >= HISTORY_INTERVAL_MS) {
+	const lastClock = lastSample ? frameClock(lastSample) : 0;
+	if (!lastSample || clock - lastClock >= HISTORY_INTERVAL_MS || clock < lastClock) {
 		const next = hist.length >= HISTORY_MAX ? hist.slice(hist.length - HISTORY_MAX + 1) : hist.slice();
 		next.push(frame);
 		$historyStore.set(next);

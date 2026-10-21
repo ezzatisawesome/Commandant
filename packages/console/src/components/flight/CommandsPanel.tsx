@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useStore } from "@nanostores/react";
 
-import { $linkState } from "@/stores/link.store";
+import { $linkState, $commander } from "@/stores/link.store";
 import { telemetryClient } from "@/services/telemetry";
 import { IS_VIEW } from "@/lib/envs";
 import { CommandBar } from "./CommandBar";
@@ -31,8 +31,28 @@ const STREAMS: Array<{ id: number; label: string }> = [
 
 export default function CommandsPanel() {
 	const linkState = useStore($linkState);
+	const commander = useStore($commander);
 	const [streamId, setStreamId] = useState(STREAMS[0].id);
 	const [streamHz, setStreamHz] = useState(10);
+	const [streamNote, setStreamNote] = useState<{ ok: boolean; text: string } | null>(null);
+
+	// A stream request changes what the VEHICLE sends, for everyone, out of a
+	// finite link budget — so gs gates it on command authority and may clamp the
+	// rate. `null` is an older gs that never answered the claim; treat it
+	// optimistically and let the ack be the authority, as the rest of the UI does.
+	const streamBlocked = linkState !== "alive" ? "no link to the vehicle"
+		: commander === false ? "another console holds command"
+		: null;
+
+	async function applyStream() {
+		setStreamNote(null);
+		try {
+			const ack = await telemetryClient.setStream(streamId, streamHz);
+			setStreamNote({ ok: ack.ok, text: ack.text || (ack.ok ? "applied" : "refused") });
+		} catch (e) {
+			setStreamNote({ ok: false, text: e instanceof Error ? e.message : "failed" });
+		}
+	}
 
 	return (
 		<div className="w-64 text-xs text-white">
@@ -67,13 +87,22 @@ export default function CommandsPanel() {
 								title="Rate (Hz); 0 disables"
 							/>
 							<button
-								onClick={() => telemetryClient.setStream(streamId, streamHz)}
-								disabled={linkState !== "alive"}
+								onClick={applyStream}
+								disabled={streamBlocked !== null}
+								title={streamBlocked ?? "Ask the vehicle for this message at this rate"}
 								className="h-6 rounded border border-white/15 px-2 text-[10px] text-white/80 hover:bg-white/10 disabled:opacity-30"
 							>
 								Apply
 							</button>
 						</div>
+						{streamBlocked ? (
+							<div className="pt-1 text-[9px] text-amber-300/80">{streamBlocked}</div>
+						) : null}
+						{streamNote ? (
+							<div className={`pt-1 text-[9px] ${streamNote.ok ? "text-emerald-400" : "text-red-400"}`}>
+								{streamNote.ok ? "✓" : "✗"} {streamNote.text}
+							</div>
+						) : null}
 					</div>
 				</>
 			)}

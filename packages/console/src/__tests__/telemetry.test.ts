@@ -27,8 +27,9 @@ class FakeWS {
 import { TelemetryClient } from "@/services/telemetry";
 import { $aircraftStore, $trailStore, pushFrame } from "@/stores/aircraft.store";
 import { $linkState, $commander } from "@/stores/link.store";
-import { $params } from "@/stores/params.store";
-import { $missionCurrent } from "@/stores/mission.store";
+import { $params, $paramsStale } from "@/stores/params.store";
+import { $missionCurrent, $missionProgress, $missionReached, $missionItems, setMissionItems, $planRead, clearPlanRead, $vehicleMission, setVehicleMission, missionMatchesVehicle } from "@/stores/mission.store";
+import { $statusTexts, clearStatus } from "@/stores/statustext.store";
 
 let client: TelemetryClient;
 beforeEach(() => {
@@ -36,6 +37,8 @@ beforeEach(() => {
 	FakeWS.instances = [];
 	FakeWS.throwOnConstruct = false;
 	$aircraftStore.set(null); $trailStore.set([]); $params.set({});
+	$missionCurrent.set(null); $missionReached.set(null); $missionProgress.set(null);
+	clearStatus(); clearPlanRead(); setVehicleMission(null); setMissionItems([]);
 	client = new TelemetryClient("ws://test:8790");
 });
 afterEach(() => { client.disconnect(); vi.useRealTimers(); });
@@ -169,5 +172,285 @@ describe("pushFrame integration", () => {
 		pushFrame({ t: 1, connected: true, lat: 1, lon: 2, alt: 3 });
 		pushFrame({ t: 2, connected: true });
 		expect($aircraftStore.get()?.lat).toBeUndefined(); // latest is latest; overlays hide
+	});
+});
+
+
+describe("a vehicle reboot clears what it invalidates (gs fault H16)", () => {
+	// On a bench or in HITL the autopilot restarts constantly — every restart,
+	// every flash. Telemetry keeps flowing, so this is not a lost link, but PX4
+	// reverts anything that was not saved: a cached param value can no longer be
+	// vouched for, and showing it tells the operator an edit was applied when the
+	// vehicle has dropped it.
+	const reboot = (over = {}) =>
+		({ type: "vehicle_reboot", bootMs: 120, t: 1_700_000_000_000, aborted: [], ...over });
+
+	it("drops the param cache", () => {
+		client.connect(); ws().open();
+		ws().recv({ type: "params", items: [{ name: "FW_AIRSPD_TRIM", value: 15, ptype: 9, index: 3 }] });
+		expect(Object.keys($params.get())).toHaveLength(1);
+		ws().recv(reboot());
+		expect($params.get()).toEqual({});
+	});
+
+	it("says so in the log the operator is already reading", () => {
+		client.connect(); ws().open();
+		ws().recv(reboot());
+		const texts = $statusTexts.get().map((e) => e.text);
+		expect(texts.some((t) => /rebooted/i.test(t))).toBe(true);
+		expect(texts.some((t) => /re-read/i.test(t))).toBe(true);
+	});
+
+	it("clears mission execution state, which belongs to the run that ended", () => {
+		client.connect(); ws().open();
+		ws().recv({ type: "mission_current", seq: 4 });
+		ws().recv({ type: "mission_reached", seq: 3 });
+		expect($missionCurrent.get()).toBe(4);
+		ws().recv(reboot());
+		expect($missionCurrent.get()).toBeNull();
+		expect($missionReached.get()).toBeNull();
+		expect($missionProgress.get()).toBeNull();
+	});
+
+	it("is not treated as telemetry, and does not blank the HUD", () => {
+		client.connect(); ws().open();
+		ws().recv({ type: "telemetry", t: 1, connected: true, lat: 37.4, lon: -122.1, alt: 100 });
+		expect($aircraftStore.get()?.lat).toBe(37.4);
+		ws().recv(reboot());
+		expect($aircraftStore.get()?.lat).toBe(37.4);
+		expect($linkState.get()).not.toBe("lost");
+	});
+});
+
+describe("command authority can actually be taken (gs fault H20)", () => {
+	// The hub's premise is "join the WiFi, open the page", so several people do,
+	// and the first to load held command until its socket dropped. A phone in a
+	// pocket with the page open keeps answering gs's 5 s pings, so its socket
+	// never drops and the pilot at the laptop could not get authority.
+	it("bids without forcing on connect, so a page load cannot steal command", () => {
+		client.connect();
+		ws().open();
+		const claim = ws().lastSent();
+		expect(claim.type).toBe("claim");
+		expect(claim.force).toBeUndefined();
+	});
+
+	it("forces only when the operator pressed Take command", () => {
+		client.connect();
+		ws().open();
+		client.takeCommand().catch(() => {});
+		const claim = ws().lastSent();
+		expect(claim.type).toBe("claim");
+		expect(claim.force).toBe(true);
+	});
+
+	it("greys out when told another console took over", () => {
+		client.connect();
+		ws().open();
+		ws().recv({ type: "ack", id: JSON.parse(ws().sent[0]).id, ok: true, result: 0, text: "commander" });
+		expect($commander.get()).toBe(true);
+		ws().recv({ type: "commander", held: false, text: "another console took command" });
+		expect($commander.get()).toBe(false);
+		expect($statusTexts.get().some((e) => /took command/.test(e.text))).toBe(true);
+	});
+
+	it("a commander notice is not treated as telemetry", () => {
+		client.connect();
+		ws().open();
+		ws().recv({ type: "telemetry", t: 1, connected: true, lat: 37.4, lon: -122.1, alt: 100 });
+		ws().recv({ type: "commander", held: false });
+		expect($aircraftStore.get()?.lat).toBe(37.4);
+	});
+});
+
+
+describe("stream control is a write to the vehicle, not a display preference (gs fault H22)", () => {
+	// It sends SET_MESSAGE_INTERVAL, which changes what the vehicle transmits,
+	// for every client, out of a finite link budget — so gs gates it on command
+	// authority and may clamp the rate. Sent fire-and-forget, a refusal or a
+	// clamp was invisible and the operator just saw nothing happen.
+	it("carries an id so the outcome comes back", () => {
+		client.connect(); ws().open();
+		// Swallow the rejection: teardown fails every outstanding request, and
+		// an unhandled one makes the whole suite exit non-zero while still
+		// reporting every test as passed.
+		client.setStream(375, 25).catch(() => {});
+		const sent = ws().lastSent();
+		expect(sent.type).toBe("stream");
+		expect(typeof sent.id).toBe("string");
+		expect(sent.msgId).toBe(375);
+		expect(sent.hz).toBe(25);
+	});
+
+	it("surfaces a refusal from a console that does not hold command", async () => {
+		client.connect(); ws().open();
+		const p = client.setStream(375, 25);
+		const id = ws().lastSent().id;
+		ws().recv({ type: "ack", id, ok: false, result: -1, text: "not commander" });
+		await expect(p).resolves.toMatchObject({ ok: false, text: "not commander" });
+	});
+
+	it("surfaces a rate clamped to the link budget", async () => {
+		client.connect(); ws().open();
+		const p = client.setStream(375, 50);
+		const id = ws().lastSent().id;
+		ws().recv({ type: "ack", id, ok: true, result: 0, text: "capped at 1.9 Hz" });
+		await expect(p).resolves.toMatchObject({ ok: true, text: "capped at 1.9 Hz" });
+	});
+});
+
+describe("a reconnect does not vouch for what it could not see", () => {
+	it("marks the param cache unverified on reconnect, but not on first connect", () => {
+		client.connect(); ws().open();
+		ws().recv({ type: "params", items: [{ name: "FW_AIRSPD_TRIM", value: 15, ptype: 9, index: 1 }] });
+		expect($paramsStale.get()).toBe(false);   // first connect vouches for itself
+
+		ws().close();                              // the link drops
+		vi.advanceTimersByTime(5000);              // backoff fires, socket reopens
+		ws().open();
+		// gs cannot report a reboot it did not witness, so the gap is the doubt.
+		expect($paramsStale.get()).toBe(true);
+		expect(Object.keys($params.get())).toHaveLength(1);  // values kept
+	});
+
+	it("leaves the operator's own mission draft alone across a reconnect", () => {
+		// The plan is their work, not a read of the vehicle — losing it to a
+		// WiFi blip would be worse than showing it.
+		client.connect(); ws().open();
+		setMissionItems([{ seq: 0, kind: "waypoint", lat: 37.4, lon: -122.1, alt: 80 }]);
+		ws().close();
+		vi.advanceTimersByTime(5000);
+		ws().open();
+		expect($missionItems.get()).toHaveLength(1);
+	});
+});
+
+describe("asking the daemon what it decided (gs `status`)", () => {
+	// A diagnostic for a person with a question during a day-in-the-life run,
+	// not a store to poll: a 1 Hz poll of this is exactly the idle traffic a
+	// telemetry radio has no room for.
+	const reply = {
+		type: "status", endpoint: "serial:/dev/ttyUSB0:57600",
+		configuredEndpoint: "auto", linkBudgetBps: 3456, linkBudgetPinned: false,
+		paramFetch: "paced", vehicle: [1, 1], linkState: "alive", dataAgeMs: 42,
+		streamAges: { position: 42 }, commanderHeld: true, clients: 2,
+		pendingCommands: 0, pendingParamSets: 0, paramRefresh: null,
+		missionOp: null, linkReopens: 0, handlerErrors: 0, upMs: 1234,
+		version: "0.1.0", relay: null,
+	};
+
+	it("resolves with what the daemon inferred about the link", async () => {
+		client.connect(); ws().open();
+		const p = client.status();
+		expect(ws().lastSent().type).toBe("status");
+		ws().recv(reply);
+		await expect(p).resolves.toMatchObject({
+			endpoint: "serial:/dev/ttyUSB0:57600",
+			configuredEndpoint: "auto",
+			paramFetch: "paced",
+		});
+	});
+
+	it("is not treated as telemetry, and does not blank the HUD", () => {
+		client.connect(); ws().open();
+		ws().recv({ type: "telemetry", t: 1, connected: true, lat: 37.4, lon: -122.1, alt: 100 });
+		ws().recv(reply);                       // nobody asked; must be harmless
+		expect($aircraftStore.get()?.lat).toBe(37.4);
+	});
+
+	it("rejects rather than hanging when the socket is not open", async () => {
+		await expect(client.status()).rejects.toThrow(/not connected/);
+	});
+});
+
+describe("plan readback state across a reconnect", () => {
+	it("a mission readback marks the plane read; a reconnect takes it back", () => {
+		client.connect(); ws().open();
+		expect($planRead.get().mission).toBe(false);
+		ws().recv({ type: "mission", count: 0, items: [] });
+		// Count 0 from a READBACK is real information: the vehicle has no
+		// mission. That is exactly what an unasked panel could not say.
+		expect($planRead.get().mission).toBe(true);
+
+		ws().close();
+		vi.advanceTimersByTime(5000);
+		ws().open();
+		expect($planRead.get().mission).toBe(false);
+	});
+
+	it("fence and rally readbacks mark their own planes", () => {
+		client.connect(); ws().open();
+		ws().recv({ type: "fence", count: 0, items: [] });
+		expect($planRead.get()).toMatchObject({ mission: false, fence: true, rally: false });
+		ws().recv({ type: "rally", count: 0, items: [] });
+		expect($planRead.get()).toMatchObject({ fence: true, rally: true });
+	});
+});
+
+
+describe("teardown settles every kind of outstanding request", () => {
+	// A request left unsettled is not a failing test — it is a suite that passes
+	// 349 tests and still exits non-zero, which is exactly how this went
+	// unnoticed until one command checked the exit code instead of grepping the
+	// count. `status` has no id on the wire, so it is not in `pending` and had
+	// to be settled explicitly.
+	it("rejects an in-flight status request when the link goes", async () => {
+		client.connect(); ws().open();
+		const p = client.status();
+		ws().close();
+		await expect(p).rejects.toThrow(/link closed/);
+	});
+
+	it("rejects an in-flight status request on disconnect, where no timer fires", async () => {
+		client.connect(); ws().open();
+		const p = client.status();
+		client.disconnect();
+		await expect(p).rejects.toThrow(/disconnected/);
+	});
+});
+
+describe("the console records what the vehicle holds, separately from the draft", () => {
+	it("a readback is a moment the two provably agree", () => {
+		client.connect(); ws().open();
+		expect($vehicleMission.get()).toBeNull();     // unknown, not empty
+		ws().recv({ type: "mission", count: 1,
+			items: [{ seq: 0, kind: "waypoint", lat: 37.4, lon: -122.1, alt: 80 }] });
+		expect($vehicleMission.get()).toHaveLength(1);
+		expect(missionMatchesVehicle()).toBe(true);
+	});
+
+	it("an accepted upload records what was SENT, not the draft at ack time", async () => {
+		// Over a radio the handshake takes seconds, and the operator may keep
+		// editing during it. Recording the draft as it stands when the ack lands
+		// would claim the vehicle holds something it was never sent.
+		client.connect(); ws().open();
+		const sent = [{ seq: 0, kind: "waypoint" as const, lat: 37.4, lon: -122.1, alt: 80 }];
+		const p = client.pushMission(sent);
+		const id = ws().lastSent().id;
+		setMissionItems([{ seq: 0, kind: "waypoint", lat: 37.9, lon: -122.1, alt: 80 }]);
+		ws().recv({ type: "mission_ack", id, ok: true, result: 0, text: "accepted" });
+		await p;
+		expect($vehicleMission.get()![0].lat).toBe(37.4);   // what was sent
+		expect(missionMatchesVehicle()).toBe(false);         // the draft moved on
+	});
+
+	it("a REJECTED upload records nothing — the vehicle did not take it", async () => {
+		client.connect(); ws().open();
+		const p = client.pushMission([{ seq: 0, kind: "waypoint", lat: 37.4, lon: -122.1, alt: 80 }]);
+		const id = ws().lastSent().id;
+		ws().recv({ type: "mission_ack", id, ok: false, result: 13, text: "invalid param" });
+		await p;
+		expect($vehicleMission.get()).toBeNull();
+	});
+
+	it("a reconnect makes what the vehicle holds unknown again", () => {
+		client.connect(); ws().open();
+		ws().recv({ type: "mission", count: 1,
+			items: [{ seq: 0, kind: "waypoint", lat: 37.4, lon: -122.1, alt: 80 }] });
+		expect($vehicleMission.get()).not.toBeNull();
+		ws().close();
+		vi.advanceTimersByTime(5000);
+		ws().open();
+		expect($vehicleMission.get()).toBeNull();
 	});
 });

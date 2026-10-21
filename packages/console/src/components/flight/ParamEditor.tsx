@@ -3,8 +3,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "@nanostores/react";
 
-import { $params, $paramProgress, $paramError, upsertParam } from "@/stores/params.store";
+import {
+	$params, $paramProgress, $paramError, $paramsStale, upsertParam,
+} from "@/stores/params.store";
 import { $linkState } from "@/stores/link.store";
+import {
+	diffSnapshot, makeSnapshot, parseSnapshot, snapshotFilename,
+	type ParamDiff,
+} from "@/lib/paramSnapshot";
 import { telemetryClient } from "@/services/telemetry";
 import { loadParamMeta, lookupMeta, parseParamInput, validateParam, type ParamMeta } from "@/lib/paramMeta";
 import { Button } from "@/components/ui/button";
@@ -36,6 +42,41 @@ export default function ParamEditor() {
 	const params = useStore($params);
 	const progress = useStore($paramProgress);
 	const paramError = useStore($paramError);
+	const paramsStale = useStore($paramsStale);
+	const fileRef = useRef<HTMLInputElement>(null);
+	const [snapDiff, setSnapDiff] = useState<
+		{ label: string; takenAt: string; diffs: ParamDiff[] } | null>(null);
+	const [snapError, setSnapError] = useState<string | null>(null);
+	const [defaultsNote, setDefaultsNote] = useState<string | null>(null);
+
+	function saveSnapshot() {
+		const snap = makeSnapshot($params.get(), { label: "" });
+		const blob = new Blob([JSON.stringify(snap, null, 2)], { type: "application/json" });
+		const url = URL.createObjectURL(blob);
+		const a = document.createElement("a");
+		a.href = url;
+		a.download = snapshotFilename(snap);
+		a.click();
+		URL.revokeObjectURL(url);
+	}
+
+	async function onSnapshotFile(e: React.ChangeEvent<HTMLInputElement>) {
+		const file = e.target.files?.[0];
+		e.target.value = "";                     // so the same file can be re-picked
+		if (!file) return;
+		setSnapError(null);
+		setSnapDiff(null);
+		const parsed = parseSnapshot(await file.text());
+		if ("error" in parsed) {
+			setSnapError(parsed.error);
+			return;
+		}
+		setSnapDiff({
+			label: parsed.snapshot.label,
+			takenAt: parsed.snapshot.takenAt,
+			diffs: diffSnapshot(parsed.snapshot, $params.get()),
+		});
+	}
 	const linkState = useStore($linkState);
 	const live = linkState === "alive";
 
@@ -54,17 +95,31 @@ export default function ParamEditor() {
 		fetchedOnce.current = true;
 		telemetryClient.refreshParams();
 		loadParamMeta().then(setMeta).catch(() => { /* metadata is optional */ });
+		// The airframe defaults drive the ● "changed from default" markers. They
+		// were fetched and the failure swallowed, so when the path broke the
+		// markers simply stopped appearing and nothing said why — an operator
+		// cannot tell "nothing has changed from default" from "the comparison is
+		// not happening". Say which it is.
 		fetch("/api/airframe")
-			.then((r) => (r.ok ? r.json() : null))
-			.then((j) => { if (j?.content) setDefaults(parseDefaults(j.content as string)); })
-			.catch(() => { /* defaults are optional */ });
+			.then((r) => r.json())
+			.then((j) => {
+				if (j?.content) {
+					setDefaults(parseDefaults(j.content as string));
+					setDefaultsNote(null);
+				} else {
+					setDefaultsNote("airframe defaults unavailable — the ● "
+						+ "changed-from-default markers are off");
+				}
+			})
+			.catch(() => setDefaultsNote("airframe defaults could not be read — the "
+				+ "● changed-from-default markers are off"));
 	}, [open]);
 
-	const rows = useMemo(() => {
+	const { rows, matched } = useMemo(() => {
 		const all = Object.values(params).sort((a, b) => a.name.localeCompare(b.name));
 		const q = query.trim().toUpperCase();
 		const filtered = q ? all.filter((p) => p.name.toUpperCase().includes(q)) : all;
-		return filtered.slice(0, ROW_CAP);
+		return { rows: filtered.slice(0, ROW_CAP), matched: filtered.length };
 	}, [params, query]);
 
 	const total = Object.keys(params).length;
@@ -118,9 +173,88 @@ export default function ParamEditor() {
 								onClick={() => telemetryClient.refreshParams()} className="h-6 px-2 text-[10px]">
 								Refresh
 							</Button>
+							{/* Snapshots: the one thing Commandant keeps on disk, because
+							    "what changed since the configuration that flew?" is a
+							    question nothing else can answer. A download and a file
+							    picker need no backend, which matters when the only
+							    network is the hub's own WiFi. */}
+							<Button size="sm" variant="outline" disabled={total === 0}
+								onClick={saveSnapshot}
+								title={total === 0 ? "Refresh the parameters first"
+									: "Save these values to a JSON file"}
+								className="h-6 px-2 text-[10px]">Save</Button>
+							<Button size="sm" variant="outline" disabled={total === 0}
+								onClick={() => fileRef.current?.click()}
+								title={total === 0 ? "Refresh the parameters first"
+									: "Compare a saved file against these values"}
+								className="h-6 px-2 text-[10px]">Compare</Button>
+							<input ref={fileRef} type="file" accept=".json,application/json"
+								className="hidden" onChange={onSnapshotFile} />
 						</div>
 					</div>
 
+					{/* The link dropped and came back, so these values predate the
+					    gap: gs cannot report a reboot it did not witness. Shown
+					    rather than cleared — a thousand values should not vanish
+					    because the WiFi hiccuped — but not claimed as current. */}
+					{snapError ? (
+						<div className="px-3 pt-2 text-[10px] text-red-400">
+							✗ {snapError}
+						</div>
+					) : null}
+					{snapDiff ? (
+						<div className="border-b border-white/10 px-3 pb-2 pt-2 text-[10px]">
+							<div className="flex items-center justify-between">
+								<span className="text-white/70">
+									vs snapshot {snapDiff.takenAt.slice(0, 19).replace("T", " ")}
+									{snapDiff.label ? ` — ${snapDiff.label}` : ""}
+								</span>
+								<button onClick={() => setSnapDiff(null)}
+									className="text-white/40 hover:text-white">close</button>
+							</div>
+							{snapDiff.diffs.length === 0 ? (
+								<div className="pt-1 text-emerald-400">
+									✓ identical — every parameter matches the file
+								</div>
+							) : (
+								<div className="mt-1 max-h-40 overflow-auto font-mono">
+									{snapDiff.diffs.map((d) => (
+										<div key={d.name} className="flex gap-2 py-px">
+											<span className="w-40 shrink-0 truncate text-white/80">{d.name}</span>
+											{d.kind === "changed" ? (
+												<span className="text-amber-300">
+													{d.snapshot} → {d.vehicle}
+												</span>
+											) : d.kind === "only-in-snapshot" ? (
+												<span className="text-sky-300/80">
+													{d.snapshot} — not on this vehicle
+												</span>
+											) : (
+												<span className="text-sky-300/80">
+													{d.vehicle} — not in the file
+												</span>
+											)}
+										</div>
+									))}
+								</div>
+							)}
+							<div className="pt-1 text-white/35">
+								{snapDiff.diffs.length} difference{snapDiff.diffs.length === 1 ? "" : "s"}
+								{" · "}editing is per-parameter below, as always
+							</div>
+						</div>
+					) : null}
+					{defaultsNote ? (
+						<div className="px-3 pt-2 text-[10px] text-white/45">
+							▲ {defaultsNote}
+						</div>
+					) : null}
+					{paramsStale ? (
+						<div className="px-3 pt-2 text-[10px] text-amber-400">
+							▲ the link dropped — these values predate it and are unverified;
+							refresh before trusting or editing any of them
+						</div>
+					) : null}
 					{paramError ? (
 						<div className="px-3 pt-2 text-[10px] text-amber-400">
 							refresh incomplete ({paramError}) — {total} of the list loaded; retry when the link is alive
@@ -191,6 +325,17 @@ export default function ParamEditor() {
 								);
 							})
 						)}
+						{/* The row cap is a render budget, not a statement about the
+						    vehicle -- and it said nothing, so the list simply stopped.
+						    Real PX4 has 720 parameters; sorted by name, a 400-row cap
+						    ends somewhere in the Ms, which hides every RTL_, SENS_ and
+						    SYS_ parameter from anyone who scrolls rather than searches.
+						    The header said "720 loaded" the whole time. */}
+						{matched > rows.length ? (
+							<div className="border-t border-white/10 py-2 text-center text-[10px] text-amber-300/70">
+								showing {rows.length} of {matched} — search to reach the rest
+							</div>
+						) : null}
 					</div>
 				</div>
 			)}

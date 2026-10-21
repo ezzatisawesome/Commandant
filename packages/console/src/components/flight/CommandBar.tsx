@@ -9,7 +9,8 @@ import { $linkState, $commander } from "@/stores/link.store";
 import { telemetryClient } from "@/services/telemetry";
 import type { CommandName } from "@/types/app";
 import { Button } from "@/components/ui/button";
-import { $missionItems } from "@/stores/mission.store";
+import { $missionItems, $vehicleMission, missionMatchesVehicle } from "@/stores/mission.store";
+import { $vehicleFence } from "@/stores/geo.store";
 import { $params } from "@/stores/params.store";
 import { lookupFrom, missionBlockers } from "@/lib/missionCheck";
 
@@ -48,7 +49,24 @@ export function CommandBar() {
 	// does not meet its requirements — accepting the command and staying in the
 	// mode it was in. The button itself carries the warning, so the one control
 	// that will not work is the one that looks different.
-	const missionBlocked = missionBlockers(missionItems, lookupFrom(params));
+	//
+	// The plan it checks is the one the VEHICLE holds, not the draft. Pressing
+	// this flies what the autopilot has, and reasoning about the draft inverted
+	// the warning in the case that matters: read back a plan PX4 will refuse,
+	// fix the draft without uploading, and the amber went away while the
+	// autopilot still held the bad one. The warning disappeared exactly when it
+	// was most needed. The fence is the vehicle's too, since that is what gets
+	// enforced in flight.
+	const vehicleMission = useStore($vehicleMission);
+	const vehicleFence = useStore($vehicleFence);
+	const missionBlocked = vehicleMission === null
+		? []
+		: missionBlockers(vehicleMission, lookupFrom(params), vehicleFence ?? []);
+	// Unknown is not the same as fine, and must not read as fine.
+	const missionUnknown = vehicleMission === null;
+	// Edited since the vehicle took it: MISSION will fly the older one.
+	const draftDiverged = vehicleMission !== null
+		&& !missionMatchesVehicle(missionItems, vehicleMission);
 	const live = linkState === "alive" && !notCommander;
 
 	// Re-bid for authority. gs grants it to the first claimer and holds it until
@@ -161,9 +179,21 @@ export function CommandBar() {
 				{MODES.map((m) => {
 					// Only MISSION depends on the plan being flyable; the others are
 					// unconditional mode changes.
-					const warn = m.label === "MISSION" && missionBlocked.length > 0
-						? missionBlocked.map((b) => b.detail).join("\n\n")
-						: null;
+					let warn: string | null = null;
+					if (m.label === "MISSION") {
+						if (missionUnknown) {
+							warn = "The vehicle's mission is not known — nothing has been "
+								+ "read back or uploaded this session, so whether PX4 will "
+								+ "accept MISSION cannot be checked. Download it in the "
+								+ "mission panel.";
+						} else if (missionBlocked.length > 0) {
+							warn = missionBlocked.map((b) => b.detail).join("\n\n");
+						} else if (draftDiverged) {
+							warn = "This flies the plan the VEHICLE holds, which is not the "
+								+ "draft on screen — you have edited since it was uploaded. "
+								+ "Upload again to fly what you are looking at.";
+						}
+					}
 					return (
 						<Button
 							key={m.label}

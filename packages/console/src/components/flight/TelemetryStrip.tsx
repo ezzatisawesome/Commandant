@@ -14,6 +14,7 @@ import {
 } from "@/stores/displayConfig.store";
 import type { LinkState, TelemetryFrame } from "@/types/app";
 import type { ClearanceBand } from "@/lib/flightGeometry";
+import { GROUP_STALE_MS, groupAgeMs } from "@/lib/flightGeometry";
 import { Sparkline } from "./Sparkline";
 import { HealthStrip } from "./HealthStrip";
 import { ControlBar } from "./ControlBar";
@@ -59,6 +60,10 @@ function compass(deg: number): string {
 interface CellView {
 	label: string; value: string; unit?: string; tone: string; title?: string;
 	control?: number;
+	/** How long ago this reading's MAVLink stream last arrived, when the cell's
+	 *  field belongs to one. Past GROUP_STALE_MS the cell is dimmed and struck
+	 *  through: the value shown is the last one received, not a live reading. */
+	staleMs?: number;
 }
 
 const Cell = memo(function Cell({
@@ -84,7 +89,13 @@ const Cell = memo(function Cell({
 				{view.label}
 			</span>
 			<div className="flex w-full items-baseline gap-1 leading-none">
-				<span className={`truncate font-mono text-[13px] ${view.tone}`}>{view.value}</span>
+				{/* A cold cell is still readable — the last value is information —
+				    but struck through and dimmed, so it cannot be mistaken for a
+				    live one at a glance. The frame being fresh does not make every
+				    field in it fresh. */}
+				<span className={`truncate font-mono text-[13px] ${
+					isNum(view.staleMs) ? "text-white/35 line-through decoration-white/30" : view.tone
+				}`}>{view.value}</span>
 				{view.unit ? <span className="shrink-0 text-[9px] text-white/40">{view.unit}</span> : null}
 				{view.control !== undefined ? <ControlBar value={view.control} /> : null}
 			</div>
@@ -141,14 +152,29 @@ export function TelemetryStrip() {
 							? `terrain ${d.terrainM.toFixed(0)} m MSL · ${d.aglM?.toFixed(0) ?? "—"} m AGL`
 							: "waiting for terrain tiles under the aircraft",
 					};
-				case "wind":
+				case "wind": {
+					// A cold wind estimate is shown as cold. PX4 only produces one
+					// while EKF2 has one, so losing the airspeed sensor stops
+					// WIND_COV and leaves the last value to be redrawn as the
+					// current wind forever. The link is fine, the frame is fresh,
+					// and this one number is minutes old — which the strip's own
+					// frame-level `frozen` flag cannot say.
+					const windAge = d.wind?.ageMs;
+					const windCold = isNum(windAge) && windAge > GROUP_STALE_MS;
 					return {
-						label: meta.label, unit: d.wind ? meta.unit : undefined,
+						label: meta.label, unit: d.wind && !windCold ? meta.unit : undefined,
 						value: d.wind === null ? "—"
+							: windCold ? `${d.wind.speedMps.toFixed(1)} cold`
 							: `${d.wind.speedMps.toFixed(1)} ${compass(d.wind.fromDeg)}`,
-						tone: "text-white",
-						title: d.wind ? `from ${d.wind.fromDeg.toFixed(0)}°` : "needs two fixes",
+						tone: windCold ? "text-amber-400" : "text-white",
+						title: d.wind === null ? "no EKF2 wind estimate yet"
+							: windCold
+								? `WIND_COV stopped ${(windAge! / 1000).toFixed(0)} s ago — `
+									+ `last estimate was ${d.wind.speedMps.toFixed(1)} m/s `
+									+ `from ${d.wind.fromDeg.toFixed(0)}°`
+								: `from ${d.wind.fromDeg.toFixed(0)}°`,
 					};
+				}
 				case "drift":
 					return {
 						label: meta.label,
@@ -184,32 +210,49 @@ export function TelemetryStrip() {
 							: `${d.fence.violated ? "OUT " : ""}${d.fence.distanceM.toFixed(0)}`,
 						tone: !d.fence ? "text-white/40" : d.fence.violated ? "text-red-400"
 							: d.fence.distanceM < 100 ? "text-amber-400" : "text-emerald-400",
-						title: d.fence ? `${d.fence.kind}${d.fence.violated ? " — BREACHED" : ""}` : "no fence",
+						// A dash here means "the vehicle's fence is not known" — nothing
+						// read back or uploaded this session — not "there is no fence".
+						// The draft the operator is drawing is deliberately not used:
+						// PX4 enforces what it holds, and a green number computed from
+						// a draft dragged outward is the worst possible reassurance.
+						title: d.fence
+							? `${d.fence.kind}${d.fence.violated ? " — BREACHED" : ""}`
+							: "the vehicle's fence is not known — Download it in the geofence panel",
 					};
 			}
 		}
 		const def = FIELD_BY_KEY[key];
 		if (!def) return null;
+		// Has the stream behind this cell stopped? `undefined` when the field has
+		// no MAVLink carrier, when the daemon reports no ages (an older gs), or
+		// when the stream is current.
+		const age = def.group ? groupAgeMs(f?.ages, def.group) : null;
+		const staleMs = isNum(age) && age > GROUP_STALE_MS ? age : undefined;
+		const stale = (v: CellView): CellView => (staleMs === undefined ? v : {
+			...v, staleMs,
+			title: `${def.label}: this stream stopped ${(staleMs / 1000).toFixed(0)} s ago — `
+				+ `the value shown is the last one received, not a live reading`,
+		});
 		const raw = f ? f[def.key] : undefined;
 		if (def.kind === "text") {
-			return {
+			return stale({
 				label: def.label,
 				value: def.key === "armed"
 					? (raw === undefined ? "—" : raw ? "ARMED" : "DISARMED")
 					: ((raw as string | undefined) ?? "—"),
 				tone: def.key === "armed" && raw ? "text-amber-300" : "text-white",
-			};
+			});
 		}
 		if (def.kind === "control") {
-			return {
+			return stale({
 				label: def.label, value: fmt(raw, def.digits ?? 0), unit: def.unit,
 				tone: "text-white", control: isNum(raw) ? raw : undefined,
-			};
+			});
 		}
-		return {
+		return stale({
 			label: def.label, value: fmt(raw, def.digits ?? 1), unit: def.unit,
 			tone: "text-white",
-		};
+		});
 	}
 
 	// The picker is a LIST of channels, not a grid of labels. A label alone

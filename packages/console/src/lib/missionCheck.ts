@@ -25,7 +25,8 @@
 // on the globe, instead of stacking paragraphs the operator has to read and
 // then translate back into which thing to drag.
 
-import type { MissionItem } from "@/types/app";
+import type { FenceItem, MissionItem } from "@/types/app";
+import { fenceViolation, isNum } from "@/lib/flightGeometry";
 
 /** PX4 parameter deciding whether a plan must carry takeoff/landing items. */
 export const TKO_LAND_REQ_PARAM = "MIS_TKO_LAND_REQ";
@@ -44,7 +45,8 @@ export type BlockerCode =
 	| "needs-landing"
 	| "needs-either"
 	| "land-altitude"
-	| "approach-too-steep";
+	| "approach-too-steep"
+	| "fence-breach";
 
 export interface Blocker {
 	code: BlockerCode;
@@ -164,7 +166,16 @@ export function minLegalRunM(items: MissionItem[], param: ParamLookup): number |
  * Silent about anything it cannot check: an undownloaded parameter list yields
  * no findings at all, rather than findings based on assumed defaults.
  */
-export function missionBlockers(items: MissionItem[], param: ParamLookup): Blocker[] {
+/** Mission kinds carrying a position worth checking against the fence. `rtl`
+ *  goes up as MAV_FRAME_MISSION with lat/lon zero, so checking it would report
+ *  every plan as breaching a fence at null island. */
+const POSITIONAL_KINDS = new Set([
+	"takeoff", "waypoint", "loiter_unlim", "loiter_time", "loiter_turns", "land",
+]);
+
+export function missionBlockers(
+	items: MissionItem[], param: ParamLookup, fence: FenceItem[] = [],
+): Blocker[] {
 	if (items.length === 0) return [];
 	const out: Blocker[] = [];
 
@@ -219,6 +230,41 @@ export function missionBlockers(items: MissionItem[], param: ParamLookup): Block
 		}
 	}
 
+	// --- geofence ---------------------------------------------------------
+	// PX4 enforces the fence in FLIGHT, not at upload. A plan whose waypoints
+	// sit outside the inclusion fence, or inside an exclusion one, transfers
+	// cleanly and acks "accepted", then breaches mid-mission — and GF_ACTION
+	// defaults to 2, Hold mode (checked in the bundled PX4 metadata), so the
+	// aircraft stops and loiters out there for a reason that appears only as a
+	// STATUSTEXT. Both halves of that plan were "accepted".
+	//
+	// Reported per item, like the landing findings, so the offending waypoint
+	// gets a row flag and can be dragged into compliance rather than described.
+	//
+	// The fence here is the DRAFT, which is correct even though the live breach
+	// readout deliberately uses the fence the VEHICLE is enforcing. They answer
+	// different questions: that one is "where is the aircraft now, against what
+	// PX4 will act on", this one is "will the plan I am about to upload sit
+	// inside the fence I am about to upload". Both drafts, consistently —
+	// checking a new plan against the old fence would warn about a boundary that
+	// is itself on its way out.
+	for (const it of items) {
+		if (!POSITIONAL_KINDS.has(it.kind)) continue;
+		if (!isNum(it.lat) || !isNum(it.lon)) continue;
+		const broken = fenceViolation(it.lat, it.lon, fence);
+		if (broken === null) continue;
+		const excl = broken.includes("exclusion");
+		const shape = broken.includes("circle") ? "circle" : "polygon";
+		out.push({
+			code: "fence-breach", seq: it.seq,
+			short: excl ? "inside an exclusion fence" : "outside the fence",
+			detail: excl
+				? `This item is inside an exclusion ${shape}. PX4 accepts the upload and enforces the fence in flight, so the aircraft would breach here mid-mission and act on GF_ACTION.`
+				: `This item is outside the inclusion ${shape}. PX4 accepts the upload and enforces the fence in flight, so the aircraft would breach here mid-mission and act on GF_ACTION.`,
+		});
+		break;   // one is enough to stop the plan; name the first.
+	}
+
 	return out;
 }
 
@@ -228,8 +274,10 @@ export function blockersForSeq(blockers: Blocker[], seq: number): Blocker[] {
 }
 
 /** Does this plan look runnable? */
-export function missionLooksRunnable(items: MissionItem[], param: ParamLookup): boolean {
-	return items.length > 0 && missionBlockers(items, param).length === 0;
+export function missionLooksRunnable(
+	items: MissionItem[], param: ParamLookup, fence: FenceItem[] = [],
+): boolean {
+	return items.length > 0 && missionBlockers(items, param, fence).length === 0;
 }
 
 /** A ParamLookup over the console's params store shape. */

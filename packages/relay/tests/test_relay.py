@@ -271,3 +271,142 @@ async def test_a_wedged_hub_also_stops_being_replayed(monkeypatch):
                 break
         assert "telemetry" not in kinds, f"stale frame replayed: {kinds}"
         await late.close(); await pub.close()
+
+
+# --- a slow viewer must not grow a buffer inside this process ---------------
+
+class FakeTransport:
+    def __init__(self, buffered: int):
+        self._buffered = buffered
+
+    def get_write_buffer_size(self) -> int:
+        return self._buffered
+
+
+class FakeViewer:
+    """Stands in for a viewer socket with a given amount of unsent data."""
+
+    def __init__(self, buffered: int):
+        self.transport = FakeTransport(buffered)
+        self.closed_with: tuple | None = None
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        self.closed_with = (code, reason)
+
+
+def test_a_viewer_that_cannot_keep_up_is_dropped():
+    """Constraint 3 -- a slow viewer cannot affect the hub or other viewers --
+    was implemented in a `_fan_out` helper that nothing ever called. Every
+    broadcast went through `websockets.broadcast`, which is explicitly NOT
+    flow-controlled: per its own docs it "pushes the message synchronously to
+    all connections even if their write buffers are overflowing... messages
+    will pile up in its write buffer". This is the only component on the public
+    internet, viewers are unauthenticated, and it runs on one small machine.
+
+    So the buffer check has to actually run. Closing the slow viewer is also
+    better for that viewer: it reconnects and gets the retained state, which is
+    a correct current screen rather than a backlog of superseded frames."""
+    from relay.server import SLOW_VIEWER_BYTES
+
+    relay = Relay(token="t", host="127.0.0.1", port=0)
+    keeping_up = FakeViewer(1024)
+    backed_up = FakeViewer(SLOW_VIEWER_BYTES + 1)
+    relay._viewers.update({keeping_up, backed_up})
+
+    async def scenario():
+        assert relay._drop_slow_viewers() == 1
+        await asyncio.sleep(0)       # let the fire-and-forget close run
+
+    asyncio.run(scenario())
+
+
+    assert backed_up not in relay._viewers, "a runaway viewer was kept"
+    assert keeping_up in relay._viewers, "dropped a viewer that was keeping up"
+    assert relay.viewers_dropped == 1
+    assert backed_up.closed_with is not None
+    assert backed_up.closed_with[0] == 1013      # "try again later"
+
+
+def test_every_broadcast_runs_the_slow_viewer_check():
+    """The bug was not a wrong check, it was a check nothing called. Pin the
+    call site, not just the helper."""
+    relay = Relay(token="t", host="127.0.0.1", port=0)
+    called = []
+    relay._drop_slow_viewers = lambda: called.append(True) or 0
+
+    async def scenario():
+        await relay._broadcast(json.dumps({"type": "telemetry"}))
+    asyncio.run(scenario())
+    assert called, "a broadcast went out without checking for slow viewers"
+
+
+def test_dropping_a_slow_viewer_is_counted_for_healthz():
+    """`frames_dropped` was permanently 0, which made the /healthz figure a
+    reassuring lie. It has to move when something is actually dropped."""
+    from relay.server import SLOW_VIEWER_BYTES
+
+    relay = Relay(token="t", host="127.0.0.1", port=0)
+    relay._viewers.add(FakeViewer(SLOW_VIEWER_BYTES * 4))
+    assert relay.frames_dropped == 0
+    relay._drop_slow_viewers()
+    assert relay.frames_dropped == 1
+    assert relay.viewers_dropped == 1
+
+
+def test_a_viewer_with_no_transport_is_left_alone():
+    """Not every connection object exposes a transport; an unknown buffer state
+    is not evidence of a slow viewer, and guessing would disconnect healthy
+    browsers."""
+    relay = Relay(token="t", host="127.0.0.1", port=0)
+
+    class NoTransport:
+        transport = None
+    v = NoTransport()
+    relay._viewers.add(v)
+    assert relay._drop_slow_viewers() == 0
+    assert v in relay._viewers
+    assert relay.viewers_dropped == 0
+
+
+def test_the_token_is_compared_in_constant_time():
+    # A source-inspection guard, deliberately: the property is "which function
+    # is used", and timing cannot be asserted reliably in a test.
+    """Hygiene, not a measured hole: a timing attack across a WebSocket
+    handshake is impractical because network jitter dwarfs a string compare.
+    It is free, though, and this is the one component on the internet."""
+    import inspect
+
+    from relay import server
+    src = inspect.getsource(server.Relay._handler)
+    assert "compare_digest" in src, "token compared with a plain !="
+
+
+async def test_an_unset_token_refuses_every_publish():
+    """Fail closed, for real rather than by inspection: a relay started with no
+    token must not become an open write endpoint on the internet."""
+    async with Harness(token="") as h:
+        for attempt in ("", "anything", "None"):
+            with pytest.raises(Exception):
+                pub = await websockets.connect(
+                    f"ws://127.0.0.1:{h.port}/publish?token={attempt}")
+                await pub.send(json.dumps({"type": "telemetry", "lat": 1}))
+                await pub.recv()          # closed by the relay
+        assert h.relay._publisher is None
+        assert h.relay.frames_in == 0
+
+
+def test_a_superseding_publisher_claims_the_slot_before_awaiting():
+    # Also source inspection. The behavioural version needs a three-way race
+    # with a controllable close, which would be flaky for a window this narrow;
+    # an ordering guard is the honest trade.
+    """`_publisher` was set to None while awaiting the old socket's close,
+    leaving a window where a third connection saw the slot free, took it, and
+    was overwritten when the first resumed — two hubs interleaving frames into
+    one stream. Unreachable with a single hub, reachable with one reconnecting
+    fast."""
+    import inspect
+    src = inspect.getsource(Relay._handle_publisher)
+    claim = src.index("old, self._publisher = self._publisher")
+    await_close = src.index("await old.close")
+    assert claim < await_close
+    assert "self._publisher, ws" in src, "still clears the slot before awaiting"
