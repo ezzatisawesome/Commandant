@@ -1064,7 +1064,27 @@ before flying, that is the worst available failure. After the fix: 721 in 706 ms
   `.catch`. The console now says so, and says that the aircraft, mission and
   geofence are still drawn to scale.
 
-### Still open
+### Sixth pass — the first flight Commandant watched, and why a mission is refused
+
+Against the real rig (mojave-px4 v1.16.2 + JSBSim in Docker): a mission
+uploaded from Commandant was flown (11 m / 17 m / 1 m from three waypoints), a
+geofence accepted, 955 parameters read in 0.8 s mid-flight, the whole flight
+recorded and replayed. Four faults fixed (`ESTIMATOR_STATUS`, stream re-request
+after a reboot, the readiness chip's "unchecked" state, link-loss logging).
+
+**Why a mission is refused, and why Commandant could not say.** PX4 reports
+feasibility failures through the **events protocol** (EVENT, id 410), decoded
+against metadata the firmware build generates. The legacy STATUSTEXT is sent too
+— except when it is dropped inside PX4, which is exactly what happened to
+"Mission rejected: Landing waypoint/pattern required" (`MIS_TKO_LAND_REQ = 2`
+from `rc.fw_defaults`). gs now decodes events with PX4's own vendored libevents
+parser (`--events-meta`, autodetected from a `mojave-px4` sibling). Replaying the
+recording: the dropped reason, the mode refusal with its argument rendered, and
+`Landing aborted: terrain measurement not found` — the explanation for the
+return to loiter — all reach the console. Replay also now streams instead of
+pre-parsing: 4.2 s to the first frame on a 470k-record flight, was 301 s.
+
+
 
 - Nothing has flown. The firmware rig has no simulator, so there is no position,
   no arming and no mission execution — `day_in_the_life.py --attach auto --net`

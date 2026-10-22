@@ -89,6 +89,12 @@ def _print_status(s: dict) -> None:
     print("\n quietly survived")
     line("link reopens", f"{reopens}" + ("" if not reopens else "   <-- the link has been dropping"))
     line("handler errors", f"{errors}" + ("" if not errors else "   <-- check the daemon log"))
+    ev = s.get("events") or {}
+    if ev.get("metadata"):
+        line("PX4 events", f"decoded {ev.get('decoded', 0)}, unknown {ev.get('unknown', 0)}  "
+                           f"({os.path.basename(ev['metadata'])})")
+    elif ev.get("missed"):
+        line("PX4 events", f"{ev['missed']} UNREADABLE — set --events-meta; refusal reasons are being lost")
     trimmed = s.get("trimmedStreams")
     if trimmed:
         # Said plainly, because the alternative is someone hunting a message in
@@ -167,6 +173,12 @@ def main() -> int:
                         metavar="X", help="replay faster or slower (default 1x)")
     parser.add_argument("--replay-loop", action="store_true",
                         help="start again at the end")
+    parser.add_argument("--events-meta", default=None, metavar="all_events.json",
+                        help="PX4 event metadata for the FLASHED firmware "
+                             "(build/<target>/events/all_events.json[.xz]). Without "
+                             "it, the reason PX4 refused a mission or a mode never "
+                             "reaches the console. Default: $GS_EVENTS_META, else "
+                             "autodetected under $PX4_DIR or a mojave-px4 sibling.")
     parser.add_argument("--keep-all-streams", action="store_true",
                         help="do not ask the vehicle to stop sending messages "
                              "gs never reads. Keeps them in the flight log, at "
@@ -220,6 +232,7 @@ def main() -> int:
         log_dir=None if args.no_log else args.log_dir,
         command_token=args.command_token,
         trim_streams=not args.keep_all_streams,
+        events_meta=args.events_meta,
     ).run()
     return 0
 

@@ -46,6 +46,7 @@ import websockets
 os.environ.setdefault("MAVLINK20", "1")
 from pymavlink import mavutil  # noqa: E402
 
+from .events import EventDecoder, find_metadata
 from .flightlog import FlightLog
 from . import __version__  # noqa: E402
 
@@ -962,6 +963,7 @@ class Bridge:
         trim_streams: bool = True,
         log_dir: str | None = None,
         command_token: str = "",
+        events_meta: str | None = None,
     ) -> None:
         self.mavlink_endpoint = mavlink_endpoint
         self.json_port = json_port
@@ -974,6 +976,17 @@ class Bridge:
         self.command_token = command_token
         # Ask PX4 to stop sending what gs never reads. See _TRIMMABLE.
         self.trim_streams = trim_streams
+        # PX4's events protocol, decoded against the firmware's own metadata.
+        # Without it the reason for a refusal never reaches the operator: see
+        # events.py for the mission rejection that was lost this way.
+        meta = find_metadata(events_meta)
+        self._events = EventDecoder(meta) if meta else None
+        self._events_missed = 0
+        if self._events is not None:
+            print(f"[gs] PX4 event metadata: {meta}")
+        else:
+            print("[gs] no PX4 event metadata found: refusal reasons sent as EVENTs will "
+                  "not be readable. Point --events-meta at build/<target>/events/all_events.json")
         # True while serving a recorded flight. Carried on every frame, because
         # a console that cannot tell a replay from a live aircraft is a console
         # that will eventually be read as live while something is on fire.
@@ -2312,6 +2325,23 @@ class Bridge:
         if t in _TRIMMABLE:
             self._trim_stream(conn, t)
             return      # nothing below reads these
+        if t == "UNKNOWN_410":
+            # An EVENT, which this dialect cannot name. Decoded against the
+            # firmware's metadata it is the sentence the STATUSTEXT would have
+            # carried -- and sometimes did not: PX4 dropped "Mission rejected:
+            # Landing waypoint/pattern required" on the way to the link while
+            # this arrived intact. See events.py.
+            if self._events is None:
+                self._events_missed += 1
+                if self._events_missed == 1:
+                    print("[gs] PX4 is sending events gs cannot read (no --events-meta); "
+                          "refusal reasons will be missing from the log feed")
+                return
+            d = self._events.decode(bytes(msg.get_msgbuf()))
+            if d is not None:
+                self._broadcast({"type": "statustext", "severity": d["severity"],
+                                 "text": d["text"], "event": d["event"], "t": _now_ms()})
+            return
         if t == "STATUSTEXT":
             self._on_statustext(msg)
 
@@ -2581,6 +2611,9 @@ class Bridge:
             "commandTokenRequired": bool(self.command_token),
             # What gs asked the vehicle to STOP sending, so a missing message
             # in a log is attributable rather than mysterious. See _TRIMMABLE.
+            "events": ({"metadata": str(self._events.path), "decoded": self._events.decoded,
+                        "unknown": self._events.unknown} if self._events
+                       else {"metadata": None, "missed": self._events_missed}),
             "trimmedStreams": (sorted(k for k, v in _TRIMMABLE.items()
                                       if v in self._trim_at)
                                if self.trim_streams else []),

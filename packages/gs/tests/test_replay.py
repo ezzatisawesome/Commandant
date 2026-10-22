@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import struct
+from pathlib import Path
 
 os.environ.setdefault("MAVLINK20", "1")
 
@@ -117,3 +118,34 @@ def test_a_damaged_record_does_not_stop_the_replay(tmp_path):
     b._loop = _capturing_loop(events)
     replay(b, path, speed=1000.0)
     assert b._vehicle == (1, 1), "the good records before the damage were lost"
+
+
+def test_a_px4_event_in_a_recording_is_decoded_on_replay(tmp_path):
+    """Live, PX4 EVENTs decoded fine. On replay they vanished: pymavlink leaves
+    source 0/0 on a message it cannot name, and the vehicle filter dropped
+    them. The frame is the real one recorded when PX4 refused a mission."""
+    log = FlightLog(tmp_path, fsync_interval_s=0).start()
+    mav = m.MAVLink(None, srcSystem=1, srcComponent=1)
+    log.write(m.MAVLink_heartbeat_message(m.MAV_TYPE_FIXED_WING, m.MAV_AUTOPILOT_PX4, 0, 0, 0, 3).pack(mav))
+    log.write(bytes.fromhex("fd0d00007c01019a010091168101746b05001a000000638af1"))
+    log.stop()
+
+    events: list = []
+    b = _bridge(events_meta=str(Path(__file__).parent / "fixtures" / "px4_events_min.json"))
+    b._loop = _capturing_loop(events)
+    replay(b, log.path, speed=1000.0)
+    texts = [e for e in events if e.get("type") == "statustext"]
+    assert texts, "the event never reached the console"
+    assert texts[0]["text"] == "Mission rejected: Landing waypoint/pattern required"
+    assert texts[0]["event"] == "navigator_mis_land_missing"
+
+
+def test_replay_starts_streaming_rather_than_reading_the_whole_file_first(tmp_path):
+    """301 seconds to the first frame on a real flight's recording was the
+    pre-parse-and-sort design. A generator must not need the end of the file
+    to produce the beginning."""
+    from gs.replay import records
+    path = _write_log(tmp_path, n=50)
+    it = records(path)
+    first = next(it)
+    assert first[1] in ("mav", "json")

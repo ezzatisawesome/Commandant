@@ -1,0 +1,192 @@
+{
+ "version": 2,
+ "translation": {
+  "items": {
+   "components": {
+    "items": {
+     "*": {
+      "items": {
+       "enums": {
+        "items": {
+         "*": {
+          "items": {
+           "entries": {
+            "items": {
+             "*": {
+              "translate": [
+               "description"
+              ]
+             }
+            }
+           }
+          }
+         }
+        }
+       },
+       "event_groups": {
+        "items": {
+         "*": {
+          "items": {
+           "events": {
+            "items": {
+             "*": {
+              "translate": [
+               "message",
+               "description"
+              ]
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ "components": {
+  "1": {
+   "namespace": "px4",
+   "enums": {
+    "navigation_mode_t": {
+     "description": "Flight mode",
+     "entries": {
+      "0": {
+       "description": "Manual",
+       "name": "manual"
+      },
+      "1": {
+       "description": "Altitude control",
+       "name": "altctl"
+      },
+      "10": {
+       "description": "Takeoff",
+       "name": "auto_takeoff"
+      },
+      "11": {
+       "description": "Land",
+       "name": "auto_land"
+      },
+      "12": {
+       "description": "Follow Target",
+       "name": "auto_follow_target"
+      },
+      "13": {
+       "description": "Precision Landing",
+       "name": "auto_precland"
+      },
+      "14": {
+       "description": "Orbit",
+       "name": "orbit"
+      },
+      "15": {
+       "description": "Vtol Takeoff",
+       "name": "auto_vtol_takeoff"
+      },
+      "16": {
+       "description": "External 1",
+       "name": "external1"
+      },
+      "17": {
+       "description": "External 2",
+       "name": "external2"
+      },
+      "18": {
+       "description": "External 3",
+       "name": "external3"
+      },
+      "19": {
+       "description": "External 4",
+       "name": "external4"
+      },
+      "2": {
+       "description": "Position control",
+       "name": "posctl"
+      },
+      "20": {
+       "description": "External 5",
+       "name": "external5"
+      },
+      "21": {
+       "description": "External 6",
+       "name": "external6"
+      },
+      "22": {
+       "description": "External 7",
+       "name": "external7"
+      },
+      "23": {
+       "description": "External 8",
+       "name": "external8"
+      },
+      "255": {
+       "description": "[Unknown]",
+       "name": "unknown"
+      },
+      "3": {
+       "description": "Mission",
+       "name": "auto_mission"
+      },
+      "4": {
+       "description": "Hold",
+       "name": "auto_loiter"
+      },
+      "5": {
+       "description": "RTL",
+       "name": "auto_rtl"
+      },
+      "6": {
+       "description": "Acro",
+       "name": "acro"
+      },
+      "7": {
+       "description": "Offboard",
+       "name": "offboard"
+      },
+      "8": {
+       "description": "Stabilized",
+       "name": "stab"
+      },
+      "9": {
+       "description": "Position Slow",
+       "name": "position_slow"
+      }
+     },
+     "type": "uint8_t"
+    }
+   },
+   "event_groups": {
+    "default": {
+     "events": {
+      "10503063": {
+       "arguments": [
+        {
+         "name": "arg0",
+         "type": "uint32_t"
+        },
+        {
+         "name": "arg1",
+         "type": "px4::navigation_mode_t"
+        }
+       ],
+       "message": "Switching to mode '{2}' is currently not possible",
+       "name": "commander_modeswitch_not_avail",
+       "type": "append_health_and_arming_messages"
+      },
+      "2842608": {
+       "message": "Mission rejected: Landing waypoint/pattern required",
+       "name": "feasibility_mis_in_air_landing_req"
+      },
+      "8459921": {
+       "message": "Mission rejected: Landing waypoint/pattern required",
+       "name": "navigator_mis_land_missing"
+      }
+     }
+    }
+   }
+  }
+ }
+}
