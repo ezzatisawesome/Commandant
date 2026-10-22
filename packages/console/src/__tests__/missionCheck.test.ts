@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import {
+	readinessState,
 	LAND_ALT_TOLERANCE_M,
 	LND_ANG_PARAM,
 	TKO_LAND_REQ_PARAM,
@@ -396,5 +397,26 @@ describe("a draft on screen with the vehicle's plan unknown", () => {
 
 	it("is not announced for an empty draft, which has its own message", () => {
 		expect(unknownClaim([], null)).toBe(false);
+	});
+});
+
+describe("the readiness chip does not say ready for a rule it never read", () => {
+	// missionBlockers stays silent when MIS_TKO_LAND_REQ is unknown, on
+	// purpose (see above). The chip then rendered that silence as a green
+	// "ready to fly". MEASURED on the live JSBSim rig: bare waypoints read as
+	// ready, uploaded, and PX4 refused AUTO.MISSION for want of a landing —
+	// the one rule the console checks, on the one occasion the parameter that
+	// enables the check had not been read.
+	it("is unchecked, not ready, while the rule is unknown", () => {
+		expect(readinessState([], false)).toBe("unchecked");
+	});
+	it("is ready once the rule is known and nothing is wrong", () => {
+		expect(readinessState([], true)).toBe("ready");
+	});
+	it("a blocker outranks both", () => {
+		const b = missionBlockers(BARE, params({ [TKO_LAND_REQ_PARAM]: 2 }));
+		expect(b.length).toBeGreaterThan(0);
+		expect(readinessState(b, true)).toBe("blocked");
+		expect(readinessState(b, false)).toBe("blocked");
 	});
 });

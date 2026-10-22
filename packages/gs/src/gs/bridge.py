@@ -166,6 +166,7 @@ _AGE_GROUPS = {
     "ACTUATOR_OUTPUT_STATUS": "actuators",
     "SYS_STATUS": "health",
     "EKF_STATUS_REPORT": "ekf",
+    "ESTIMATOR_STATUS": "ekf",      # PX4's name for the same report
 }
 
 # Command TX: who we address, and the retry policy for COMMAND_ACK tracking.
@@ -229,6 +230,10 @@ STATUSTEXT_MAX_CHUNKS = 20
 # back off at all.
 STREAM_REQ_MIN_MS = 1_000
 STREAM_REQ_MAX_MS = 60_000
+# A requested stream that has not arrived for this long is asked for again
+# (subject to the backoff above). Long enough that a 1 Hz stream is not nagged,
+# short enough that a rebooted vehicle is back within a few heartbeats.
+STREAM_STALE_MS = 5_000
 # Parameter TYPES remembered from PARAM_VALUE, so a write cannot be dropped for
 # a type mismatch. PX4 has ~720; the cap is for a vehicle that invents names.
 PARAM_TYPES_MAX = 4_000   # narrower than this => pace, don't flood
@@ -2161,9 +2166,17 @@ class Bridge:
             L["gpsFix"] = msg.fix_type
             L["gpsSats"] = msg.satellites_visible
 
-        elif t == "EKF_STATUS_REPORT":
+        elif t in ("EKF_STATUS_REPORT", "ESTIMATOR_STATUS"):
             # Healthy when attitude + horizontal velocity + absolute horizontal
             # position estimates are all valid.
+            #
+            # Two message names, one bitmask. EKF_STATUS_REPORT is ArduPilot's
+            # message; PX4 sends ESTIMATOR_STATUS, and both carry `flags` from
+            # the same ESTIMATOR_STATUS_FLAGS enum. gs listened for the ArduPilot
+            # one only, so against real PX4 `ekfOk` was never set and the EKF
+            # chip read as unknown for the whole flight. MEASURED on the live
+            # JSBSim rig (mojave-px4 v1.16.2): ESTIMATOR_STATUS 61, EKF_STATUS_REPORT
+            # 0, in a two-minute window. The stand-in sent the ArduPilot one.
             f = msg.flags
             m = mavutil.mavlink
             need = (m.ESTIMATOR_ATTITUDE | m.ESTIMATOR_VELOCITY_HORIZ
@@ -2438,18 +2451,24 @@ class Bridge:
             self._broadcast({"type": "mission_reached", "seq": msg.seq})
 
         elif t == "HEARTBEAT":
-            # PX4 omits ACTUATOR_OUTPUT_STATUS / POSITION_TARGET on the GCS link
-            # by default; request them once we know PX4's address. The two
-            # "have we ever seen this?" reads are snapshotted under the lock and
-            # released before the request goes out, because the request is a
-            # transmit (see _on_mav).
+            # PX4 omits ACTUATOR_OUTPUT_STATUS / WIND_COV / POSITION_TARGET on
+            # the GCS link by default; ask for them, and keep asking while they
+            # are not ARRIVING. This used to gate on "have we ever seen one?"
+            # (`latest["aileron"] is not None`), which is satisfied forever by
+            # a value from a vehicle that no longer exists. MEASURED on the
+            # live JSBSim rig: actuators arrived at ~1350/min for ten minutes,
+            # PX4 restarted, the stream stopped dead, and gs sent not one
+            # re-request for the next seventeen minutes -- the chip read
+            # "stale" with no way back short of restarting gs. A reboot resets
+            # the request backoff, but the gate was never consulted again.
+            # Age is the only honest gate: it is also what the console shows.
             with self._lock:
-                have_act = self.latest.get("aileron") is not None
-                have_wind = self.latest.get("windSpeed") is not None
+                act_at = self._src_at.get("actuators", 0)
+                wind_at = self._src_at.get("wind", 0)
             tsys, tcomp = msg.get_srcSystem(), msg.get_srcComponent()
-            if not have_act:
+            if now - act_at > STREAM_STALE_MS:
                 self._request_message(conn, tsys, tcomp, MSG_ACTUATOR_OUTPUT_STATUS)
-            if not have_wind:
+            if now - wind_at > STREAM_STALE_MS:
                 # Not in PX4's default GCS stream; ask for it like QGC does.
                 self._request_message(conn, tsys, tcomp, MSG_WIND_COV)
             if now - self._last_target_at > TARGET_STALE_MS:
@@ -2936,6 +2955,13 @@ class Bridge:
                 if self.relay is not None:
                     self.relay.offer(payload, "telemetry")
                 if state != self._last_link_state:
+                    # Say it in the daemon's own log too. When the PX4 container
+                    # went away under a live run, every console was told and gs's
+                    # log recorded nothing -- so the operator reading the daemon
+                    # (the thing `commandant logs` shows) had no line to find.
+                    print(f"[gs] link {self._last_link_state} -> {state}"
+                          + ("" if state == "alive" else
+                             f" (no vehicle data for {(mono - last) / 1000:.0f}s)" if last else ""))
                     # lastMsgMs is documented as a wall-clock figure, so convert
                     # the monotonic watermark back rather than leak uptime into it.
                     link = dumps({"type": "link", "state": state,

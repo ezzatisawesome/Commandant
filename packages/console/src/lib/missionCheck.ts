@@ -284,3 +284,22 @@ export function missionLooksRunnable(
 export function lookupFrom(params: Record<string, { value: number }>): ParamLookup {
 	return (name) => params[name]?.value;
 }
+
+/** What the readiness chip should say, given the blockers and whether the
+ *  rule they were checked against was actually available.
+ *
+ *  missionBlockers() deliberately says nothing when MIS_TKO_LAND_REQ has not
+ *  been read -- a warning that is confidently wrong sends the operator to fix
+ *  the wrong thing. But an EMPTY list rendered as "● ready to fly" is itself a
+ *  confident claim, and before the parameters are loaded it is one nobody can
+ *  vouch for. MEASURED on the live JSBSim rig: a plan of bare waypoints read as
+ *  ready, uploaded, and PX4 refused AUTO.MISSION ("Landing waypoint/pattern
+ *  required", MIS_TKO_LAND_REQ = 2 from rc.fw_defaults) -- the one rule the
+ *  console knew how to check, on the one occasion it had not yet read the
+ *  parameter that enables the check. "Unchecked" is the honest third state. */
+export type Readiness = "ready" | "blocked" | "unchecked";
+
+export function readinessState(blockers: Blocker[], ruleKnown: boolean): Readiness {
+	if (blockers.length > 0) return "blocked";
+	return ruleKnown ? "ready" : "unchecked";
+}

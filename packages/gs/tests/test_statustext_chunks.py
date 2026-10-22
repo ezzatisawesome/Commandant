@@ -320,3 +320,62 @@ def test_local_position_ned_is_never_trimmed_because_this_airframe_wants_it():
     conn = _TrimConn()
     b._trim_stream(conn, "LOCAL_POSITION_NED")
     assert conn.sent == [], "asked the vehicle to stop a stream it was told to send"
+
+
+def test_px4s_estimator_status_sets_ekf_ok_like_ardupilots_report_does():
+    """gs listened for EKF_STATUS_REPORT, which is ArduPilot's message. PX4 sends
+    ESTIMATOR_STATUS with the same `flags` bitmask. MEASURED on the live JSBSim
+    rig: 61 ESTIMATOR_STATUS and zero EKF_STATUS_REPORT in two minutes -- so
+    `ekfOk` was never set and the console's EKF chip read as unknown for the
+    whole flight, against the firmware this aircraft actually runs."""
+    from pymavlink import mavutil as mu
+    m = mu.mavlink
+    b, _ = _b()
+    b._vehicle = (1, 1)
+    good = m.ESTIMATOR_ATTITUDE | m.ESTIMATOR_VELOCITY_HORIZ | m.ESTIMATOR_POS_HORIZ_ABS
+
+    class Est:
+        def __init__(self, flags): self.flags = flags
+        def get_type(self): return "ESTIMATOR_STATUS"
+
+    b._on_mav_state(0, "ESTIMATOR_STATUS", Est(good | m.ESTIMATOR_POS_VERT_ABS))
+    assert b.latest.get("ekfOk") is True
+    assert "ekf" in b._src_at, "the EKF stream age was not stamped"
+    b._on_mav_state(0, "ESTIMATOR_STATUS", Est(m.ESTIMATOR_ATTITUDE))
+    assert b.latest.get("ekfOk") is False
+
+
+def test_a_stream_that_stops_after_a_reboot_is_asked_for_again():
+    """The request gate was 'have we ever seen one?', satisfied forever by a
+    value from a vehicle that no longer exists. MEASURED on the live JSBSim
+    rig: ACTUATOR_OUTPUT_STATUS at ~1350/min for ten minutes, PX4 restarted,
+    the stream stopped, and gs sent no re-request for seventeen minutes."""
+    import gs.bridge as mod
+    from gs.bridge import MSG_ACTUATOR_OUTPUT_STATUS, STREAM_STALE_MS
+
+    b, _ = _b()
+    b._vehicle = (1, 1)
+    conn = _TrimConn()
+
+    class HB:
+        type = 1; autopilot = 12; base_mode = 0; custom_mode = 0; system_status = 4
+        def get_type(self): return "HEARTBEAT"
+        def get_srcSystem(self): return 1
+        def get_srcComponent(self): return 1
+
+    now = [1_000_000]
+    mod._mono_ms = lambda: now[0]
+    # Actuators have been arriving: the stream is fresh, so no request.
+    b._src_at["actuators"] = now[0]; b._src_at["wind"] = now[0]
+    b.latest["aileron"] = 0.1; b.latest["windSpeed"] = 2.0     # the old gate's inputs
+    b._on_mav_protocol(conn, now[0], "HEARTBEAT", HB())
+    from gs.bridge import MSG_WIND_COV
+    extras = {MSG_ACTUATOR_OUTPUT_STATUS, MSG_WIND_COV}
+    assert not [p1 for (_, p1, _) in conn.sent if p1 in extras], \
+        f"asked for a stream that is arriving: {conn.sent}"
+    # The vehicle reboots; the stream stops; `latest` still holds the old value.
+    b._on_vehicle_reboot(now[0], 100)
+    now[0] += STREAM_STALE_MS + 1000
+    b._on_mav_protocol(conn, now[0], "HEARTBEAT", HB())
+    asked = [p1 for (_, p1, _) in conn.sent]
+    assert MSG_ACTUATOR_OUTPUT_STATUS in asked, f"never re-asked after the reboot: {conn.sent}"

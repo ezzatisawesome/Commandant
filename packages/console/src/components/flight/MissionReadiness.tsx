@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 
-import type { Blocker } from "@/lib/missionCheck";
+import { readinessState, type Blocker } from "@/lib/missionCheck";
 
 // Can PX4 fly this plan? One chip, not an essay.
 //
@@ -18,18 +18,27 @@ import type { Blocker } from "@/lib/missionCheck";
 // The full sentence still exists, in the tooltip and behind one click. Nobody
 // needs it until they want it, and then they want all of it.
 
-export function MissionReadiness({ blockers, count }: { blockers: Blocker[]; count: number }) {
+export function MissionReadiness({ blockers, count, ruleKnown = true }:
+	{ blockers: Blocker[]; count: number; ruleKnown?: boolean }) {
 	const [open, setOpen] = useState(false);
 
 	if (count === 0) return null;
 
-	const ok = blockers.length === 0;
-	const summary = ok
+	const state = readinessState(blockers, ruleKnown);
+	const ok = state === "ready";
+	// "Unchecked" is neither green nor amber: nothing is known to be wrong and
+	// nothing is known to be right. See readinessState for the flight that
+	// taught the difference.
+	const summary = state === "unchecked"
+		? "not checked — read parameters first"
+		: ok
 		? "ready to fly"
 		: blockers.length === 1
 			? blockers[0].short
 			: `${blockers.length} problems`;
-	const tip = ok
+	const tip = state === "unchecked"
+		? "PX4's takeoff/landing requirement (MIS_TKO_LAND_REQ) has not been read from this vehicle, so this plan could not be checked against it. Refresh parameters, then look here again."
+		: ok
 		? "Nothing predictable stops PX4 flying this plan."
 		: blockers.map((b) => `• ${b.detail}`).join("\n\n");
 
@@ -37,13 +46,15 @@ export function MissionReadiness({ blockers, count }: { blockers: Blocker[]; cou
 		<div className="pt-2">
 			<button
 				onClick={() => setOpen((o) => !o)}
-				disabled={ok}
+				disabled={ok || state === "unchecked"}
 				title={tip}
 				className={`flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left text-[10px] ${
-					ok ? "text-emerald-400/90" : "text-amber-300 hover:bg-amber-400/10"
+					ok ? "text-emerald-400/90"
+						: state === "unchecked" ? "text-white/50"
+						: "text-amber-300 hover:bg-amber-400/10"
 				}`}
 			>
-				<span aria-hidden>{ok ? "●" : "▲"}</span>
+				<span aria-hidden>{ok ? "●" : state === "unchecked" ? "○" : "▲"}</span>
 				<span className="truncate">{summary}</span>
 				{!ok ? (
 					<span className="ml-auto shrink-0 text-white/35">{open ? "hide" : "why"}</span>

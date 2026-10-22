@@ -23,7 +23,7 @@ import { telemetryClient } from "@/services/telemetry";
 import { Button } from "@/components/ui/button";
 import { radiusParamKey } from "@/lib/grabbers";
 import { $params } from "@/stores/params.store";
-import { blockersForSeq, lookupFrom, missionBlockers } from "@/lib/missionCheck";
+import { TKO_LAND_REQ_PARAM, blockersForSeq, lookupFrom, missionBlockers } from "@/lib/missionCheck";
 import { MissionReadiness, RowFlag } from "@/components/flight/MissionReadiness";
 import type { MissionKind } from "@/types/app";
 
@@ -96,6 +96,9 @@ export default function MissionPanel() {
 	const matches = missionMatchesVehicle(items, vehicleMission);
 	const fence = useStore($fenceItems);
 	const blockers = missionBlockers(items, lookupFrom(params), fence);
+	// Whether the takeoff/landing rule could be checked at all. Unread is not
+	// the same as "no rule", and the chip must not say "ready" for it.
+	const ruleKnown = lookupFrom(params)(TKO_LAND_REQ_PARAM) !== undefined;
 
 	async function upload() {
 		setBusy(true);
@@ -166,7 +169,7 @@ export default function MissionPanel() {
 			{/* Readiness, in two words. The detail is in the tooltip and behind
 			    one click; the offending row carries a flag; and the globe draws
 			    the approach. Three short signals beat one long one. */}
-			<MissionReadiness blockers={blockers} count={items.length} />
+			<MissionReadiness blockers={blockers} count={items.length} ruleKnown={ruleKnown} />
 
 			{/* Upload/download progress. */}
 			{progress ? (
