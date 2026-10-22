@@ -91,9 +91,10 @@ field the console is served by the Pi hub and the WS endpoint is host-relative
 | **view** (`NEXT_PUBLIC_MODE=view`) | `commandant.guppidev.com` | read-only by construction |
 
 The hosted viewer watches a relay the hub pushes to, outbound only. It is
-read-only at three independent layers: the relay never reads a viewer's socket,
-never writes to the publisher's, and the view build refuses to transmit at its
-single send chokepoint. Nothing on the internet can reach an aircraft. See
+read-only at three independent layers: the relay never interprets a viewer's
+inbound bytes, never writes to the publisher's socket, and the view build
+refuses to transmit at its single send chokepoint. Nothing on the internet can
+reach an aircraft. See
 [`docs/hosting.md`](docs/hosting.md) and [`packages/relay`](packages/relay).
 
 Set `NEXT_PUBLIC_CESIUM_KEY` (Cesium Ion token) in `packages/console/.env` for
@@ -103,10 +104,10 @@ split dev setup. The console↔gs message contract is `docs/ws-contract.md`.
 ## Tests
 
 ```sh
-cd packages/gs      && uv run pytest -q   # 221 — protocol state machines vs a fake PX4
-cd packages/relay   && uv run pytest -q   # 17 — fan-out, slow-viewer shedding, read-only guarantee
+cd packages/gs      && uv run pytest -q   # 286 — protocol state machines vs a fake PX4, and what it refuses to believe
+cd packages/relay   && uv run pytest -q   # 23 — fan-out, slow-viewer shedding, read-only guarantee
 cd packages/cli     && uv run --group dev pytest -q   # 77 — hub installer, the systemd units, the lifecycle verbs
-cd packages/console && npm test           # 402 — stores, WS client, validation (vitest)
+cd packages/console && npm test           # 446 — stores, WS client, validation (vitest)
 cd packages/console && npm run typecheck
 ```
 

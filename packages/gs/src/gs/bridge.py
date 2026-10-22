@@ -217,6 +217,20 @@ PARAM_PACED_BELOW_BPS = 20_000
 # is exempt: after a vehicle reboot every parameter is stale and re-reading at
 # once is the right thing to do.
 PARAM_REFRESH_COOLDOWN_MS = 60_000
+# The same tax, on the mission/fence/rally planes. All three share gs's single
+# `_mission` slot, and a pull holds it for up to MISSION_OP_TIMEOUT_MS *
+# MISSION_MAX_TRIES (~4.5 s) against a vehicle that does not answer -- so a
+# client looping pulls holds it permanently and the operator's geofence upload
+# is refused "busy" for as long as that lasts. Pulls were open to any client
+# with no commander gate and no cooldown, which is the same hole the parameter
+# walk above was given a cooldown for. The commander is exempt for the same
+# reason: re-reading the plan it just changed is the correct response.
+PLAN_PULL_COOLDOWN_MS = 10_000
+# A console whose unsent backlog passes this is closed. See _drop_slow_clients:
+# `websockets.broadcast` has no backpressure, so the backlog is the daemon's
+# own memory. Well past the ~10 s of 25 Hz telemetry the 5 s ping cycle already
+# allows, because dropping a console costs the operator command authority.
+CLIENT_BACKLOG_MAX_BYTES = 512 * 1024
 # STATUSTEXT carries 50 characters; longer messages arrive as several chunks
 # sharing an `id` and numbered by `chunk_seq`. See _on_statustext.
 STATUSTEXT_CHUNK = 50
@@ -671,12 +685,54 @@ def mission_item_fields(seq: int, item: dict[str, Any]) -> dict[str, Any]:
     p = item.get("params") or {}
     if not isinstance(p, dict):
         raise ValueError("params must be an object")
-    try:
-        lat = float(item.get("lat") or 0.0)
-        lon = float(item.get("lon") or 0.0)
-        alt = float(item.get("alt") or 0.0)
-    except (TypeError, ValueError):
-        raise ValueError(f"item {seq}: lat/lon/alt must be numbers") from None
+    # `float(item.get("lat") or 0.0)` was the whole of the coordinate handling,
+    # so a missing, null or non-numeric lat/lon became 0/0 SILENTLY. build_command
+    # refuses a reposition with no destination and a takeoff to alt <= 0 -- "the
+    # last thing between a malformed request and an aircraft" -- but the mission
+    # plane, which uploads many items at once, had neither check. A three-vertex
+    # inclusion fence with no coordinates at all passed validate_fence_plan and
+    # was uploaded as a fence at the null island; a rally point the same way, and
+    # that is the position the aircraft diverts to. Beyond about +/-214 degrees
+    # the int32 scaling overflows and the upload is reported as a radio
+    # "timeout", blaming the link for a client-side fault, after MISSION_COUNT
+    # has already gone out and left PX4 mid-transfer.
+    # Which items MUST carry a position is a PX4 convention, not a blanket rule:
+    # takeoff and land with lat/lon 0 mean "here", which is how a plan that
+    # starts from wherever the aircraft happens to be is expressed, and RTL is
+    # MAV_FRAME_MISSION and carries nothing. A waypoint, a loiter, a fence
+    # vertex or a rally point at 0/0 is meaningless in every case, so those are
+    # where a missing coordinate is a client bug rather than a convention.
+    needs_position = kind not in ("rtl", "takeoff", "land")
+    # Altitude likewise: a land item's altitude is the ground, and fence
+    # vertices and rally points are lat/lon-only (see the frame choice below).
+    needs_alt = kind in ("takeoff", "waypoint", "loiter_unlim",
+                         "loiter_time", "loiter_turns")
+
+    def _coord(name: str, limit: float, required: bool) -> float:
+        v = item.get(name)
+        if v is None:
+            if required:
+                raise ValueError(f"item {seq} ({kind}): {name} is required")
+            return 0.0
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError(f"item {seq} ({kind}): {name} must be a number")
+        f = float(v)
+        if not math.isfinite(f):
+            raise ValueError(f"item {seq} ({kind}): {name} must be a finite number")
+        if abs(f) > limit:
+            raise ValueError(
+                f"item {seq} ({kind}): {name} {f:g} is outside +/-{limit:g}")
+        return f
+
+    lat = _coord("lat", 90.0, needs_position)
+    lon = _coord("lon", 180.0, needs_position)
+    # Altitude is relative-alt metres here, not a coordinate; the bound only
+    # has to stop the int32/float nonsense, not model an airframe's ceiling.
+    alt = _coord("alt", 100_000.0, needs_alt)
+    if kind == "takeoff" and alt <= 0:
+        # The verb form of this is already refused in build_command; a mission
+        # item said the same thing and was sent.
+        raise ValueError(f"item {seq} (takeoff): alt must be above 0, got {alt:g}")
     p1 = p2 = p3 = p4 = 0.0
     if kind == "waypoint":
         p2 = float(p.get("acceptRadius", p.get("radius", 0)) or 0)
@@ -852,6 +908,62 @@ JSON_KEYS = {
     "windN", "windE", "windD",
 }
 
+# The JSON feed is an UNAUTHENTICATED UDP socket. The command websocket has a
+# token because, as _serve says, the hub runs an open WiFi on a flight line and
+# anyone in range can reach it; this feed had no equivalent gate AND no type
+# check, so one packet could put `{"nested": [1,2,3]}` in the altitude field or
+# a 200 kB string in `mode` -- which then rode every 25 Hz telemetry frame to
+# every console (measured: a single packet took the frame from ~1 kB to 200 kB,
+# i.e. 5 MB/s per client). Values are now checked before they are believed.
+#
+# A locked autopilot already owns flight state (see _json_owns), but voltage,
+# current and batteryRemaining stay feed-owned even in flight because PX4
+# SITL's BATTERY_STATUS is a dummy -- so these checks are the only thing
+# standing between a stray packet and the battery readout an operator uses to
+# decide whether to come home.
+_JSON_BOOL_KEYS = frozenset({"armed"})
+_JSON_STR_KEYS = frozenset({"mode"})
+JSON_STR_MAX = 64            # PX4's longest mode name is nowhere near this
+# Physically meaningful bounds. Anything outside is a bad sender, not a reading:
+# a mission upload of lat=500 already overflows int32 on the MAVLink side.
+_JSON_RANGES: dict[str, tuple[float, float]] = {
+    "lat": (-90.0, 90.0),
+    "lon": (-180.0, 180.0),
+    "targetLat": (-90.0, 90.0),
+    "targetLon": (-180.0, 180.0),
+    "roll": (-720.0, 720.0),
+    "pitch": (-720.0, 720.0),
+    "yaw": (-720.0, 720.0),
+    "heading": (-720.0, 720.0),
+    "trackDeg": (-720.0, 720.0),
+    "batteryRemaining": (0.0, 100.0),
+    "voltage": (0.0, 1000.0),
+    "current": (-1000.0, 1000.0),
+}
+
+
+def json_value_ok(key: str, v: Any) -> bool:
+    """Is `v` a believable value for telemetry key `key`?
+
+    Deliberately strict about type: `bool` is a subclass of `int` in Python, so
+    a numeric key must reject `True` explicitly or `{"alt": true}` becomes an
+    altitude of 1 m."""
+    if key in _JSON_BOOL_KEYS:
+        return isinstance(v, bool)
+    if key in _JSON_STR_KEYS:
+        return isinstance(v, str) and 0 < len(v) <= JSON_STR_MAX
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    if not math.isfinite(v):
+        # A NaN is a believable TYPE carrying no reading, which is a different
+        # thing from a wrong type. Let it through and let dumps() render it as
+        # null, which is the contract the console already reads (see
+        # test_nan_from_json_feed_does_not_poison_frames). Rejecting it here
+        # would drop the key entirely and turn "no reading" into "never seen".
+        return True
+    lo, hi = _JSON_RANGES.get(key, (-1e12, 1e12))
+    return lo <= float(v) <= hi
+
 # Of those, the keys the JSON feed owns EVEN WHEN A REAL AUTOPILOT IS ON THE
 # LINK (H4). The feed is documented as the sim's no-PX4 path, but nothing
 # enforced that: in HITL both are live and `_json_loop` wrote lat/lon/alt/
@@ -958,6 +1070,7 @@ class Bridge:
         self,
         mavlink_endpoint: str = "udpin:0.0.0.0:14550",
         json_port: int = 14555,
+        json_host: str = "0.0.0.0",
         ws_host: str = "0.0.0.0",
         ws_port: int = 8790,
         baud: int = DEFAULT_SERIAL_BAUD,
@@ -970,6 +1083,18 @@ class Bridge:
     ) -> None:
         self.mavlink_endpoint = mavlink_endpoint
         self.json_port = json_port
+        # The JSON feed takes no token, so WHERE it listens is the only
+        # access control it has. `--ws-host` existed for the command socket
+        # and this had no equivalent, so it was pinned to every interface
+        # with no way to narrow it; on a field hub's open WiFi that is the
+        # whole flight line. Still 0.0.0.0 by default (the sim may be on
+        # another machine), but 127.0.0.1 is now expressible.
+        self.json_host = json_host
+        # Values the feed offered that were not believable. Surfaced by
+        # status(); the log line is said once so a chatty bad sender cannot
+        # drown the console.
+        self.json_rejected = 0
+        self._json_reject_reported = False
         self.ws_host = ws_host
         self.ws_port = ws_port
         self.baud = baud
@@ -1076,6 +1201,8 @@ class Bridge:
         # A backward uptime jump too small to be unambiguous, held for one frame
         # so the next one can say whether it was a reorder or a reboot.
         self._param_refresh_opened_at = 0   # see PARAM_REFRESH_COOLDOWN_MS
+        self._plan_pull_opened_at = 0        # see PLAN_PULL_COOLDOWN_MS
+        self.clients_dropped = 0            # see _drop_slow_clients
         # Partially-received chunked status messages, keyed by STATUSTEXT id.
         self._text_runs: dict[int, dict[str, Any]] = {}
         self._boot_suspect: int | None = None
@@ -1140,17 +1267,35 @@ class Bridge:
         reordered frame."""
         if self._vehicle is not None:
             print(f"[gs] link reopened: releasing vehicle lock on sysid {self._vehicle[0]}")
-        self._vehicle = None
+        # BEFORE releasing the lock, and before the lock is dropped below: every
+        # in-flight handshake belonged to the link that just went away. This
+        # used to be missing entirely, and the reopen docstring's own scenario
+        # is what made it dangerous -- unplug the autopilot, attach the radio to
+        # a different airframe, and an arm or a PARAM_SET still in `_pending`
+        # was re-sent on the new link, addressed to TARGET_SYSTEM because the
+        # sysid lock had just been dropped. The client was then told
+        # accepted/timeout about an aircraft it never aimed at.
+        aborted = self._abandon_in_flight("link reopened")
+        if aborted:
+            print(f"[gs] link reopen abandoned: {', '.join(aborted)}")
         self._last_pos_boot_ms = -1
         self._boot_suspect = None
         self._reboot_times.clear()
         self._storm_reported = False
-        self._src_at.clear()        # the new link's streams have their own ages
         self._last_req_at.clear()   # re-request the extra streams on the new link
         self._req_tries.clear()     # ...promptly, not at the backed-off rate
         self._param_types.clear()   # a different airframe may type names differently
         self._trim_at.clear()       # the new link is back on PX4's defaults
         self._trim_tries.clear()
+        # `_vehicle` and `_src_at` are read by the OTHER threads -- the broadcast
+        # loop copies `_src_at`, and `_apply_json` consults `_vehicle` to decide
+        # whether the JSON feed still owns flight state -- and every other access
+        # to them takes this lock. These two writes did not, which is how the
+        # JSON feed could see "no vehicle locked" mid-flight on every reconnect
+        # and accept position and armed state from an unauthenticated packet.
+        with self._lock:
+            self._vehicle = None
+            self._src_at.clear()    # the new link's streams have their own ages
 
     def _resolve_endpoint(self) -> str | None:
         """The endpoint to open. With `auto`, probe for one; the result is
@@ -1362,7 +1507,58 @@ class Bridge:
         if loop is not None:
             loop.call_soon_threadsafe(self._do_broadcast, dumps(obj), obj.get("type", "event"))
 
+    def _drop_slow_clients(self) -> int:
+        """Close any console whose unsent backlog is running away.
+
+        `websockets.broadcast` is deliberately NOT flow-controlled -- from its
+        own docs, it "pushes the message synchronously to all connections even
+        if their write buffers are overflowing... messages will pile up in its
+        write buffer until the connection times out". That is the right
+        primitive here (one serialisation, no awaiting, so no console can delay
+        another or the 25 Hz tick), but it makes the backlog OUR memory, in the
+        flight-critical process, on a Pi. The relay had exactly this defect and
+        was given a guard; the hub, which matters more, had none -- three
+        broadcast sites and no write-buffer check anywhere in this file.
+
+        The 5 s ping/5 s timeout usually reclaims a vanished console first, so
+        this is the backstop for a socket that answers pings while its data path
+        is wedged. The threshold is deliberately well past what the ping cycle
+        allows (~10 s of 25 Hz telemetry) so that a console which is merely
+        briefly behind is not disconnected -- dropping one costs the operator
+        their command authority until they reconnect, which is its own hazard.
+        """
+        dropped = 0
+        for ws in list(self._clients):
+            transport = getattr(ws, "transport", None)
+            if transport is None:
+                continue
+            try:
+                buffered = transport.get_write_buffer_size()
+            except Exception:
+                continue
+            if buffered > CLIENT_BACKLOG_MAX_BYTES:
+                self._clients.discard(ws)
+                self.clients_dropped += 1
+                dropped += 1
+                if self._commander is ws:
+                    # Say it: the operator is about to find the command bar
+                    # inert and deserves to know why.
+                    self._commander = None
+                    print("[gs] the COMMANDER's console was dropped for a "
+                          f"{buffered} B backlog; authority released")
+                # Fire-and-forget: closing must not delay the telemetry tick.
+                try:
+                    asyncio.get_running_loop().create_task(
+                        ws.close(code=1013, reason="too slow"))
+                except RuntimeError:
+                    pass
+        if dropped:
+            print(f"[gs] dropped {dropped} console(s) over "
+                  f"{CLIENT_BACKLOG_MAX_BYTES} B of unsent telemetry")
+        return dropped
+
     def _do_broadcast(self, payload: str, kind: str = "event") -> None:
+        self._drop_slow_clients()
         if self._clients:
             websockets.broadcast(self._clients, payload)
         if self.relay is not None:
@@ -1495,6 +1691,49 @@ class Bridge:
                 continue
             self._send_param_set(conn, job)
 
+    def _abandon_in_flight(self, reason: str) -> list[str]:
+        """Fail every in-flight handshake with `reason`, and say what was lost.
+
+        Shared by the two events that invalidate everything addressed to the
+        thing on the other end: a vehicle reboot, and a link reopen. It was
+        written for the reboot path only, and `_on_reopen` -- which can be
+        handing the link to a DIFFERENT airframe -- did not call it, so an arm
+        pressed just before a radio drop was retransmitted on the new link to
+        whatever answered there. See _on_reopen.
+
+        Must not be called with `self._lock` held: reporting transmits.
+        """
+        aborted: list[str] = []
+        if self._param_refresh_active:
+            self._param_refresh_active = False
+            if self._param_batch:
+                self._flush_param_batch()
+            self._broadcast({"type": "param_progress",
+                             "received": len(self._param_received),
+                             "count": self._param_count, "done": True,
+                             "error": reason})
+            aborted.append("param refresh")
+        for name, job in list(self._param_set_pending.items()):
+            del self._param_set_pending[name]
+            self._report_param_ack(job, ok=False, text=reason)
+            aborted.append(f"param set {name}")
+        op = self._mission
+        if op is not None:
+            self._mission = None
+            if op["op"] == "upload":
+                self._report_mission_ack(op.get("id"), ok=False, result=-1,
+                                         text=reason, ack_type=op["ack_type"])
+            else:
+                self._broadcast({"type": op["ack_type"], "ok": False,
+                                 "result": -1, "text": reason})
+            aborted.append(f"{op['rtype']} {op['op']}")
+        # Commands in flight are addressed to a vehicle that never saw them.
+        for cid in list(self._pending):
+            del self._pending[cid]
+            self._report(cid, ok=False, result=-1, text=reason)
+            aborted.append("command")
+        return aborted
+
     def _on_vehicle_reboot(self, now: int, boot_ms: int) -> None:
         """The vehicle restarted. Abandon everything addressed to the instance
         that is gone, and say so.
@@ -1538,36 +1777,7 @@ class Bridge:
             return
         self._storm_reported = False
         print(f"[gs] vehicle rebooted (uptime restarted at {boot_ms} ms)")
-        aborted = []
-        if self._param_refresh_active:
-            self._param_refresh_active = False
-            if self._param_batch:
-                self._flush_param_batch()
-            self._broadcast({"type": "param_progress",
-                             "received": len(self._param_received),
-                             "count": self._param_count, "done": True,
-                             "error": "vehicle rebooted"})
-            aborted.append("param refresh")
-        for name, job in list(self._param_set_pending.items()):
-            del self._param_set_pending[name]
-            self._report_param_ack(job, ok=False, text="vehicle rebooted")
-            aborted.append(f"param set {name}")
-        op = self._mission
-        if op is not None:
-            self._mission = None
-            text = "vehicle rebooted"
-            if op["op"] == "upload":
-                self._report_mission_ack(op.get("id"), ok=False, result=-1,
-                                         text=text, ack_type=op["ack_type"])
-            else:
-                self._broadcast({"type": op["ack_type"], "ok": False,
-                                 "result": -1, "text": text})
-            aborted.append(f"{op['rtype']} {op['op']}")
-        # Commands in flight are addressed to a vehicle that never saw them.
-        for cid in list(self._pending):
-            del self._pending[cid]
-            self._report(cid, ok=False, result=-1, text="vehicle rebooted")
-            aborted.append("command")
+        aborted = self._abandon_in_flight("vehicle rebooted")
         # The extra streams have to be re-requested: the new instance is back on
         # PX4's defaults and never saw our SET_MESSAGE_INTERVALs. The backoff
         # resets too, or a reboot after a long quiet spell would wait a minute
@@ -1736,10 +1946,20 @@ class Bridge:
                 break
             kind = job["kind"]
             if kind == "set_current":
+                # Fire-and-forget on the wire -- PX4 answers with MISSION_CURRENT
+                # rather than an ack -- but the SEND either happened or it did
+                # not, and the console was told neither way.
                 try:
                     conn.mav.mission_set_current_send(self.tsys, self.tcomp, int(job["seq"]))
                 except Exception as exc:
                     print(f"[gs] mission_set_current failed: {exc}")
+                    self._report_mission_ack(job.get("id"), ok=False, result=-1,
+                                             text=f"send error: {exc}",
+                                             ack_type="mission_current_ack")
+                else:
+                    self._report_mission_ack(job.get("id"), ok=True, result=0,
+                                             text=f"asked for waypoint {job['seq']}",
+                                             ack_type="mission_current_ack")
                 continue
             if self._mission is not None:
                 # One op at a time; reject the newcomer rather than interleave handshakes.
@@ -2250,12 +2470,46 @@ class Bridge:
             # timeout's job.
             if run is not None:
                 self._flush_text_run(sid)
-            run = self._text_runs[sid] = {"sev": sev, "chunks": {}, "at": _mono_ms()}
+            run = self._text_runs[sid] = {"sev": sev, "chunks": {}, "at": _mono_ms(),
+                                          "last": None}
         run["chunks"][seq] = text
         run["at"] = _mono_ms()
 
-        terminated = "\x00" in text or len(text.rstrip("\x00")) < STATUSTEXT_CHUNK
-        if terminated or len(run["chunks"]) >= STATUSTEXT_MAX_CHUNKS:
+        # PX4 fills a chunk to 50 BYTES; this measured CHARACTERS. One 2-byte
+        # character makes a full chunk 49 characters long, so a full chunk read
+        # as short and gs flushed the run mid-sentence -- the rest then formed a
+        # fresh run starting at chunk_seq=1, which `_flush_text_run` marks
+        # gapped. MEASURED: "Mission rejected: altitude >= 120 m above the fence
+        # and below" came out as two console lines, the second
+        # "...(incomplete)". PX4's own refusal strings carry exactly these
+        # characters -- the degree sign, >=, micro, and the units
+        # libevents_parse emits -- so this hit the long messages the chunking
+        # code exists to reassemble. The existing tests all used ASCII.
+        if isinstance(raw, bytes):
+            on_wire = len(raw.rstrip(b"\x00"))
+        else:
+            # pymavlink hands us a str, having already decoded with replacement.
+            # Re-encoding can only over-count (a character split across the
+            # boundary became one U+FFFD, three bytes), and over-counting means
+            # "not terminated", which waits for the next chunk instead of
+            # cutting the message short. Erring that way is the safe direction.
+            on_wire = len(text.rstrip("\x00").encode("utf-8", "replace"))
+        if "\x00" in text or on_wire < STATUSTEXT_CHUNK:
+            run["last"] = seq
+
+        seqs = sorted(run["chunks"])
+        contiguous = seqs == list(range(len(seqs)))
+        # A terminating chunk no longer flushes on arrival. It used to, so the
+        # measured PX4 pair arriving in the other order (seq=1 "t" first, then
+        # seq=0 "Arming denied: ... failures firs") emitted "t ...(incomplete)"
+        # and then the first half as a separate message. The terminator tells us
+        # where the run ENDS, not that it is complete: hold until every chunk up
+        # to it has arrived, and let `_expire_text_runs` cover the ones that
+        # never do. The docstring promised a reordered pair was already correct;
+        # it was only correct in one of the two orders.
+        complete = (run["last"] is not None and contiguous
+                    and seqs and seqs[-1] == run["last"])
+        if complete or len(run["chunks"]) >= STATUSTEXT_MAX_CHUNKS:
             self._flush_text_run(sid)
 
     def _flush_text_run(self, sid: int) -> None:
@@ -2513,14 +2767,15 @@ class Bridge:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            sock.bind(("0.0.0.0", self.json_port))
+            sock.bind((self.json_host, self.json_port))
         except OSError as exc:
             # The JSON feed is the sim's optional no-PX4 path. Losing it must not
             # look like a crash, and must not stop MAVLink telemetry.
             print(f"[gs] JSON telemetry disabled: cannot bind udp:{self.json_port} ({exc}). "
                   f"Another gs instance? Use --json-port to pick another.")
             return
-        print(f"[gs] listening for JSON telemetry on udp:{self.json_port}")
+        print(f"[gs] listening for JSON telemetry on "
+              f"udp:{self.json_host}:{self.json_port}")
         while True:
             try:
                 data, _ = sock.recvfrom(65535)
@@ -2549,35 +2804,54 @@ class Bridge:
         differed from the live ones would be showing a flight that never
         happened, which is worse than having no replay at all."""
         now = _mono_ms()
+        # Validate BEFORE believing any of it, and before the frame counts as
+        # evidence of a live link. `last_json_at` was set unconditionally at the
+        # top of this method, so a single malformed UDP packet from anyone in
+        # WiFi range made `_link_state` report `alive` -- with a fabricated
+        # position and armed state -- when no aircraft existed at all. A frame
+        # that carries nothing believable is not a telemetry frame.
+        good = {k: v for k, v in obj.items()
+                if k in JSON_KEYS and v is not None and json_value_ok(k, v)}
+        rejected = sum(1 for k, v in obj.items()
+                       if k in JSON_KEYS and v is not None and k not in good)
+        if rejected:
+            self.json_rejected += rejected
+            if not self._json_reject_reported:
+                self._json_reject_reported = True
+                bad = sorted(k for k in obj if k in JSON_KEYS and k not in good
+                             and obj[k] is not None)
+                print(f"[gs] JSON feed sent unusable values for {', '.join(bad)} "
+                      f"(wrong type or out of range); ignoring them. Said once.")
+        if not good:
+            return
         with self._lock:
             self.last_json_at = now
             # PX4 owns the setpoint whenever it is streaming one; the sim's
             # own target is projected about a different origin and would drag
             # the commanded path off by that difference.
             mav_owns_target = (now - self._mav_target_at) < TARGET_SOURCE_TTL_MS
-            for k, v in obj.items():
-                if k in JSON_KEYS and v is not None:
-                    # Two independent gates, and neither subsumes the other.
-                    # `mav_owns_target` is PX4's claim on the commanded-path
-                    # overlay while it is streaming one (it measured 2310 m of
-                    # error when the sim won that argument). `_json_owns` is the
-                    # broader rule that a locked autopilot owns flight state at
-                    # all, which the target keys are deliberately NOT part of --
-                    # they stay JSON-ownable so a flightdyn-only run, where no
-                    # vehicle ever locks, still draws the overlay.
-                    if mav_owns_target and k in _TARGET_KEYS:
-                        continue
-                    if not self._json_owns(k):
-                        continue
-                    self.latest[k] = v
-            if obj.get("targetLat") is not None and not mav_owns_target:
+            for k, v in good.items():
+                # Two independent gates, and neither subsumes the other.
+                # `mav_owns_target` is PX4's claim on the commanded-path
+                # overlay while it is streaming one (it measured 2310 m of
+                # error when the sim won that argument). `_json_owns` is the
+                # broader rule that a locked autopilot owns flight state at
+                # all, which the target keys are deliberately NOT part of --
+                # they stay JSON-ownable so a flightdyn-only run, where no
+                # vehicle ever locks, still draws the overlay.
+                if mav_owns_target and k in _TARGET_KEYS:
+                    continue
+                if not self._json_owns(k):
+                    continue
+                self.latest[k] = v
+            if good.get("targetLat") is not None and not mav_owns_target:
                 # The setpoint stream is alive from SOME source, so hold off
                 # re-requesting message 87. (A `_json_target_at` was kept
                 # here too, as the JSON feed's claim on the overlay -- but
                 # its only reader was the yield-to-JSON branch that PX4
                 # ownership replaced, so the writes outlived the read.)
                 self._last_target_at = now
-            if any(obj.get(k) is not None for k in ("voltage", "current", "batteryRemaining")):
+            if any(good.get(k) is not None for k in ("voltage", "current", "batteryRemaining")):
                 self._json_battery_at = now
 
     def status(self) -> dict[str, Any]:
@@ -2621,6 +2895,13 @@ class Bridge:
                                       if v in self._trim_at)
                                if self.trim_streams else []),
             "clients": len(self._clients),
+            # Nonzero means something is sending this hub values it cannot
+            # use -- a sim with a changed contract, or an unauthenticated
+            # sender on the flight line. Worth seeing rather than silently
+            # dropping. See json_value_ok.
+            "clientsDropped": self.clients_dropped,
+            "jsonHost": self.json_host,
+            "jsonRejected": self.json_rejected,
             "pendingCommands": len(self._pending),
             "pendingParamSets": len(self._param_set_pending),
             "paramRefresh": ({"received": len(self._param_received),
@@ -2860,14 +3141,46 @@ class Bridge:
                                      "ack_type": plane["ack_type"]})
 
         elif mtype in ("mission_pull", "fence_pull", "rally_pull"):
-            # Read the current plan; open to any client (result broadcast to all).
+            # Read the current plan; still open to any client, because the
+            # result is broadcast to all and a viewer seeing the real plan is
+            # the point. Rate-limited for non-commanders: see
+            # PLAN_PULL_COOLDOWN_MS for what an unthrottled loop did to the
+            # operator's own uploads.
             plane = _PLAN_PLANES[mtype]
+            if ws is not self._commander:
+                since = _mono_ms() - self._plan_pull_opened_at
+                if self._plan_pull_opened_at and since < PLAN_PULL_COOLDOWN_MS:
+                    wait_s = (PLAN_PULL_COOLDOWN_MS - since) / 1000
+                    await self._send(ws, {
+                        "type": plane["ack_type"], "ok": False, "result": -1,
+                        "text": f"a plan read ran recently; a viewer may ask "
+                                f"again in {wait_s:.0f}s (the link is shared)"})
+                    return
+                self._plan_pull_opened_at = _mono_ms()
             self._mission_queue.put({"kind": "pull", "mtype": plane["mtype"],
                                      "rtype": plane["rtype"], "ack_type": plane["ack_type"]})
 
         elif mtype == "mission_set_current":
-            if ws is self._commander:
-                self._mission_queue.put({"kind": "set_current", "seq": msg.get("seq", 0)})
+            # "Jump to waypoint N" changes the flight path, so it answers like
+            # one. A non-commander's request was dropped in SILENCE -- the only
+            # privileged handler that did not refuse explicitly -- and a `seq`
+            # that cannot pack as uint16 was logged on the hub with nothing sent
+            # back, so the console showed no result either way.
+            mid = msg.get("id")
+            if ws is not self._commander:
+                await self._send(ws, {"type": "mission_current_ack", "id": mid,
+                                      "ok": False, "result": -1,
+                                      "text": "not commander"})
+                return
+            seq = msg.get("seq", 0)
+            if isinstance(seq, bool) or not isinstance(seq, int) or not 0 <= seq <= 0xFFFF:
+                await self._send(ws, {"type": "mission_current_ack", "id": mid,
+                                      "ok": False, "result": -1,
+                                      "text": f"seq must be 0..65535, got {seq!r}"})
+                return
+            if mid is not None:
+                self._pending_clients[mid] = ws
+            self._mission_queue.put({"kind": "set_current", "id": mid, "seq": seq})
 
     def _emit_ack(self, event: dict[str, Any]) -> None:
         # Runs in the asyncio loop (scheduled via call_soon_threadsafe).
@@ -2986,6 +3299,7 @@ class Bridge:
                 if src_at:
                     frame["ages"] = {g: mono - at for g, at in src_at.items()}
                 payload = dumps(frame)
+                self._drop_slow_clients()
                 if self._clients:
                     websockets.broadcast(self._clients, payload)
                 if self.relay is not None:

@@ -1,12 +1,13 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 import {
 	$derived, startDerived, recomputeDerived, setTerrainSampler, resetDerived,
-	EMPTY_DERIVED,
+	EMPTY_DERIVED, DERIVED_IDLE_MS,
 } from "@/stores/derived.store";
 import { $hudFrame, pushFrame } from "@/stores/aircraft.store";
 import { $fenceItems, setFenceItems, setVehicleFence } from "@/stores/geo.store";
 import { GROUP_STALE_MS, groupAgeMs } from "@/lib/flightGeometry";
+import { $linkState } from "@/stores/link.store";
 import type { TelemetryFrame } from "@/types/app";
 
 const LAT = 37.3985511, LON = -122.148853, GROUND = 111;
@@ -25,6 +26,7 @@ let stop: (() => void) | null = null;
 beforeEach(() => {
 	$hudFrame.set(null); $fenceItems.set([]); setVehicleFence(null); $derived.set(EMPTY_DERIVED);
 	setTerrainSampler(null);
+	$linkState.set("alive");
 	pushFrame(frame({ t: 0, connected: false }));
 	resetDerived();          // module-level bookkeeping is not per-test state
 	stop = startDerived();
@@ -240,5 +242,83 @@ describe("tracking error", () => {
 	it("is null when no setpoint is present, rather than zero", () => {
 		pushFrame(frame({ t: 61_000, lat: LAT, lon: LON }));
 		expect($derived.get().targetDistM).toBeNull();
+	});
+});
+
+describe("a gap must not leave stale geometry on screen", () => {
+	// This is the failure the comment on resetDerived always described and the
+	// code had no path to: the function had NO production caller. The only
+	// clearing path was recomputeDerived, which fires from $hudFrame and so needs
+	// a frame to ARRIVE saying connected:false. A console<->gs socket drop
+	// delivers no frames at all, so $derived held its last AGL, wind, fence
+	// proximity and target distance for the whole outage — and the strip's
+	// derived cells do not go through the `stale()` wrapper that strikes through
+	// cold raw fields, so they were not even dimmed. The red link dot was the
+	// only cue.
+	const geo = () => {
+		setTerrainSampler(() => GROUND);
+		pushFrame(frame({
+			t: 20_000, alt: GROUND + 120, windSpeed: 6, windFromDeg: 270,
+			targetLat: LAT + 0.01, targetLon: LON,
+		}));
+		const d = $derived.get();
+		expect(d.aglM).not.toBeNull();
+		expect(d.wind).not.toBeNull();
+		expect(d.targetDistM).not.toBeNull();
+	};
+
+	it("drops everything when the link stops being alive", () => {
+		geo();
+		// What the socket's close path does: $linkState goes "lost" with no frame
+		// behind it.
+		$linkState.set("lost");
+		expect($derived.get()).toEqual(EMPTY_DERIVED);
+	});
+
+	it("drops everything when frames simply stop, with no close and no frame", () => {
+		// A half-open socket: the link still claims to be alive, nothing arrives,
+		// and no close event is ever delivered. Nothing but a watchdog can catch
+		// this one.
+		vi.useFakeTimers();
+		try {
+			$linkState.set("alive");
+			geo();
+			vi.advanceTimersByTime(DERIVED_IDLE_MS - 1);
+			expect($derived.get().aglM).not.toBeNull();   // not yet: a 10 Hz hiccup
+			vi.advanceTimersByTime(2);
+			expect($derived.get()).toEqual(EMPTY_DERIVED);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("keeps the geometry alive while frames keep arriving", () => {
+		vi.useFakeTimers();
+		try {
+			$linkState.set("alive");
+			geo();
+			for (let i = 0; i < 6; i++) {
+				vi.advanceTimersByTime(DERIVED_IDLE_MS - 100);
+				pushFrame(frame({ t: 30_000 + i * 1000, alt: GROUND + 120 }));
+				expect($derived.get().aglM).not.toBeNull();
+			}
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("stops watching once the HUD unmounts", () => {
+		// The watchdog must not outlive the subscription that armed it, or a test
+		// (or a remounted HUD) is left with a timer writing to a store nobody is
+		// listening to.
+		vi.useFakeTimers();
+		try {
+			$linkState.set("alive");
+			geo();
+			stop?.(); stop = null;
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

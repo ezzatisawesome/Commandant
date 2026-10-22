@@ -149,6 +149,11 @@ def main() -> int:
                              "PARAM_REQUEST_LIST flood. A 57600 SiK link is about 3456.")
     parser.add_argument("--json-port", type=int, default=14555,
                         help="UDP port for the sim's flightlink JSON telemetry")
+    parser.add_argument("--json-host", default="0.0.0.0",
+                        help="JSON telemetry bind host. This feed takes no "
+                             "token, so on a shared flight-line WiFi "
+                             "127.0.0.1 is the safer choice when the sim "
+                             "runs on the hub itself")
     parser.add_argument("--ws-host", default="0.0.0.0", help="WebSocket bind host")
     parser.add_argument("--ws-port", type=int, default=8790,
                         help="WebSocket port for the console UI")
@@ -219,11 +224,13 @@ def main() -> int:
         # No live link: a replay serves the console and talks to no vehicle.
         Bridge(
             ws_host=args.ws_host, ws_port=args.ws_port, json_port=args.json_port,
+            json_host=args.json_host,
         ).run_replay(args.replay, args.replay_speed, args.replay_loop)
         return 0
     Bridge(
         mavlink_endpoint=args.mavlink,
         json_port=args.json_port,
+        json_host=args.json_host,
         ws_host=args.ws_host,
         ws_port=args.ws_port,
         baud=args.baud,

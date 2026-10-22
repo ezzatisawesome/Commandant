@@ -72,14 +72,51 @@ def test_chunks_that_arrive_out_of_order_are_still_joined_in_order():
 
 def test_a_lost_chunk_still_delivers_what_arrived_marked_partial():
     """The alternative is silence about a refusal. A partial reason an operator
-    can see is partial beats no reason at all."""
+    can see is partial beats no reason at all.
+
+    Delivered when the run goes quiet rather than the instant the terminating
+    chunk lands: a terminator says where the run ENDS, not that every chunk
+    before it arrived. Flushing on arrival is what split a reordered pair into
+    two messages (see the reordered-terminator test below)."""
     b, events = _b()
     b._on_statustext(Chunk("A" * 50, sid=9, seq=0))
     b._on_statustext(Chunk("tail", sid=9, seq=2))      # seq 1 never came
+    assert _texts(events) == [], "a hole must not flush early"
+    b._text_runs[9]["at"] -= STATUSTEXT_RUN_TIMEOUT_MS + 1
+    b._expire_text_runs()
     got = _texts(events)
     assert len(got) == 1, got
     assert got[0].startswith("A" * 50)
     assert "incomplete" in got[0], got[0]
+
+
+def test_a_terminating_chunk_that_arrives_first_does_not_split_the_message():
+    """The measured PX4 pair, in the other order. The terminating chunk used to
+    flush the run on arrival, so seq=1 "t" emitted "t ...(incomplete)" and the
+    real first half followed as a SEPARATE message. The docstring claimed a
+    reordered pair was already handled; it was, in only one of the two orders."""
+    b, events = _b()
+    b._on_statustext(Chunk("t", sid=15, seq=1))                       # terminator first
+    assert _texts(events) == [], "flushed before seq 0 arrived"
+    b._on_statustext(Chunk("Arming denied: Resolve system health failures firs",
+                           sid=15, seq=0))
+    assert _texts(events) == [
+        "Arming denied: Resolve system health failures first"]
+
+
+def test_a_full_chunk_of_multibyte_text_is_not_mistaken_for_the_last_one():
+    """PX4 fills a chunk to 50 BYTES. This measured characters, so one 2-byte
+    character made a full chunk look 49 long, flushed the run mid-sentence, and
+    the remainder came through as a second line marked incomplete. PX4's own
+    refusal strings carry exactly these characters."""
+    b, events = _b()
+    head = "Mission rejected: altitude ≥ 120 m above the"
+    head += "x" * (50 - len(head.encode()))      # exactly 50 bytes on the wire
+    assert len(head.encode()) == 50 and len(head) == 48, (len(head.encode()), len(head))
+    b._on_statustext(Chunk(head, sid=21, seq=0))
+    assert _texts(events) == [], "a full 50-BYTE chunk is not a terminator"
+    b._on_statustext(Chunk("ence", sid=21, seq=1))
+    assert _texts(events) == [head + "ence"]
 
 
 def test_a_run_whose_last_chunk_never_comes_is_flushed_when_it_goes_quiet():

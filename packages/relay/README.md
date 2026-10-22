@@ -22,8 +22,19 @@ creating an internet-reachable path to an aircraft.
 Read-only is structural, not configuration:
 
 1. A **viewer socket is never read.** The handler sends the current state, then
-   waits for close. A viewer's inbound bytes are discarded by the transport; no
-   code parses them.
+   waits for close. Nothing in the relay ever interprets or acts on a viewer's
+   inbound bytes.
+
+   This once said those bytes were "discarded by the transport", which was
+   wrong in a way worth recording: websockets parses them into frames and
+   queues them regardless of whether the application reads them, so a viewer
+   sending junk parked memory **inside this process** — measured at ~20 MB per
+   viewer, with the slow-viewer guard seeing nothing, because that guard only
+   inspects the *write* buffer. Watching needs no token and the machine has
+   256 MB. The frame size and queue depth are now capped (`MAX_FRAME_BYTES`,
+   `MAX_QUEUED_FRAMES`), so what a viewer can hold is bounded by TCP
+   backpressure at a few hundred kB. Never interpreted is the guarantee;
+   never buffered was never true.
 2. The **publisher socket is never written to.** There is no `send` on that path.
 3. The hosted console is built with `NEXT_PUBLIC_MODE=view`, whose telemetry
    client refuses to transmit at its single send chokepoint.

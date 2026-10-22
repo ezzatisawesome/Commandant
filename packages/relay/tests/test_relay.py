@@ -103,28 +103,43 @@ async def test_publishing_requires_the_token():
 
 @pytest.mark.asyncio
 async def test_a_viewer_can_never_reach_the_publisher():
-    """THE safety property: anything a viewer sends is discarded, and the
+    """THE safety property: nothing a viewer sends is ever interpreted, and the
     publisher socket is never written to. A hostile browser has no route to the
-    aircraft because no code path exists, not because a flag says so."""
+    aircraft because no code path exists, not because a flag says so.
+
+    A viewer that sends anything is now closed on the first frame, so each of
+    these shapes is tried on its own socket. That is a tightening, not a change
+    of the property: the content is still never looked at, only the fact that
+    something arrived. The close also bounds what an unread socket can park in
+    the relay -- see constraint 1 in server.py."""
     async with Harness() as h:
         pub = await h.publisher()
-        v = await h.viewer()
         await asyncio.sleep(0.1)
-        # A viewer tries every shape of command the hub would understand.
+        # Every shape of command the hub would understand, one viewer each.
         for hostile in ({"type": "claim", "id": "x"},
                         {"type": "command", "id": "x", "name": "arm", "args": {}},
                         {"type": "command", "id": "x", "name": "disarm", "args": {}},
                         {"type": "param_set", "id": "x", "name": "NAV_RCL_ACT", "value": 0},
                         {"type": "mission_push", "id": "x", "items": []}):
+            v = await h.viewer()
+            await asyncio.sleep(0.05)
             await v.send(json.dumps(hostile))
-        await asyncio.sleep(0.3)
-        # The publisher received nothing whatsoever.
+            # The sender is hung up on rather than answered.
+            with pytest.raises(websockets.exceptions.ConnectionClosed):
+                await asyncio.wait_for(v.recv(), timeout=1.0)
+                while True:
+                    await asyncio.wait_for(v.recv(), timeout=1.0)
+        await asyncio.sleep(0.2)
+        # The publisher received nothing whatsoever, from any of them.
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(pub.recv(), timeout=0.4)
-        # And the relay is still healthy: a real frame still flows.
+        # And the relay is still healthy: a real frame still flows to a viewer
+        # that behaves.
+        good = await h.viewer()
+        await asyncio.sleep(0.05)
         await pub.send(json.dumps(TELEM))
-        assert await _recv_until(v, lambda m: m.get("type") == "telemetry") is not None
-        await pub.close(); await v.close()
+        assert await _recv_until(good, lambda m: m.get("type") == "telemetry") is not None
+        await pub.close(); await good.close()
 
 
 @pytest.mark.asyncio
@@ -341,16 +356,28 @@ def test_every_broadcast_runs_the_slow_viewer_check():
 
 
 def test_dropping_a_slow_viewer_is_counted_for_healthz():
-    """`frames_dropped` was permanently 0, which made the /healthz figure a
+    """The counter was permanently 0, which made the /healthz figure a
     reassuring lie. It has to move when something is actually dropped."""
     from relay.server import SLOW_VIEWER_BYTES
 
     relay = Relay(token="t", host="127.0.0.1", port=0)
     relay._viewers.add(FakeViewer(SLOW_VIEWER_BYTES * 4))
-    assert relay.frames_dropped == 0
+    assert relay.viewers_dropped == 0
     relay._drop_slow_viewers()
-    assert relay.frames_dropped == 1
     assert relay.viewers_dropped == 1
+
+
+def test_there_is_no_counter_that_claims_to_count_frames_dropped():
+    """`frames_dropped` was incremented on the line next to `viewers_dropped`,
+    once per closed viewer: it counted viewers while being named for frames, so
+    the two figures were always equal and neither answered "how many frames did
+    a viewer miss?". The relay cannot answer that -- a closed socket's backlog
+    is bytes in a kernel buffer -- so the honest fix was to stop pretending.
+    Pinned as a test because a plausible-looking counter that means nothing is
+    the exact failure the slow-viewer work set out to fix."""
+    relay = Relay(token="t", host="127.0.0.1", port=0)
+    assert not hasattr(relay, "frames_dropped")
+    assert "frames_dropped" not in relay._health_body()
 
 
 def test_a_viewer_with_no_transport_is_left_alone():
@@ -366,6 +393,171 @@ def test_a_viewer_with_no_transport_is_left_alone():
     assert relay._drop_slow_viewers() == 0
     assert v in relay._viewers
     assert relay.viewers_dropped == 0
+
+
+# --- a viewer cannot park bytes inside the process -------------------------
+
+def test_inbound_frames_are_bounded_for_every_connection():
+    """The module docstring used to claim a viewer's inbound bytes were
+    "discarded by the transport". They are not: websockets parses them into
+    frames and queues them in the connection whether or not anyone reads, so
+    with the old defaults (max_size 1 MiB, max_queue 16) eight viewers sending
+    1 MiB messages parked ~20 MB each on a 256 MB machine, invisible to
+    `_drop_slow_viewers` -- which only inspects the WRITE buffer.
+
+    Asserted at the call site rather than by poking websockets' internals: the
+    only thing that bounds this is what `serve()` is given."""
+    import inspect
+
+    from relay import server
+    src = inspect.getsource(server.Relay.serve_forever)
+    assert "max_size=MAX_FRAME_BYTES" in src
+    assert "max_queue=MAX_QUEUED_FRAMES" in src
+    # A few hundred KB per connection, not twenty megabytes.
+    assert server.MAX_FRAME_BYTES * server.MAX_QUEUED_FRAMES <= 512 * 1024
+    # And still big enough for everything the publisher -- the only party whose
+    # messages are read -- actually sends.
+    assert server.MAX_FRAME_BYTES >= 64 * 1024
+
+
+@pytest.mark.asyncio
+async def test_a_viewer_blasting_junk_cannot_park_unbounded_data():
+    """Behavioural half: a viewer sending oversized junk is cut off rather than
+    accommodated, and the relay keeps serving everyone else."""
+    from relay.server import MAX_FRAME_BYTES
+
+    async with Harness() as h:
+        pub = await h.publisher()
+        junk = await h.viewer()
+        good = await h.viewer()
+        await asyncio.sleep(0.1)
+        try:
+            await junk.send("x" * (MAX_FRAME_BYTES * 4))
+            await asyncio.sleep(0.3)
+        except Exception:
+            pass
+        # Over max_size, the connection is closed with 1009 (message too big):
+        # the ceiling is enforced, not absorbed.
+        assert junk.state.name == "CLOSED"
+        assert junk.close_code == 1009
+        # The relay is unharmed: a real frame still reaches a real viewer.
+        await pub.send(json.dumps(TELEM))
+        assert await _recv_until(good, lambda m: m.get("type") == "telemetry") is not None
+        await pub.close(); await good.close()
+        try:
+            await junk.close()
+        except Exception:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_a_publisher_sized_frame_still_fits():
+    """The cap is only safe if it is above what the hub really sends, and
+    rejecting a publisher frame would close the uplink and take the public feed
+    down -- so the worst case matters, not a typical one.
+
+    A retained `mission` is the largest frame there is and gs puts NO cap on
+    item count. MEASURED at ~115 bytes of JSON per waypoint: 500 items is
+    57 KiB and 1000 items is 114 KiB. A 64 KiB limit, which is where this
+    started, would have broken any large plan."""
+    from relay.server import MAX_FRAME_BYTES
+    async with Harness() as h:
+        pub = await h.publisher()
+        v = await h.viewer()
+        await asyncio.sleep(0.1)
+        n = 1000
+        mission = {"type": "mission", "count": n, "items": [
+            {"seq": i, "kind": "waypoint", "lat": 37.4 + i * 1e-4,
+             "lon": -122.654321, "alt": 100.0,
+             "params": {"acceptRadius": 50}} for i in range(n)]}
+        raw = json.dumps(mission)
+        assert len(raw) > 100 * 1024, "this is meant to be the big one"
+        assert len(raw) < MAX_FRAME_BYTES, (
+            f"a {n}-item plan ({len(raw)} B) exceeds the inbound cap "
+            f"({MAX_FRAME_BYTES} B) and would close the uplink")
+        await pub.send(raw)
+        got = await _recv_until(v, lambda m: m.get("type") == "mission")
+        assert got is not None and got["count"] == n
+        await pub.close(); await v.close()
+
+
+# --- the link state must be retracted, not just set ------------------------
+
+@pytest.mark.asyncio
+async def test_a_recovered_uplink_is_announced(monkeypatch):
+    """The relay invents `link: lost` after STALE_AFTER_S of hub silence and
+    used to never retract it: it reset its internal flag on recovery and
+    broadcast nothing. The hub only emits a `link` frame when ITS OWN state
+    transitions (gs/bridge.py), so a recovered uplink meant telemetry resumed
+    with no new `link` -- viewers showed "lost" over a moving aircraft for the
+    rest of the flight, and a fresh page load got the same from retained
+    state."""
+    from relay import server as mod
+    monkeypatch.setattr(mod, "STALE_AFTER_S", 0.3)
+    async with Harness() as h:
+        pub = await h.publisher()
+        v = await h.viewer()
+        await asyncio.sleep(0.1)
+        await pub.send(json.dumps(TELEM))
+        await asyncio.sleep(1.6)                 # go quiet: "lost"
+        assert await _recv_until(
+            v, lambda m: m.get("type") == "link" and m.get("state") == "lost") is not None
+
+        await pub.send(json.dumps(TELEM))        # uplink comes back
+        alive = await _recv_until(
+            v, lambda m: m.get("type") == "link" and m.get("state") == "alive",
+            tries=20)
+        assert alive is not None, "viewers were never told the link came back"
+        assert alive["lastMsgMs"] > 0
+
+        # And the retained state agrees, so a page load after recovery is right.
+        late = await h.viewer()
+        got = await _recv_until(late, lambda m: m.get("type") == "link")
+        assert got is not None and got["state"] == "alive"
+        await late.close(); await v.close(); await pub.close()
+
+
+# --- /healthz ---------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_healthz_is_actually_served():
+    """Two comments and a test name referred to /healthz while no such route
+    existed: `_handler` knew `/publish` and treated everything else as a
+    viewer, so an HTTP probe got a failed WebSocket handshake and the counters
+    were unreachable in production."""
+    async with Harness() as h:
+        pub = await h.publisher()
+        v = await h.viewer()
+        await asyncio.sleep(0.1)
+        await pub.send(json.dumps(TELEM))
+        await asyncio.sleep(0.2)
+
+        body = await _http_get(h.port, "/healthz")
+        assert body is not None, "/healthz answered nothing"
+        head, _, payload = body.partition("\r\n\r\n")
+        assert "200" in head.splitlines()[0]
+        assert "application/json" in head.lower()
+        doc = json.loads(payload)
+        assert doc["viewers"] == 1
+        assert doc["publisher_connected"] is True
+        assert doc["frames_in"] >= 1
+        assert doc["viewers_dropped"] == 0
+        assert doc["seconds_since_last_publish"] < 5
+        await pub.close(); await v.close()
+
+
+async def _http_get(port: int, path: str) -> str | None:
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write(f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                 f"Connection: close\r\n\r\n".encode())
+    await writer.drain()
+    try:
+        raw = await asyncio.wait_for(reader.read(65536), timeout=2.0)
+    except asyncio.TimeoutError:
+        return None
+    finally:
+        writer.close()
+    return raw.decode() or None
 
 
 def test_the_token_is_compared_in_constant_time():

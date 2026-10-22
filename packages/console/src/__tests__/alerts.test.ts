@@ -47,35 +47,48 @@ describe("how long an alert stays", () => {
 });
 
 describe("selecting what to show", () => {
+	const shown = (
+		entries: StatusEntry[], dismissed: ReadonlySet<number> = new Set(), limit?: number,
+	) => selectAlerts(entries, dismissed, limit).visible;
+
 	it("shows nothing when the log is quiet", () => {
-		expect(selectAlerts([], new Set())).toEqual([]);
+		expect(shown([])).toEqual([]);
 	});
 
 	it("ignores everything below warning", () => {
 		const log = [entry(6, "info"), entry(5, "notice"), entry(7, "debug")];
-		expect(selectAlerts(log, new Set())).toEqual([]);
+		const out = selectAlerts(log, new Set());
+		expect(out.visible).toEqual([]);
+		expect(out.overflow).toEqual([]);   // not a backlog either
 	});
 
 	it("shows the newest first, because that explains the current state", () => {
 		const a = entry(4, "first"), b = entry(4, "second"), c = entry(4, "third");
-		const out = selectAlerts([a, b, c], new Set());
-		expect(out.map((x) => x.text)).toEqual(["third", "second", "first"]);
+		expect(shown([a, b, c]).map((x) => x.text)).toEqual(["third", "second", "first"]);
 	});
 
 	it("caps the stack so a cascade cannot cover the globe", () => {
 		const log = Array.from({ length: 20 }, () => entry(2, "critical"));
-		expect(selectAlerts(log, new Set())).toHaveLength(3);
-		expect(selectAlerts(log, new Set(), 1)).toHaveLength(1);
+		expect(shown(log)).toHaveLength(3);
+		expect(shown(log, new Set(), 1)).toHaveLength(1);
+	});
+
+	it("reports the older ones as overflow rather than hiding that they exist", () => {
+		const log = Array.from({ length: 10 }, (_, i) => entry(4, `w${i}`));
+		const { visible, overflow } = selectAlerts(log, new Set());
+		expect(visible.map((x) => x.text)).toEqual(["w9", "w8", "w7"]);
+		// Newest-first ordering continues through the overflow.
+		expect(overflow.map((x) => x.text)).toEqual(["w6", "w5", "w4", "w3", "w2", "w1", "w0"]);
+		expect(visible.length + overflow.length).toBe(10);
 	});
 
 	it("honours dismissals and keeps showing the rest", () => {
 		const a = entry(4, "a"), b = entry(3, "b");
-		const out = selectAlerts([a, b], new Set([b.id]));
-		expect(out.map((x) => x.text)).toEqual(["a"]);
+		expect(shown([a, b], new Set([b.id])).map((x) => x.text)).toEqual(["a"]);
 	});
 
 	it("marks errors sticky and warnings not", () => {
-		const out = selectAlerts([entry(4, "warn"), entry(2, "crit")], new Set());
+		const out = shown([entry(4, "warn"), entry(2, "crit")]);
 		const byText = new Map(out.map((x) => [x.text, x.sticky]));
 		expect(byText.get("crit")).toBe(true);
 		expect(byText.get("warn")).toBe(false);
@@ -83,7 +96,7 @@ describe("selecting what to show", () => {
 
 	it("carries the original entry through untouched", () => {
 		const e = entry(1, "failsafe: geofence breach");
-		const [out] = selectAlerts([e], new Set());
+		const [out] = shown([e]);
 		expect(out.id).toBe(e.id);
 		expect(out.text).toBe(e.text);
 		expect(out.severity).toBe(e.severity);
@@ -95,9 +108,87 @@ describe("selecting what to show", () => {
 		// accepted ack hid. Severity 4 on PX4.
 		const log = [entry(6, "Mission accepted"),
 			entry(4, "Geofence invalid, doesn't contain current vehicle")];
-		const out = selectAlerts(log, new Set());
+		const out = shown(log);
 		expect(out).toHaveLength(1);
 		expect(out[0].text).toContain("Geofence invalid");
+	});
+});
+
+describe("a backlog must not be replayed in reverse", () => {
+	// This is the bug this block exists for, traced before it was fixed: the
+	// selection returned the newest three and the component armed dwell timers
+	// only for those three, so each timeout promoted the next three OLDER entries
+	// as fresh toasts. Ten severity-4 warnings with a 12 s dwell produced
+	// t=0 w9,w8,w7; t=12 w6,w5,w4; t=24 w3,w2,w1; t=36 w0 — forty-eight seconds
+	// of toasts ending with the OLDEST warning alone on screen as though it had
+	// just happened. During a failsafe cascade the operator was shown the
+	// situation backwards.
+	//
+	// The component's policy, simulated here because it is the policy and not the
+	// JSX that must hold: retire everything behind the visible window on sight,
+	// count it, and let the visible ones time out without ever being replaced
+	// from the backlog.
+	function run(entries: StatusEntry[]) {
+		let dismissed = new Set<number>();
+		let suppressed = 0;
+		const armed = new Set<number>();
+		const frames: string[][] = [];
+		// Each pass is "React re-rendered, then every armed dwell expired".
+		for (let pass = 0; pass < 6; pass++) {
+			const { visible, overflow } = selectAlerts(entries, dismissed);
+			if (overflow.length) {
+				for (const a of overflow) dismissed.add(a.id);
+				suppressed += overflow.length;
+				continue;                     // retiring re-renders; nothing shown yet
+			}
+			frames.push(visible.map((a) => a.text));
+			if (visible.length === 0) break;
+			const timing = visible.filter((a) => !a.sticky && !armed.has(a.id));
+			if (timing.length === 0) break;   // sticky: stays until clicked
+			for (const a of timing) armed.add(a.id);
+			dismissed = new Set([...dismissed, ...timing.map((a) => a.id)]);
+		}
+		return { frames, suppressed };
+	}
+
+	it("shows the newest three once and then nothing, not the flight in reverse", () => {
+		const log = Array.from({ length: 10 }, (_, i) => entry(4, `w${i}`));
+		const { frames, suppressed } = run(log);
+		expect(frames).toEqual([["w9", "w8", "w7"], []]);
+		expect(suppressed).toBe(7);
+	});
+
+	it("never promotes an older warning after a newer one times out", () => {
+		const log = Array.from({ length: 10 }, (_, i) => entry(4, `w${i}`));
+		const shownEver = run(log).frames.flat();
+		for (const old of ["w0", "w1", "w2", "w3", "w4", "w5", "w6"]) {
+			expect(shownEver).not.toContain(old);
+		}
+	});
+
+	it("does not queue a cascade of sticky errors behind each other for ever", () => {
+		// Severity 2 never auto-dismisses, so before the fix an eight-deep
+		// cascade was an eight-deep queue: three on screen until clicked, then
+		// three more, with the first message of the failsafe arriving last.
+		const log = Array.from({ length: 8 }, (_, i) => entry(2, `e${i}`));
+		const { frames, suppressed } = run(log);
+		expect(frames).toEqual([["e7", "e6", "e5"]]);
+		expect(suppressed).toBe(5);
+	});
+
+	it("keeps the newest alert visible when a trickle arrives behind it", () => {
+		// The dwell belongs to the alert, armed once. A new arrival used to clear
+		// every timer and re-arm each visible alert with a full dwell, so under a
+		// trickle a toast from the start of the flight stayed up all flight.
+		const a = entry(4, "first");
+		const armedAt = new Map<number, number>();
+		for (let tick = 0; tick < 3; tick++) {
+			const log = [a, ...Array.from({ length: tick }, (_, i) => entry(4, `later${i}`))];
+			for (const v of selectAlerts(log, new Set()).visible) {
+				if (!v.sticky && !armedAt.has(v.id)) armedAt.set(v.id, tick);
+			}
+		}
+		expect(armedAt.get(a.id)).toBe(0);    // armed on its first appearance only
 	});
 });
 

@@ -177,14 +177,50 @@ class FlightLog:
         self._close_file()
 
     # --- the writer thread's half -----------------------------------------
+    def _flush(self) -> None:
+        """Both open handles, on the FLUSH_INTERVAL_S timer.
+
+        The sidecar used to be flushed only from _sync(), which returns at the
+        top when fsync is off, so its flush bound was the 10 s fsync interval at
+        best and never at all with fsync_interval_s=0. MEASURED: 200 records
+        written with fsync off left the .jsonl at 0 bytes on disk after 3
+        seconds -- a kill -9, an OOM or a systemd restart took the entire flight
+        with it, and nothing could read the file while gs was running. That is
+        precisely what the 1 s flush exists to bound (see FLUSH_INTERVAL_S), and
+        it has to bound it for both halves of the log, not just the tlog."""
+        if self._jfh is not None:
+            self._safely(self._jfh.flush)
+        if self._fh is not None:
+            self._safely(self._fh.flush)
+
+    def _file_bytes(self) -> int:
+        """The size of the larger half of the current pair.
+
+        Rotation was gated on the tlog's position alone, and the json branch of
+        the writer loop returned before reaching the check. On a flightdyn-only
+        rig -- the case write_json's docstring calls out, where the sidecar
+        "carries the whole flight" -- the tlog position stays 0 forever, so
+        nothing ever rotated and _prune() (which only runs from _open_file)
+        never ran either. MEASURED with max_file_bytes=4096: 0 rotations and a
+        270,890-byte sidecar, 66x over the cap, on the way to the full card
+        MAX_FILE_BYTES exists to prevent."""
+        n = 0
+        for fh in (self._fh, self._jfh):
+            if fh is None:
+                continue
+            try:
+                n = max(n, fh.tell())
+            except Exception:
+                pass            # a closed handle, or a test double
+        return n
+
     def _sync(self) -> None:
         """Push the page cache to the device. Flush first: fsync does not know
         about our userspace buffer."""
         if self._fh is None or not self.fsync_interval_s:
             return
-        if self._jfh is not None:
-            self._safely(self._jfh.flush)
-        if not self._safely(self._fh.flush):
+        self._flush()
+        if self._fh is None:
             return
         try:
             fd = self._fh.fileno()
@@ -200,12 +236,11 @@ class FlightLog:
                 item = self._q.get(timeout=self.flush_interval_s)
             except queue.Empty:
                 item = None
-                if self._fh is not None:
-                    self._safely(self._fh.flush)
-                    last_flush = time.monotonic()
-                    if time.monotonic() - last_sync >= self.fsync_interval_s:
-                        self._sync()
-                        last_sync = time.monotonic()
+                self._flush()
+                last_flush = time.monotonic()
+                if time.monotonic() - last_sync >= self.fsync_interval_s:
+                    self._sync()
+                    last_sync = time.monotonic()
                 continue
             if item is None:
                 break
@@ -227,24 +262,26 @@ class FlightLog:
                     continue
                 self.json_written += 1
                 self.bytes_written += len(line) + 1
-                continue
-            if self._fh is None:
-                continue
-            rec = struct.pack(">Q", stamp) + payload
-            if not self._safely(self._fh.write, rec):
-                continue
-            self.written += 1
-            self.bytes_written += len(rec)
-            if self._fh.tell() >= self.max_file_bytes:
+            else:
+                if self._fh is None:
+                    continue
+                rec = struct.pack(">Q", stamp) + payload
+                if not self._safely(self._fh.write, rec):
+                    continue
+                self.written += 1
+                self.bytes_written += len(rec)
+            # Both kinds land here: the caps and the timers have to apply to
+            # whichever stream the records actually arrived on.
+            if self._file_bytes() >= self.max_file_bytes:
                 self._rotate()
             if time.monotonic() - last_flush >= self.flush_interval_s:
-                self._safely(self._fh.flush)
+                self._flush()
                 last_flush = time.monotonic()
             if time.monotonic() - last_sync >= self.fsync_interval_s:
                 self._sync()
                 last_sync = time.monotonic()
-        if self._fh is not None:
-            self._sync()
+        self._flush()
+        self._sync()
 
     def _open_file(self) -> None:
         if self.clock_was_set:

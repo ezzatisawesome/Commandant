@@ -71,3 +71,24 @@ def test_metadata_discovery_prefers_an_explicit_path(monkeypatch, tmp_path):
     assert find_metadata(str(tmp_path / "missing.json")) is None
     monkeypatch.setenv("GS_EVENTS_META", str(FIX))
     assert find_metadata(None) == FIX
+
+
+def test_a_corrupted_length_field_does_not_crash_the_decoder():
+    """`bytes(_PAYLOAD_LEN - len(payload))` raised "ValueError: negative count"
+    for any length field above the 53-byte cap, and from_frame was called from
+    outside decode()'s try, so it reached the bridge's receive loop unguarded.
+    Reachable rather than theoretical: msgid 410 is absent from this pymavlink's
+    mavlink_map, so EVENTs arrive as unknown messages and an unknown msgid gets
+    no CRC validation -- one corrupted radio byte, or one damaged record in a
+    recovered log, is enough."""
+    dec = EventDecoder(FIX)
+    for length in (54, 60, 0xFF):
+        f = bytearray(FRAME_REFUSAL)
+        f[1] = length
+        assert EventDecoder.from_frame(bytes(f)) is None, length
+        assert dec.decode(bytes(f)) is None, length
+    # A truncated frame (the payload shorter than its own length field says)
+    # must be refused the same way, not sliced into nonsense.
+    assert dec.decode(FRAME_REFUSAL[:12]) is None
+    # And the good frame still decodes after all that.
+    assert dec.decode(FRAME_REFUSAL)["event"] == "navigator_mis_land_missing"

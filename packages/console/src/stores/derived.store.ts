@@ -10,10 +10,11 @@ import { atom } from "nanostores";
 import {
 	sunPosition, fenceProximity, aglM, clearanceBand, distanceM, angleDiffDeg,
 	type Wind, type SunPosition, type FenceProximity, type ClearanceBand, isNum,
-	groupAgeMs,
+	groupAgeMs, GROUP_STALE_MS,
 } from "@/lib/flightGeometry";
 import { $hudFrame } from "@/stores/aircraft.store";
 import { $vehicleFence } from "@/stores/geo.store";
+import { $linkState } from "@/stores/link.store";
 
 export interface DerivedState {
 	/** Height above ground, metres. null until terrain tiles cover the aircraft. */
@@ -61,7 +62,39 @@ export function setTerrainSampler(fn: (() => number | null) | null) {
  *  would present stale geometry as current — the same failure mode as a frozen
  *  position reported "alive". */
 export function resetDerived(): void {
-	$derived.set(EMPTY_DERIVED);
+	clearIdleTimer();
+	if ($derived.get() !== EMPTY_DERIVED) $derived.set(EMPTY_DERIVED);
+}
+
+/** How long derived geometry may go without a recompute before it is dropped.
+ *
+ *  This is the watchdog the comment above needed and did not have. The clearing
+ *  path used to be `recomputeDerived` alone, which requires a FRAME TO ARRIVE
+ *  saying `connected:false` — and the failure we care about is frames not
+ *  arriving at all. When the console<->gs socket drops, or the daemon simply
+ *  stops writing to a socket that never closes (a half-open TCP connection
+ *  behind a NAT that forgot the flow, which is what a field WiFi link does when
+ *  it degrades rather than dies), `$hudFrame` never changes again and the last
+ *  AGL, wind, fence proximity and target distance stayed on screen as current
+ *  for the whole outage with nothing but the red link dot to say otherwise.
+ *  Worse, TelemetryStrip's derived cells do not pass through the `stale()`
+ *  wrapper that strikes through cold raw fields, so they were not even dimmed.
+ *
+ *  Two group-stale periods: long enough that a hiccup in the 10 Hz HUD feed
+ *  cannot blank a healthy readout, short enough that nobody reads a frozen
+ *  clearance number as live. */
+export const DERIVED_IDLE_MS = 2 * GROUP_STALE_MS;
+
+let idleTimer: ReturnType<typeof setTimeout> | null = null;
+function clearIdleTimer(): void {
+	if (idleTimer !== null) {
+		clearTimeout(idleTimer);
+		idleTimer = null;
+	}
+}
+function armIdleTimer(): void {
+	clearIdleTimer();
+	idleTimer = setTimeout(resetDerived, DERIVED_IDLE_MS);
 }
 
 /** Recompute from the current frame. Called on each $hudFrame change. */
@@ -133,10 +166,23 @@ export function recomputeDerived(): void {
 			? distanceM(f.lat, f.lon, f.targetLat, f.targetLon)
 			: null,
 	});
+
+	// Every recompute re-arms the watchdog: geometry is only allowed to stay on
+	// screen while frames keep proving it current.
+	armIdleTimer();
 }
 
 /** Wire the recompute to its inputs. Returns an unsubscribe. */
 export function startDerived(): () => void {
-	const offs = [$hudFrame.listen(recomputeDerived), $vehicleFence.listen(recomputeDerived)];
-	return () => offs.forEach((o) => o());
+	const offs = [
+		$hudFrame.listen(recomputeDerived),
+		$vehicleFence.listen(recomputeDerived),
+		// The link going anything but `alive` drops the geometry immediately,
+		// without waiting for the watchdog. The socket's own close path calls
+		// resetDerived too (services/telemetry.ts), because this subscription only
+		// exists while the HUD is mounted; both are cheap and either alone is
+		// enough, which is the point.
+		$linkState.listen((state) => { if (state !== "alive") resetDerived(); }),
+	];
+	return () => { offs.forEach((o) => o()); clearIdleTimer(); };
 }

@@ -20,7 +20,8 @@ import type {
 	ServerMessage,
 	TelemetryFrame,
 } from "@/types/app";
-import { pushFrame } from "@/stores/aircraft.store";
+import { pushFrame, markLinkDiscontinuity } from "@/stores/aircraft.store";
+import { resetDerived } from "@/stores/derived.store";
 import { $viewerStore } from "@/stores/cesium.store";
 import { $linkState, $commander } from "@/stores/link.store";
 import { $commandToken, $tokenRequired } from "@/stores/token.store";
@@ -287,6 +288,20 @@ export class TelemetryClient {
 			// history on screen — wiping them on every WiFi blip was disorienting.
 			$linkState.set("lost");
 			$commander.set(null); // authority is unknown again until we re-claim
+			// The last frame, trail and history stay on screen (see above), but
+			// nothing may pretend the gap did not happen:
+			//
+			//  - the flown/commanded paths and the sparklines must BREAK here. No
+			//    `connected:false` frame is coming to trip the rising edge in
+			//    aircraft.store, so the gap is marked explicitly; without it the
+			//    path chorded straight across the outage.
+			//  - derived geometry (AGL, wind, fence proximity, target distance)
+			//    must GO. It is computed per frame and no frame will arrive to
+			//    clear it, and unlike the raw cells it is not even dimmed when
+			//    cold — a frozen clearance number read as current is the same lie
+			//    as a frozen position reported alive.
+			markLinkDiscontinuity();
+			resetDerived();
 			this.failAllPending("link closed");
 			this.scheduleReconnect();
 		};

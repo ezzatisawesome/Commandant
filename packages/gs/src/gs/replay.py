@@ -32,6 +32,13 @@ STAMP_BYTES = 8
 # Long gaps are compressed rather than waited out: a log with the vehicle
 # powered off for ten minutes should not make the operator sit through it.
 MAX_GAP_S = 2.0
+# MAVLink 2 may append a 13-byte signature block, flagged in incompat_flags.
+# The framing arithmetic here omitted it, so every signed frame left the reader
+# 13 bytes short and it resynced a byte at a time: MEASURED, a 20-frame signed
+# log replayed as 0 records, and one signed frame in an otherwise unsigned log
+# lost exactly that record. pymavlink's own walker adds the same term.
+MAVLINK_IFLAG_SIGNED = 0x01
+MAVLINK_SIGNATURE_BLOCK_LEN = 13
 
 
 class _NullConn:
@@ -56,18 +63,23 @@ def _mav_records(path: Path) -> Iterator[tuple[int, Any]]:
     conn = mavutil.mavlink_connection(str(path))
     with open(path, "rb") as fh:
         while True:
-            head = fh.read(STAMP_BYTES + 2)         # stamp + magic + len
-            if len(head) < STAMP_BYTES + 2:
+            # stamp + magic + len + the third frame byte, which on MAVLink 2
+            # is incompat_flags and says whether a signature block follows.
+            head = fh.read(STAMP_BYTES + 3)
+            if len(head) < STAMP_BYTES + 3:
                 return
             stamp = struct.unpack(">Q", head[:STAMP_BYTES])[0]
             magic, length = head[STAMP_BYTES], head[STAMP_BYTES + 1]
+            incompat = head[STAMP_BYTES + 2]
             if magic == 0xFD:
-                rest = 12 + length - 2
+                rest = 12 + length - 3
+                if incompat & MAVLINK_IFLAG_SIGNED:
+                    rest += MAVLINK_SIGNATURE_BLOCK_LEN
             elif magic == 0xFE:
-                rest = 8 + length - 2
+                rest = 8 + length - 3
             else:
                 # A damaged record (a log cut off mid-write): resync by one byte.
-                fh.seek(-(STAMP_BYTES + 1), 1)
+                fh.seek(-(STAMP_BYTES + 2), 1)
                 continue
             body = fh.read(rest)
             if len(body) < rest:
@@ -92,14 +104,21 @@ def _mav_records(path: Path) -> Iterator[tuple[int, Any]]:
 def _json_records(path: Path) -> Iterator[tuple[int, dict]]:
     if not path.exists():
         return
-    for line in path.read_text(errors="replace").splitlines():
-        try:
-            rec = json.loads(line)
-        except Exception:
-            continue
-        frame = rec.get("frame")
-        if isinstance(frame, dict) and isinstance(rec.get("tUs"), int):
-            yield rec["tUs"], frame
+    # Streamed, like the tlog half. read_text().splitlines() held the whole
+    # file twice over -- the str and the list of lines both live at once --
+    # and records() primes the merge with next(js), so the cost landed before
+    # the first record: MEASURED, a 65 MB sidecar left 229.9 MB resident at the
+    # first yield. On a 1 GB Pi that is the OOM path, and it grows with the
+    # length of the flight.
+    with open(path, "r", errors="replace") as fh:
+        for line in fh:
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            frame = rec.get("frame")
+            if isinstance(frame, dict) and isinstance(rec.get("tUs"), int):
+                yield rec["tUs"], frame
 
 
 def records(tlog: Path) -> Iterator[tuple[int, str, Any]]:
@@ -137,6 +156,14 @@ def replay(bridge: Any, tlog: str | Path, speed: float = 1.0,
         prev = None
         n = 0
         first = last = None
+        # A deadline, not a per-record sleep. Sleeping the gap is open loop:
+        # every sleep overshoots by the scheduler's granularity and nothing
+        # claws it back, so the error grows with the record count and --speed
+        # stops meaning anything. MEASURED on a 2000-record log spanning 2.00 s:
+        # 2.64 s of wall time at 1x (+32%), and 0.10 s at 100x against the
+        # 0.02 s it asked for -- 5x slow. Carrying a target forward absorbs
+        # each overshoot into the next wait instead of accumulating it.
+        target = time.monotonic()
         for stamp, kind, payload in records(path):
             n += 1
             first = first if first is not None else stamp
@@ -144,7 +171,15 @@ def replay(bridge: Any, tlog: str | Path, speed: float = 1.0,
             gap = (stamp - prev) / 1e6 if prev is not None else 0.0
             prev = stamp
             if gap > 0:
-                time.sleep(min(gap, MAX_GAP_S) / max(speed, 0.01))
+                target += min(gap, MAX_GAP_S) / max(speed, 0.01)
+                delay = target - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
+                elif delay < -MAX_GAP_S:
+                    # Hopelessly behind (a slow handler, or a suspended hub):
+                    # re-anchor rather than sprinting through the rest of the
+                    # flight trying to make up time that is gone.
+                    target = time.monotonic()
             try:
                 if kind == "mav":
                     bridge._on_mav(conn, payload)

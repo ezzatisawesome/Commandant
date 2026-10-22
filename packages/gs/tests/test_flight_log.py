@@ -289,3 +289,47 @@ def test_pruning_takes_the_json_sidecars_with_the_tlogs(tmp_path):
     assert log.pruned > 0, "never pruned"
     assert total <= 6000 + 2000 + 600, f"{total} bytes over a 6000 cap"
     assert any(p.suffix == ".jsonl" for p in tmp_path.glob("commandant-*"))
+
+
+def test_the_json_sidecar_is_readable_while_gs_is_still_running(tmp_path):
+    """The sidecar was flushed only from _sync(), which returns at the top when
+    fsync is off, so with fsync_interval_s=0 -- documented as supported -- it
+    sat in its userspace buffer forever: MEASURED, 200 records written and the
+    .jsonl was 0 bytes on disk after 3 seconds. A kill -9, an OOM or a systemd
+    restart lost the whole thing, which is exactly what FLUSH_INTERVAL_S exists
+    to bound, and nothing could tail the file meanwhile."""
+    log = FlightLog(tmp_path, flush_interval_s=0.02, fsync_interval_s=0).start()
+    for i in range(200):
+        log.write_json(json.dumps({"genW": i}).encode())
+    for _ in range(200):               # a few flush intervals, no stop()
+        if log._q.empty():
+            break
+        time.sleep(0.01)
+    time.sleep(0.2)
+
+    lines = log.json_path.read_text().splitlines()
+    assert len(lines) >= 190, f"{len(lines)} of 200 records on disk before stop()"
+    assert json.loads(lines[0])["frame"]["genW"] == 0
+    log.stop()
+
+
+def test_a_flightdyn_only_flight_still_rotates_and_prunes(tmp_path):
+    """The size check ran only in the tlog branch and the json branch returned
+    before it, so on a flightdyn-only rig -- where write_json's docstring says
+    the sidecar "carries the whole flight" -- the tlog position stayed 0, which
+    meant no rotation and (since _prune only runs from _open_file) no pruning
+    at all. MEASURED with max_file_bytes=4096: 0 rotations and a 270,890-byte
+    sidecar, 66x over its cap, heading for the full card the cap exists to
+    prevent."""
+    log = FlightLog(tmp_path, max_file_bytes=4096, max_total_bytes=12_000,
+                    flush_interval_s=0.01, fsync_interval_s=0).start()
+    for i in range(1500):
+        log.write_json(json.dumps({"genW": i, "windN": 2.0}).encode())
+    _drain(log)
+
+    assert log.rotations > 1, "a json-only flight never rotated"
+    for p in tmp_path.glob("commandant-*.jsonl"):
+        assert p.stat().st_size <= 4096 + 200, f"{p.name} is {p.stat().st_size} bytes"
+    assert log.pruned > 0, "a json-only flight never pruned"
+    total = sum(p.stat().st_size for p in tmp_path.glob("commandant-*"))
+    assert total <= 12_000 + 4096 + 600, f"{total} bytes over a 12000 cap"

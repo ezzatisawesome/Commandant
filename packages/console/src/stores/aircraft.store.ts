@@ -157,6 +157,27 @@ export const $historyStore = atom<TelemetryFrame[]>([]);
 // to where the previous run left off.
 let wasConnected = false;
 
+/** Mark a break in the flown path, the commanded path and the sparkline
+ *  history: the next connected frame starts a fresh run rather than joining on
+ *  to the last one.
+ *
+ *  The rising edge above is the only thing that breaks the trail, and it needs a
+ *  frame that says `connected:false` to fall first. A console<->gs SOCKET drop
+ *  never produces one — no frames arrive at all — so `wasConnected` stayed true
+ *  across the gap, the edge never fired on reconnect, and the aircraft's path
+ *  was drawn straight from where it was when the WiFi died to where it had got
+ *  to when the WiFi came back: up to two minutes of flight at 15 m/s shown as a
+ *  line it never flew (anything under TRAIL_JUMP_M chords rather than splitting,
+ *  by design, because that is how a single glitch frame is absorbed). The
+ *  sparklines spliced the two sides into one continuous series the same way.
+ *
+ *  Called from the socket's close path in services/telemetry.ts, beside the
+ *  mission and param invalidation in `onopen` that was always careful about this
+ *  edge and deliberately left the trail to the logic here. */
+export function markLinkDiscontinuity(): void {
+	wasConnected = false;
+}
+
 /** Set only if it would change anything. nanostores compares by reference, so
  *  assigning a fresh `[]` to an already-empty store still notifies every
  *  subscriber and still makes Cesium re-upload an empty vertex buffer. */

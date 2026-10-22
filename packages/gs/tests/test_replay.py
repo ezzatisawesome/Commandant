@@ -149,3 +149,122 @@ def test_replay_starts_streaming_rather_than_reading_the_whole_file_first(tmp_pa
     it = records(path)
     first = next(it)
     assert first[1] in ("mav", "json")
+
+
+class _FakeBridge:
+    """Just enough bridge for the clock and the reader: replay() only calls
+    these two, and a real one would time its own decode into the measurement."""
+
+    def __init__(self) -> None:
+        self.handler_errors = 0
+        self.seen = 0
+
+    def _on_mav(self, conn, msg):
+        self.seen += 1
+
+    def _apply_json(self, frame):
+        self.seen += 1
+
+
+def _signing_mav():
+    mav = m.MAVLink(None, srcSystem=1, srcComponent=1)
+    mav.signing.secret_key = bytes(range(32))
+    mav.signing.link_id = 0
+    mav.signing.timestamp = 1
+    mav.signing.sign_outgoing = True
+    return mav
+
+
+def test_a_signed_mavlink2_log_replays(tmp_path):
+    """The framing arithmetic had no term for the 13-byte signature block, so
+    every signed frame left the reader 13 bytes short and it resynced a byte at
+    a time: a 20-frame signed log replayed as 0 records. A signed link is a
+    configuration option on the vehicle, not an exotic one."""
+    from gs.replay import _mav_records
+    path = tmp_path / "signed.tlog"
+    mav = _signing_mav()
+    with open(path, "wb") as fh:
+        for i in range(20):
+            frame = m.MAVLink_heartbeat_message(
+                m.MAV_TYPE_FIXED_WING, m.MAV_AUTOPILOT_PX4, 0, 0, 0, 3).pack(mav)
+            assert frame[2] & 0x01, "the fixture is not actually signed"
+            fh.write(struct.pack(">Q", 1_000_000 + i * 1000) + frame)
+
+    recs = list(_mav_records(path))
+    assert len(recs) == 20, f"read {len(recs)} of 20 signed frames"
+    assert all(r[1].get_type() == "HEARTBEAT" for r in recs)
+
+
+def test_one_signed_frame_does_not_cost_its_own_record(tmp_path):
+    """Mixed is the realistic case -- signing turned on mid-session, or one
+    component signing. The short read used to eat exactly that record."""
+    from gs.replay import _mav_records
+    path = tmp_path / "mixed.tlog"
+    plain, signed = m.MAVLink(None, srcSystem=1, srcComponent=1), _signing_mav()
+    with open(path, "wb") as fh:
+        for i, mav in enumerate((plain, signed, plain)):
+            msg = m.MAVLink_global_position_int_message(
+                1000 + i * 100, int(37.4e7), int(-122.1e7),
+                100_000, 50_000, 0, 0, 0, 18_000)
+            fh.write(struct.pack(">Q", 1_000_000 + i * 1000) + msg.pack(mav))
+
+    boots = [r[1].time_boot_ms for r in _mav_records(path)]
+    assert boots == [1000, 1100, 1200], boots
+
+
+def test_the_sidecar_is_streamed_not_slurped(tmp_path):
+    """read_text().splitlines() held the file twice over, and records() primes
+    the merge with next(js), so the whole cost landed before the first record:
+    a 65 MB sidecar left 229.9 MB resident at the first yield, which on a 1 GB
+    Pi is the OOM path. The generator must never materialise the file."""
+    import tracemalloc
+    from gs import replay as rp
+
+    big = tmp_path / "big.jsonl"
+    with open(big, "w") as fh:
+        for i in range(60_000):
+            fh.write(json.dumps({"tUs": 1_000_000 + i, "frame": {"genW": i}}) + "\n")
+    size = big.stat().st_size
+    assert size > 2_000_000, size
+
+    def no_slurp(self, *a, **k):
+        raise AssertionError("the sidecar was read whole")
+
+    orig = Path.read_text
+    Path.read_text = no_slurp
+    try:
+        tracemalloc.start()
+        it = rp._json_records(big)
+        assert next(it)[0] == 1_000_000
+        peak = tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+        assert sum(1 for _ in it) == 59_999, "records were lost while streaming"
+    finally:
+        Path.read_text = orig
+    assert peak < size // 4, f"{peak} bytes held for a {size}-byte sidecar"
+
+
+def test_speed_is_honoured_rather_than_drifted_past(tmp_path):
+    """The clock was open loop: it slept each gap and nothing clawed back the
+    overshoot, so the error grew with the record count. MEASURED on a
+    2000-record log spanning 2.00 s: 2.64 s at 1x (+32%) and 0.10 s at 100x
+    against the 0.02 s asked for, 5x slow. A deadline absorbs each overshoot
+    into the next wait."""
+    import time as _time
+    path = tmp_path / "fast.tlog"
+    mav = m.MAVLink(None, srcSystem=1, srcComponent=1)
+    frame = m.MAVLink_heartbeat_message(
+        m.MAV_TYPE_FIXED_WING, m.MAV_AUTOPILOT_PX4, 0, 0, 0, 3).pack(mav)
+    n = 4000
+    with open(path, "wb") as fh:
+        for i in range(n):            # 1 ms apart: 4.00 s of recorded flight
+            fh.write(struct.pack(">Q", 1_000_000 + i * 1000) + frame)
+
+    b = _FakeBridge()
+    t0 = _time.monotonic()
+    replay(b, path, speed=200.0)      # 4.00 s of flight asks for 0.02 s
+    elapsed = _time.monotonic() - t0
+    assert b.seen == n, b.seen
+    # Open loop spent ~0.24 s here: 4000 sleeps of 5 us, each costing the
+    # scheduler's ~60 us minimum and none of it ever recovered.
+    assert elapsed < 0.12, f"{elapsed:.3f}s for 0.02s of replay at 200x"

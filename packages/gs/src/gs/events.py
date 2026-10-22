@@ -99,6 +99,17 @@ class EventDecoder:
         msgid = frame[7] | (frame[8] << 8) | (frame[9] << 16)
         if msgid != EVENT_MSG_ID:
             return None
+        if frame[1] > _PAYLOAD_LEN:
+            # A length field above the 53-byte cap used to reach
+            # bytes(_PAYLOAD_LEN - len(payload)) and raise "ValueError:
+            # negative count" -- CONFIRMED with a length field of 60. It is
+            # reachable, not theoretical: msgid 410 is absent from this
+            # pymavlink's mavlink_map, so EVENTs arrive as unknown messages,
+            # and an unknown msgid gets no CRC validation. One corrupted radio
+            # frame, or one damaged record in a recovered log, carries an
+            # arbitrary length byte straight in here. An EVENT cannot be longer
+            # than its payload, so this is not an EVENT we can read.
+            return None
         payload = frame[_FRAME_HEADER_LEN:_FRAME_HEADER_LEN + frame[1]]
         payload = payload + bytes(_PAYLOAD_LEN - len(payload))   # un-truncate
         eid, _t, _seq, _dc, _ds, levels = _HEADER.unpack_from(payload, 0)
@@ -107,7 +118,13 @@ class EventDecoder:
     def decode(self, frame: bytes) -> dict[str, Any] | None:
         """A statustext-shaped dict for a person, or None if the frame is not an
         EVENT, is machine-only, or (with `unknown` counted) has no metadata."""
-        parsed = self.from_frame(frame)
+        # Inside the guard with the parse: decode() is called unguarded from
+        # the bridge's receive loop, so anything from_frame can raise on a
+        # malformed frame would take the link thread down with it.
+        try:
+            parsed = self.from_frame(frame)
+        except (struct.error, ValueError, IndexError):
+            return None
         if parsed is None:
             return None
         eid, level, args = parsed

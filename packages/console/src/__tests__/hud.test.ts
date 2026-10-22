@@ -3,7 +3,7 @@ import { describe, it, expect } from "vitest";
 import {
 	wrap180, wrap360, headingTicks, tapeTicks,
 	ballPitchMarks, BALL_BANK_TICKS, bankMajor, rollLabel, pitchLabel,
-	quantize, HUD_STEP,
+	quantize, HUD_STEP, hudGating, altSub, HUD_GROUP_STALE_MS,
 } from "@/lib/hud";
 import { FIELD_CATALOG } from "@/stores/displayConfig.store";
 import { GROUP_STALE_MS, groupAgeMs, isNum } from "@/lib/flightGeometry";
@@ -349,5 +349,83 @@ describe("the attitude ball blanks when ATTITUDE stops, not only when the link d
 
 	it("draws normally when the daemon reports no ages (an older gs)", () => {
 		expect(ballBlanked("alive", true, undefined)).toBe(false);
+	});
+});
+
+describe("what the instruments are allowed to show", () => {
+	// `dead` used to be one boolean — link down OR vehicle leg down OR the
+	// ATTITUDE stream gone cold — and every instrument blanked on it. The third
+	// is a different situation from the first two: it is the window after a
+	// vehicle reboot where gs must re-request the extra streams, ATTITUDE has not
+	// come back, and GLOBAL_POSITION_INT and VFR_HUD are arriving at full rate.
+	// Altitude and airspeed are valid there, and they are the two numbers an
+	// operator most needs when the aircraft has just rebooted mid-flight.
+	const alive = { linkState: "alive", connected: true };
+
+	it("blanks nothing while the link is alive and every stream is current", () => {
+		const g = hudGating(alive.linkState, alive.connected, 120);
+		expect(g.noTelemetry).toBe(false);
+		expect(g.attitudeCold).toBe(false);
+		expect(g.attitudeDead).toBe(false);
+	});
+
+	it("blanks attitude ONLY when the gyro goes quiet with the link up", () => {
+		const g = hudGating(alive.linkState, alive.connected, HUD_GROUP_STALE_MS * 20);
+		expect(g.attitudeCold).toBe(true);
+		expect(g.attitudeDead).toBe(true);
+		// The whole point: altitude and airspeed keep reading.
+		expect(g.noTelemetry).toBe(false);
+	});
+
+	it("blanks everything when nothing is arriving", () => {
+		for (const g of [
+			hudGating("lost", true, 100),
+			hudGating("stale", true, 100),
+			hudGating("connecting", true, 100),
+			hudGating("alive", false, 100),
+			hudGating("alive", undefined, 100),
+		]) {
+			expect(g.noTelemetry).toBe(true);
+			expect(g.attitudeDead).toBe(true);
+		}
+	});
+
+	it("uses the same staleness threshold as every other cold-stream readout", () => {
+		// Two names for one number: lib/hud.ts is import-free on purpose. If they
+		// ever diverge the HUD and the telemetry strip disagree about whether a
+		// stream has stopped, which is the sort of thing nobody notices until a
+		// screenshot of two readouts contradicts itself.
+		expect(HUD_GROUP_STALE_MS).toBe(GROUP_STALE_MS);
+	});
+
+	it("says nothing about attitude when the daemon reports no ages", () => {
+		// An older gs, or a group never seen. Absent is not stale.
+		expect(hudGating("alive", true, null).attitudeCold).toBe(false);
+		expect(hudGating("alive", true, undefined).attitudeCold).toBe(false);
+	});
+
+	it("puts the attitude boundary exactly at the stale threshold", () => {
+		expect(hudGating("alive", true, HUD_GROUP_STALE_MS).attitudeCold).toBe(false);
+		expect(hudGating("alive", true, HUD_GROUP_STALE_MS + 1).attitudeCold).toBe(true);
+	});
+});
+
+describe("the above-ground caption under the altitude tape", () => {
+	// Tape renders `sub` unconditionally — it never looks at `value`. So on a
+	// link loss the operator saw MSL as "---" with a confident, colour-coded
+	// clearance figure directly beneath it, from before the outage, which (the
+	// derived store having no clearing path on a socket drop) would never change
+	// and never go away.
+	it("is drawn with a figure while telemetry is arriving", () => {
+		expect(altSub(false, 122.4)).toBe("122 AGL");
+	});
+
+	it("is not drawn at all when nothing is arriving", () => {
+		expect(altSub(true, 122.4)).toBeUndefined();
+	});
+
+	it("is not drawn before terrain is known, link or no link", () => {
+		expect(altSub(false, null)).toBeUndefined();
+		expect(altSub(true, null)).toBeUndefined();
 	});
 });

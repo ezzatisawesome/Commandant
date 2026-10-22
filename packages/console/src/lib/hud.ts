@@ -310,3 +310,56 @@ export function pitchLabel(pitchDeg: number | null): string {
 	const p = Math.round(pitchDeg);
 	return `${p > 0 ? "+" : ""}${p}\u00b0`;
 }
+
+// --- what the instruments are allowed to show --------------------------------
+//
+// This was one boolean in Hud.tsx, `dead`, and the whole bug was in the word:
+// it meant "the link is down OR the vehicle leg is down OR the attitude stream
+// has gone cold", and then blanked every instrument on it. The first two are
+// "nothing on screen is current". The third is not: it is the post-reboot window
+// HealthStrip.tsx describes, where gs must re-request the extra streams and
+// ATTITUDE is the one that has not come back — while GLOBAL_POSITION_INT and
+// VFR_HUD keep arriving at full rate. Altitude and airspeed are valid in that
+// window and were being hidden, which removes the two numbers an operator most
+// needs when the aircraft has just rebooted mid-flight.
+//
+// Pure and here rather than inline in the component, because it is a decision
+// about what the operator is shown and what they are not, which is exactly the
+// kind of thing that must be assertable.
+
+/** Degrees of staleness: how old a message group may be before its readouts
+ *  stop counting as live. Mirrors GROUP_STALE_MS in lib/flightGeometry. */
+export const HUD_GROUP_STALE_MS = 5000;
+
+export interface HudGating {
+	/** Nothing is arriving: every instrument blanks. */
+	noTelemetry: boolean;
+	/** ATTITUDE specifically has stopped, whatever the link is doing. */
+	attitudeCold: boolean;
+	/** The attitude ball (and yaw-derived heading) cannot be trusted. */
+	attitudeDead: boolean;
+}
+
+export function hudGating(
+	linkState: string, connected: boolean | undefined,
+	attitudeAgeMs: number | null | undefined,
+): HudGating {
+	const noTelemetry = linkState !== "alive" || connected !== true;
+	const attitudeCold = typeof attitudeAgeMs === "number"
+		&& Number.isFinite(attitudeAgeMs) && attitudeAgeMs > HUD_GROUP_STALE_MS;
+	return { noTelemetry, attitudeCold, attitudeDead: noTelemetry || attitudeCold };
+}
+
+/** The AGL caption under the altitude tape, or `undefined` to draw nothing.
+ *
+ *  Gated on the same condition as the tape's own value, because `Tape` renders
+ *  `sub` unconditionally — it does not consult `value`. Ungated, a link loss
+ *  showed the MSL readout as "---" with a confident red clearance figure
+ *  directly beneath it, from before the outage, which would never change and
+ *  never go away. Dashes next to a colour-coded number read as "altitude
+ *  unknown, terrain clearance critical", which is a sentence the console had no
+ *  basis to say. */
+export function altSub(noTelemetry: boolean, aglM: number | null): string | undefined {
+	if (noTelemetry || aglM === null) return undefined;
+	return `${aglM.toFixed(0)} AGL`;
+}

@@ -25,7 +25,9 @@ class FakeWS {
 (globalThis as { WebSocket?: unknown }).WebSocket = FakeWS;
 
 import { TelemetryClient } from "@/services/telemetry";
-import { $aircraftStore, $trailStore, pushFrame } from "@/stores/aircraft.store";
+import { $aircraftStore, $trailStore, $historyStore, pushFrame } from "@/stores/aircraft.store";
+import { $derived, EMPTY_DERIVED } from "@/stores/derived.store";
+import { Cartesian3 } from "cesium";
 import { $linkState, $commander } from "@/stores/link.store";
 import { $params, $paramsStale } from "@/stores/params.store";
 import { $missionCurrent, $missionProgress, $missionReached, $missionItems, setMissionItems, $planRead, clearPlanRead, $vehicleMission, setVehicleMission, missionMatchesVehicle } from "@/stores/mission.store";
@@ -37,6 +39,7 @@ beforeEach(() => {
 	FakeWS.instances = [];
 	FakeWS.throwOnConstruct = false;
 	$aircraftStore.set(null); $trailStore.set([]); $params.set({});
+	$historyStore.set([]); $derived.set(EMPTY_DERIVED);
 	$missionCurrent.set(null); $missionReached.set(null); $missionProgress.set(null);
 	clearStatus(); clearPlanRead(); setVehicleMission(null); setMissionItems([]);
 	client = new TelemetryClient("ws://test:8790");
@@ -452,5 +455,57 @@ describe("the console records what the vehicle holds, separately from the draft"
 		vi.advanceTimersByTime(5000);
 		ws().open();
 		expect($vehicleMission.get()).toBeNull();
+	});
+});
+
+describe("a socket drop is a gap, and the gap must show", () => {
+	// onopen was always careful about this edge — it invalidates the mission, the
+	// param table and the plan panes — and deliberately left the trail and the
+	// derived geometry to the stores. Both of those clear on a frame that says
+	// `connected:false`, and a console<->gs socket drop produces no frames at
+	// all. So the rising edge never fired on reconnect: the flown path chorded
+	// straight from where the aircraft was when the WiFi died to where it had got
+	// to when the WiFi came back (anything under TRAIL_JUMP_M joins rather than
+	// splitting, by design), the sparklines spliced the two sides into one
+	// continuous series, and AGL/wind/fence/target distance stayed on screen as
+	// current for the whole outage without even being dimmed.
+	const frame = (over: Record<string, unknown> = {}) => ({
+		type: "telemetry", t: 1, connected: true, linkState: "alive",
+		lat: 37.4, lon: -122.1, alt: 100, ...over,
+	});
+
+	it("breaks the trail and the history on the next connected frame", () => {
+		client.connect(); ws().open();
+		ws().recv(frame());
+		const preGap = new Cartesian3(1, 2, 3);
+		$trailStore.set([preGap]);
+		$historyStore.set([{ t: 1, connected: true } as never]);
+
+		ws().close();                       // no `connected:false` frame follows
+		vi.advanceTimersByTime(5000);
+		ws().open();
+		ws().recv(frame({ t: 2 }));
+
+		// The post-gap fix may seed a fresh path, but nothing from before the gap
+		// survives to be chorded to.
+		expect($trailStore.get()).not.toContain(preGap);
+		expect($historyStore.get().some((h) => h.t === 1)).toBe(false);
+	});
+
+	it("does not break the trail while frames keep flowing", () => {
+		client.connect(); ws().open();
+		ws().recv(frame());
+		const pts = [new Cartesian3(1, 2, 3)];
+		$trailStore.set(pts);
+		ws().recv(frame({ t: 2 }));
+		expect($trailStore.get()).toBe(pts);
+	});
+
+	it("drops derived geometry on the close, without waiting for a frame", () => {
+		client.connect(); ws().open();
+		ws().recv(frame());
+		$derived.set({ ...EMPTY_DERIVED, aglM: 122, clearance: "ok" });
+		ws().close();
+		expect($derived.get()).toEqual(EMPTY_DERIVED);
 	});
 });

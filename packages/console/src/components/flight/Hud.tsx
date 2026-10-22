@@ -10,7 +10,7 @@ import { isNum, GROUP_STALE_MS, groupAgeMs } from "@/lib/flightGeometry";
 import {
 	headingTicks, tapeTicks, wrap360, ballPitchMarks, BALL_BANK_TICKS,
 	bankMajor, rollLabel, pitchLabel, quantize, HUD_STEP,
-	ballCentre, BALL_LABEL_DROP,
+	ballCentre, BALL_LABEL_DROP, hudGating, altSub,
 } from "@/lib/hud";
 
 // Flight instruments drawn over the globe: airspeed and altitude tapes down the
@@ -114,17 +114,39 @@ export default function Hud() {
 	// detectable.
 	const attitudeAge = groupAgeMs(f?.ages, "attitude");
 	const attitudeCold = isNum(attitudeAge) && attitudeAge > GROUP_STALE_MS;
-	const dead = linkState !== "alive" || !f?.connected || attitudeCold;
+	// Two different kinds of dead, and conflating them cost the operator the two
+	// readouts they need most.
+	//
+	// `noTelemetry` is "nothing is arriving": link down, or a frame that says the
+	// vehicle leg is down. Nothing on the HUD is current, so everything blanks.
+	//
+	// `attitudeDead` is that PLUS "the gyro went quiet while everything else kept
+	// flowing" — exactly the post-reboot window HealthStrip.tsx describes, where
+	// gs has to re-request the extra streams and ATTITUDE is the one that has not
+	// come back yet. GLOBAL_POSITION_INT and VFR_HUD are arriving; altitude,
+	// airspeed and the GPS course are CURRENT AND VALID. Blanking them because
+	// the attitude stream stopped removed the numbers that matter most in that
+	// window, and left only the above-ground figure, which was ungated and
+	// frozen — the exact inverse of correct. So attitude coldness blanks
+	// attitude, and nothing else. Both live in lib/hud.ts, pure and tested, like
+	// every other decision this file draws rather than makes; `attitudeCold`
+	// stays local because the heading fallback below needs it on its own.
+	const { noTelemetry, attitudeDead } = hudGating(linkState, f?.connected, attitudeAge);
 	const rollDeg = quantize(isNum(f?.roll) ? (f!.roll * 180) / Math.PI : null,
 		HUD_STEP.attitudeDeg);
 	const pitchDeg = quantize(isNum(f?.pitch) ? (f!.pitch * 180) / Math.PI : null,
 		HUD_STEP.attitudeDeg);
+	// Yaw is part of the attitude solution, so a cold ATTITUDE stream makes it as
+	// old as the ball. The heading tape falls back to the GPS-derived `heading`
+	// (course over ground, which is not the same thing, but is live and is the
+	// direction the aircraft is actually going) and blanks only if that is
+	// missing too — rather than blanking while a usable bearing is on the wire.
 	const headingDeg = quantize(
-		isNum(f?.yaw) ? wrap360((f!.yaw * 180) / Math.PI)
+		(!attitudeCold && isNum(f?.yaw)) ? wrap360((f!.yaw * 180) / Math.PI)
 			: (isNum(f?.heading) ? wrap360(f!.heading) : null),
 		HUD_STEP.headingDeg);
 
-	const attitudeKnown = rollDeg !== null && pitchDeg !== null && !dead;
+	const attitudeKnown = rollDeg !== null && pitchDeg !== null && !attitudeDead;
 
 	// Airspeed where the vehicle reports it, groundspeed otherwise. Labelled so
 	// the two are never confused: on a solar aircraft in wind they differ a lot.
@@ -137,11 +159,11 @@ export default function Hud() {
 	return (
 		<div ref={host} className="pointer-events-none fixed inset-0 z-30">
 			<svg width={w} height={h} className="block">
-				<HeadingTape cx={cx} deg={dead ? null : headingDeg} />
+				<HeadingTape cx={cx} deg={noTelemetry ? null : headingDeg} />
 
 				{/* ---- airspeed tape, left ---- */}
 				<Tape
-					x={64} cy={cy} value={dead ? null : speed} spec={SPEED_TAPE}
+					x={64} cy={cy} value={noTelemetry ? null : speed} spec={SPEED_TAPE}
 					side="left" digits={1}
 					caption={speedIsAir ? "m/s IAS" : "m/s GS"}
 				/>
@@ -151,13 +173,24 @@ export default function Hud() {
 				    right edge at the vertical centre, which is exactly this tape's
 				    height band. */}
 				<Tape
-					x={w - 112} cy={cy} value={dead ? null : alt} spec={ALT_TAPE}
+					x={w - 112} cy={cy} value={noTelemetry ? null : alt} spec={ALT_TAPE}
 					side="right" digits={0}
 					caption="m MSL"
 					// AGL under the altitude tape: the number that decides whether the
 					// aircraft clears the hill, which MSL alone does not answer.
-					sub={aglM !== null ? `${aglM.toFixed(0)} AGL` : undefined}
-					subTone={d.clearance === "critical" ? "rgba(255,110,110,0.95)"
+					//
+					// Gated on the SAME condition as the tape's own value, because
+					// `Tape` draws `sub` unconditionally — it does not care that
+					// `value` is null. Ungated, a link loss showed MSL as dashes with
+					// a confident red clearance figure directly underneath it, which
+					// is the one combination worse than either alone: the operator
+					// reads the colour, and the number it is colouring is from before
+					// the outage and will never change again.
+					sub={altSub(noTelemetry, aglM)}
+					// One gate for both: a tone without the number it colours is
+					// meaningless, and the number without its tone is misleading.
+					subTone={altSub(noTelemetry, aglM) === undefined ? undefined
+						: d.clearance === "critical" ? "rgba(255,110,110,0.95)"
 						: d.clearance === "low" ? "rgba(255,190,110,0.95)" : STROKE_UNIT}
 				/>
 				{/* ---- attitude ball, top right ---- */}

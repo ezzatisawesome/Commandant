@@ -320,7 +320,7 @@ console → gs:
 ```json
 { "type": "mission_push", "id": "<uuid>", "items": [ ... ] }
 { "type": "mission_pull" }
-{ "type": "mission_set_current", "seq": 3 }
+{ "type": "mission_set_current", "id": "<uuid>", "seq": 3 }
 ```
 gs → console:
 ```json
@@ -329,6 +329,7 @@ gs → console:
 { "type": "mission_ack", "id": "<uuid>", "ok": true, "result": 0, "text": "accepted" }
 { "type": "mission_current", "seq": 2 }
 { "type": "mission_reached", "seq": 1 }
+{ "type": "mission_current_ack", "id": "<uuid>", "ok": true, "result": 0, "text": "asked for waypoint 3" }
 ```
 
 gs behavior (hand-rolled, on the mav thread; **the most error-prone protocol —
@@ -339,6 +340,25 @@ heaviest test coverage**):
   collect `MISSION_ITEM_INT` → `MISSION_ACK` → emit `mission`.
 - Ingest `MISSION_CURRENT` → `mission_current`, `MISSION_ITEM_REACHED` →
   `mission_reached`. `mission_set_current` → `MISSION_SET_CURRENT`.
+- **`mission_set_current` is commander-gated and now answers**, with
+  `mission_current_ack`. It used to drop a non-commander's request in silence --
+  the only privileged handler that did not refuse explicitly -- and a `seq` that
+  would not pack as uint16 was logged on the hub with nothing sent back. PX4
+  replies to the message itself with `MISSION_CURRENT` rather than an ack, so
+  `ok: true` means gs put it on the wire, and `mission_current` is the
+  confirmation that the aircraft acted on it.
+- **A pull is rate-limited for non-commanders** (`PLAN_PULL_COOLDOWN_MS`, 10 s),
+  on all three planes. Pulls are open to any client because the result is
+  broadcast to all, but they share gs's single mission slot: a client looping
+  them held it continuously and the operator's own geofence upload came back
+  `busy` for as long as that lasted. The commander is exempt, as with the
+  parameter walk.
+- **Item coordinates are validated.** `lat`/`lon` are required for `waypoint`,
+  the `loiter_*` kinds, fence vertices/circles and `rally`, and must be finite
+  and in range; `takeoff` and `land` may omit them (PX4's "here" convention) and
+  `rtl` carries no position at all. `takeoff` requires `alt` above 0, as the
+  single-command form already did. A missing coordinate used to become 0/0
+  silently, so a fence or a rally point could be uploaded at the null island.
 - `result` is the MAV_MISSION_RESULT code (0 = ACCEPTED).
 
 ### Geofence + rally (Phase 4 extension)
