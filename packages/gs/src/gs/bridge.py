@@ -286,8 +286,7 @@ _NAN = float("nan")
 def open_connection(endpoint: str, baud: int = DEFAULT_SERIAL_BAUD) -> Any:
     """Open a MAVLink link across any transport. udpin/udpout/udp/tcp pass
     straight to pymavlink; a `serial:<device>[:<baud>]` endpoint (or a bare device
-    path) opens a serial port — this is the plane↔hub radio leg on the Raspberry
-    Pi. One seam so the rest of the daemon is transport-agnostic."""
+    path) opens a serial port — this is the plane↔hub radio leg. One seam so the rest of the daemon is transport-agnostic."""
     if endpoint.startswith("serial:"):
         parts = endpoint.split(":")
         device = parts[1]
@@ -327,6 +326,10 @@ SERIAL_CANDIDATES = (
     # A telemetry radio: the hub's link to an airborne aircraft.
     ("/dev/tty.usbserial*", DEFAULT_SERIAL_BAUD),
     ("/dev/ttyUSB*", DEFAULT_SERIAL_BAUD),
+    # A radio wired to a Raspberry Pi's GPIO UART. Pi OS points this symlink at
+    # whichever UART is on the header; elsewhere it does not exist and costs
+    # nothing. Without it, `auto` would never find the Pi's typical field setup.
+    ("/dev/serial0", DEFAULT_SERIAL_BAUD),
 )
 NET_CANDIDATES = (
     "udpin:0.0.0.0:14550",   # PX4's GCS target (SITL, HITL, and mavlink-router)

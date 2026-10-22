@@ -1,7 +1,7 @@
 [Unit]
 # Commandant console — the web app served on :80 so http://commandant.local/ opens
 # straight in any browser with no port to type. Talks to gs over WS (host-relative,
-# so it reaches whichever host served the page = the Pi).
+# so it reaches whichever host served the page = the hub).
 Description=Commandant console (Next.js production server on :80)
 After=network-online.target
 Wants=network-online.target

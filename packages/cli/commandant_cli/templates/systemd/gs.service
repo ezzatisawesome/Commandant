@@ -2,8 +2,11 @@
 # Commandant ground-station daemon — owns the plane's radio link and serves
 # decoded telemetry (+ command channel) to the console over WebSocket :8790.
 Description=Commandant gs daemon (MAVLink radio link -> WebSocket)
-# Wait for the serial device and network to be up before starting.
-After=network-online.target dev-serial0.device
+# No ordering on the radio's device: its name depends on the machine and how
+# the radio is attached. A late radio is covered anyway -- `auto` re-probes
+# until it appears, and a pinned one that is missing is retried by
+# Restart=always below.
+After=network-online.target
 Wants=network-online.target
 
 # Restart=always means always. Without this it does not: systemd's default
@@ -21,8 +24,13 @@ Type=simple
 # Device/baud (and any override of the WS port) live here so the field radio can
 # change without editing this unit. See deploy/gs.env.example.
 EnvironmentFile=/etc/commandant/gs.env
-# The gs package is installed editable into its own venv on the Pi (provision.sh).
-# GS_MAVLINK is e.g. serial:/dev/serial0:57600 (telemetry radio) — pymavlink parses
+# Under systemd stdout is a pipe, so Python block-buffers it: gs's own lines
+# ("[gs] autodetect: ...") reached the journal only kilobytes later, and
+# `commandant logs` -- what you read when the page will not load -- showed
+# nothing from it. Seen on a real install.
+Environment=PYTHONUNBUFFERED=1
+# The gs package is installed editable into its own venv by `commandant install`.
+# GS_MAVLINK is `auto` or e.g. serial:/dev/ttyUSB0:57600 (telemetry radio) — pymavlink parses
 # serial:/tcp:/udpin: endpoints directly, so the plane link is just this string.
 ExecStart=/opt/commandant/packages/gs/.venv/bin/python -m gs --mavlink ${GS_MAVLINK} --ws-host 0.0.0.0 --ws-port ${GS_WS_PORT} --log-dir ${GS_LOG_DIR}
 # Creates /var/lib/commandant owned by the service user, so the flight log has

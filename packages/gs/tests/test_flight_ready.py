@@ -2406,3 +2406,18 @@ def test_h28_a_serial_link_says_it_cannot_tell_rather_than_guessing():
     said = [e["text"] for e in events
             if e.get("type") == "statustext" and "share sysid" in (e.get("text") or "")][0]
     assert "does not report peer addresses" in said, said
+
+
+def test_autodetect_finds_a_radio_on_the_pi_uart(monkeypatch):
+    """A radio wired to a Raspberry Pi's GPIO header is /dev/serial0, which no
+    USB pattern matches. The hub's radio default became `auto` when the
+    installer stopped assuming a Pi, so without this the commonest Pi field
+    setup would never be found. It is a real UART, so it must stay
+    rate-limited."""
+    present = {"/dev/serial0": ["/dev/serial0"]}
+    monkeypatch.setattr(bridgemod.glob, "glob", lambda pattern: present.get(pattern, []))
+    eps = bridgemod.candidate_endpoints()
+    assert f"serial:/dev/serial0:{bridgemod.DEFAULT_SERIAL_BAUD}" in eps
+    assert eps.index(f"serial:/dev/serial0:{bridgemod.DEFAULT_SERIAL_BAUD}") < \
+        eps.index("udpin:0.0.0.0:14550"), "serial is probed before the network"
+    assert not bridgemod._is_usb_cdc("/dev/serial0")

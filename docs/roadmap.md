@@ -730,32 +730,41 @@ param sync, mission), and the SIL-rehearsal gateway.
 
 ## Deployment — the hub
 
-The field deployment is a **Raspberry Pi "hub"** that is both the ground station
+The field deployment is a **Linux "hub"** — usually a Raspberry Pi, but any
+systemd machine with an AP-capable WiFi interface — that is both the ground station
 and the base station. Turn the plane on; turn the hub on; join the hub's WiFi on
 any phone/laptop; open the page; **you just see the plane, live.** No login, no
 setup, multiple viewers at once.
 
 ```
-   plane  ──radio/serial──►  HUB (Raspberry Pi)  ──WiFi──►  phones / laptops
+   plane  ──radio/serial──►  HUB (Linux, e.g. a Pi) ──WiFi──►  phones / laptops
                              • gs daemon (owns the radio link)        browser →
                              • serves the console web app             commandant.local
-                             • standalone WiFi AP (hostapd)           → /flight, live
+                             • standalone WiFi AP (NM or hostapd)     → /flight, live
                              • mDNS: commandant.local (avahi)
 ```
 
 Decisions:
 - **Plane ↔ hub = radio/serial** → this is the `gs` transport abstraction
-  (UDP/TCP/**serial**); on the Pi, `gs` attaches to the radio, not localhost UDP.
+  (UDP/TCP/**serial**); on the hub, `gs` attaches to the radio, not localhost UDP.
 - **Hub ↔ clients = WiFi + browser.** `gs` binds `0.0.0.0`; the console's WS
   endpoint must be **host-relative** (`window.location.hostname`), so any client on
   the hub WiFi reaches the hub's `gs`. (Dev still falls back to localhost.)
-- **Standalone AP** (hostapd/dnsmasq) — works in a remote field, no infrastructure.
+- **Standalone AP** — works in a remote field, no infrastructure. A NetworkManager
+  `shared` connection where NetworkManager runs the network (current Pi OS,
+  Ubuntu, Debian), hostapd + dnsmasq + a dhcpcd static IP where dhcpcd does.
+  `install` checks for systemd, a WiFi interface and one of those two rather
+  than for a Pi, and refuses to take over an interface that is connected.
 - **mDNS hostname** `commandant.local` (avahi) — how clients get in. (Captive
   portal considered and deferred.)
 - **Zero-config UX:** connect → `commandant.local` → root redirects to `/flight`
-  → telemetry autoconnects → the plane is on the globe. No auth.
+  → telemetry autoconnects → the plane is on the globe. No auth to watch.
+  Taking command asks once for the command token, which `commandant install`
+  generates into `/etc/commandant/gs.env` and prints. (The token gate shipped
+  before any install set a token, so until then a real hub was open to anyone
+  on its WiFi.)
 - **Hub = a `commandant` CLI** (`packages/cli`, modeled on Guppi's `packages/cli`):
-  `commandant install` provisions a fresh Pi (hostapd + dnsmasq AP, avahi
+  `commandant install` provisions the hub (WiFi AP, avahi
   `commandant.local`, systemd units autostarting `gs` + the served console),
   `commandant update` re-runs the installer, plus `status` / `up` / `down` /
   `logs` / `uninstall`. AP/mDNS/systemd configs ship as templates inside the CLI

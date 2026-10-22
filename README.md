@@ -103,9 +103,9 @@ split dev setup. The console↔gs message contract is `docs/ws-contract.md`.
 ## Tests
 
 ```sh
-cd packages/gs      && uv run pytest -q   # 156 — protocol state machines vs a fake PX4
+cd packages/gs      && uv run pytest -q   # 221 — protocol state machines vs a fake PX4
 cd packages/relay   && uv run pytest -q   # 17 — fan-out, slow-viewer shedding, read-only guarantee
-cd packages/cli     && uv run --group dev pytest -q   # 19 — hub installer, the systemd units, the lifecycle verbs
+cd packages/cli     && uv run --group dev pytest -q   # 77 — hub installer, the systemd units, the lifecycle verbs
 cd packages/console && npm test           # 402 — stores, WS client, validation (vitest)
 cd packages/console && npm run typecheck
 ```
