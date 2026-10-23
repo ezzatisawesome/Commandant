@@ -5,6 +5,7 @@ import { useStore } from "@nanostores/react";
 
 import { $linkState, $commander } from "@/stores/link.store";
 import { telemetryClient } from "@/services/telemetry";
+import { pushStatus } from "@/stores/statustext.store";
 import { IS_VIEW } from "@/lib/envs";
 import { CommandBar } from "./CommandBar";
 
@@ -34,23 +35,39 @@ export default function CommandsPanel() {
 	const commander = useStore($commander);
 	const [streamId, setStreamId] = useState(STREAMS[0].id);
 	const [streamHz, setStreamHz] = useState(10);
-	const [streamNote, setStreamNote] = useState<{ ok: boolean; text: string } | null>(null);
+	const [streamBusy, setStreamBusy] = useState(false);
+	const [streamStatus, setStreamStatus] = useState<{ ok: boolean; text: string } | null>(null);
 
-	// A stream request changes what the VEHICLE sends, for everyone, out of a
-	// finite link budget — so gs gates it on command authority and may clamp the
-	// rate. `null` is an older gs that never answered the claim; treat it
-	// optimistically and let the ack be the authority, as the rest of the UI does.
+	// A rate change is a command now, so it can be refused — by PX4, or by gs
+	// when another console holds authority — and it changes what the VEHICLE
+	// sends, for everyone, out of a finite link budget, so gs may also clamp it.
+	// Name the reason the button is dead rather than just greying it out:
+	// `commander === false` is a console that has been told it does not hold
+	// command, while `null` is an older gs that never answered, which the rest
+	// of the UI treats optimistically and lets the ack settle.
 	const streamBlocked = linkState !== "alive" ? "no link to the vehicle"
 		: commander === false ? "another console holds command"
 		: null;
 
 	async function applyStream() {
-		setStreamNote(null);
+		const label = STREAMS.find((s) => s.id === streamId)?.label ?? `msg ${streamId}`;
+		const asked = streamHz > 0 ? `${streamHz} Hz` : "off";
+		setStreamBusy(true);
+		setStreamStatus(null);
 		try {
 			const ack = await telemetryClient.setStream(streamId, streamHz);
-			setStreamNote({ ok: ack.ok, text: ack.text || (ack.ok ? "applied" : "refused") });
-		} catch (e) {
-			setStreamNote({ ok: false, text: e instanceof Error ? e.message : "failed" });
+			const text = ack.text || (ack.ok ? "accepted" : "rejected");
+			setStreamStatus({ ok: ack.ok, text });
+			// Into the log, beside the autopilot's own words: a rate change is
+			// something you want to find later when the strip looks wrong, and
+			// severity carries whether it took (6 = info, 4 = warning).
+			pushStatus(ack.ok ? 6 : 4, `stream ${label} → ${asked}: ${text}`);
+		} catch (err) {
+			const text = err instanceof Error ? err.message : "failed";
+			setStreamStatus({ ok: false, text });
+			pushStatus(4, `stream ${label} → ${asked}: ${text}`);
+		} finally {
+			setStreamBusy(false);
 		}
 	}
 
@@ -88,19 +105,24 @@ export default function CommandsPanel() {
 							/>
 							<button
 								onClick={applyStream}
-								disabled={streamBlocked !== null}
-								title={streamBlocked ?? "Ask the vehicle for this message at this rate"}
+								disabled={streamBlocked !== null || streamBusy}
 								className="h-6 rounded border border-white/15 px-2 text-[10px] text-white/80 hover:bg-white/10 disabled:opacity-30"
+								title={streamBlocked ?? "Ask PX4 for this rate; the result is reported below and in the log"}
 							>
-								Apply
+								{streamBusy ? "…" : "Apply"}
 							</button>
 						</div>
 						{streamBlocked ? (
 							<div className="pt-1 text-[9px] text-amber-300/80">{streamBlocked}</div>
 						) : null}
-						{streamNote ? (
-							<div className={`pt-1 text-[9px] ${streamNote.ok ? "text-emerald-400" : "text-red-400"}`}>
-								{streamNote.ok ? "✓" : "✗"} {streamNote.text}
+
+						{/* What the autopilot said, not what we asked for. */}
+						{streamStatus ? (
+							<div
+								className={`mt-1 truncate text-[10px] ${streamStatus.ok ? "text-emerald-400" : "text-red-400"}`}
+								title={streamStatus.text}
+							>
+								{streamStatus.ok ? "✓" : "✗"} {streamStatus.text}
 							</div>
 						) : null}
 					</div>

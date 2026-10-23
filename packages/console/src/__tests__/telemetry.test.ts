@@ -279,10 +279,13 @@ describe("stream control is a write to the vehicle, not a display preference (gs
 		// reporting every test as passed.
 		client.setStream(375, 25).catch(() => {});
 		const sent = ws().lastSent();
-		expect(sent.type).toBe("stream");
+		// It rides the ordinary command path now, rather than the old
+		// `{type:"stream"}` message gs never acked: that is what makes the id
+		// worth carrying, because something actually answers under it.
+		expect(sent.type).toBe("command");
+		expect(sent.name).toBe("set_message_interval");
 		expect(typeof sent.id).toBe("string");
-		expect(sent.msgId).toBe(375);
-		expect(sent.hz).toBe(25);
+		expect(sent.args).toMatchObject({ msgId: 375, hz: 25 });
 	});
 
 	it("surfaces a refusal from a console that does not hold command", async () => {

@@ -544,32 +544,24 @@ export class TelemetryClient {
 		});
 	}
 
-	/** Enable/disable a MAVLink stream at a rate (hz=0 disables).
+	/**
+	 * Set a MAVLink message's rate (hz=0 stops it), and report what came back.
 	 *
-	 *  Carries an `id` so the result comes back. This is not a local display
-	 *  preference: it sends SET_MESSAGE_INTERVAL, which changes what the vehicle
-	 *  transmits, for every client, out of a finite link budget — so gs gates it
-	 *  on command authority and may clamp the rate to the link's budget. Sent
-	 *  fire-and-forget, a refusal or a clamp was invisible and the operator just
-	 *  saw nothing happen. */
+	 * This used to be fire-and-forget over `{type:"stream"}`: PX4's COMMAND_ACK
+	 * arrived at gs, matched nothing, and was dropped, so a rate the autopilot
+	 * refused or capped looked exactly like one it took. It now rides the
+	 * ordinary command path, which means retries, a real result
+	 * (accepted / unsupported / denied) and a timeout that says "timeout".
+	 *
+	 * Not a local display preference: it changes what the VEHICLE transmits,
+	 * for every client, out of a finite link budget — so gs gates it on command
+	 * authority and may clamp the rate. Both show up in the ack.
+	 *
+	 * Resolves with the ack, ok:false included — only a transport failure or a
+	 * timeout rejects, matching sendCommand.
+	 */
 	setStream(msgId: number, hz: number): Promise<AckMessage> {
-		return new Promise((resolve, reject) => {
-			if (IS_VIEW) {
-				reject(new Error("read-only view"));
-				return;
-			}
-			if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-				reject(new Error("not connected"));
-				return;
-			}
-			const id = uuidv4();
-			const timer = setTimeout(() => {
-				this.pending.delete(id);
-				reject(new Error("timeout"));
-			}, COMMAND_TIMEOUT_MS);
-			this.pending.set(id, { resolve, reject, timer });
-			this.send({ type: "stream", id, msgId, hz });
-		});
+		return this.sendCommand("set_message_interval", { msgId, hz });
 	}
 
 	private resolveParamAck(ack: ParamAckMessage) {

@@ -581,6 +581,32 @@ def build_command(name: str, args: dict[str, Any]) -> tuple[int, list[float]]:
         if not -90.0 <= lat <= 90.0 or not -180.0 <= lon <= 180.0:
             raise ValueError(f"reposition lat/lon out of range: {lat}, {lon}")
         return m.MAV_CMD_DO_REPOSITION, [-1, 1, 0, _NAN, lat, lon, alt]
+    if name == "set_message_interval":
+        # Stream control. The console speaks Hz, because that is the number an
+        # operator picks; PX4 wants a period in microseconds, and -1 is how
+        # "stop sending this" is spelled -- which is what a rate of 0 means.
+        #
+        # This is a COMMAND, not a display preference, and that is the whole
+        # point of it living here: routed through the normal command path it
+        # gets retries, COMMAND_ACK matching and a timeout, so a rate PX4
+        # refuses or does not support says so instead of vanishing.
+        raw_id = args.get("msgId")
+        if isinstance(raw_id, bool) or raw_id is None:
+            raise ValueError("set_message_interval needs an integer msgId")
+        try:
+            msg_id = int(raw_id)
+        except (TypeError, ValueError):
+            raise ValueError("set_message_interval needs an integer msgId") from None
+        if msg_id < 0:
+            raise ValueError("msgId must not be negative")
+        try:
+            hz = float(args.get("hz") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("set_message_interval needs a numeric hz") from None
+        if not math.isfinite(hz):
+            raise ValueError("hz must be finite")
+        interval_us = -1.0 if hz <= 0 else 1e6 / hz
+        return m.MAV_CMD_SET_MESSAGE_INTERVAL, [float(msg_id), interval_us, 0, 0, 0, 0, 0]
     raise ValueError(f"unknown command '{name}'")
 
 
@@ -1577,7 +1603,40 @@ class Bridge:
                 "ok": ok, "text": text,
             })
 
-    # --- misc fire-and-forget sends (stream control) -------------------------
+    def clamp_stream_hz(self, msg_id: int, hz: float) -> float:
+        """Cap a requested stream rate to the link's budget, visibly.
+
+        An operator picking a rate in the UI cannot know the link's budget, so a
+        50 Hz request off a phone would saturate a telemetry radio and drop the
+        commands it is competing with. Capping is announced on the statustext
+        channel rather than applied in silence, because a rate that was quietly
+        changed is indistinguishable from one the autopilot refused.
+
+        Both stream paths call this -- the tracked `set_message_interval`
+        command and the legacy unacked `{type:"stream"}` message -- so the
+        budget cannot be escaped by choosing the older spelling.
+        """
+        if hz <= 0 or not math.isfinite(hz):
+            return hz
+        cap = budgeted_hz(self.link_budget_bps, msg_id, shares=1)
+        if hz <= cap:
+            return hz
+        self._broadcast({
+            "type": "statustext", "severity": 4,
+            "text": f"msg {msg_id}: {hz:g} Hz exceeds the link budget, "
+                    f"capped at {cap:.1f} Hz",
+            "t": _now_ms()})
+        return cap
+
+    # --- misc fire-and-forget sends (legacy stream control) ------------------
+    # The unacked `{type:"stream"}` message, kept for clients written against
+    # the Phase 5 contract. The console now sends stream changes as a tracked
+    # `set_message_interval` command instead, so it learns whether PX4 took
+    # the rate; anything arriving here still gets the old best-effort send.
+    #
+    # The Hz -> microseconds mapping is NOT repeated here: it comes from
+    # build_command, so the two paths cannot drift into disagreeing about what
+    # "0 Hz" means.
     def _service_misc(self, conn: Any) -> None:
         while True:
             try:
@@ -1585,31 +1644,25 @@ class Bridge:
             except queue.Empty:
                 break
             if item.get("kind") == "stream":
+                # The clamp runs on the REQUEST, in Hz, before build_command
+                # turns it into a period: the budget is expressed in Hz and the
+                # operator asked in Hz, so that is where capping is meaningful.
                 try:
-                    hz = float(item.get("hz") or 0)
                     msg_id = int(item["msgId"])
+                    hz = float(item.get("hz") or 0)
                 except (TypeError, ValueError, KeyError):
                     print(f"[gs] ignoring malformed stream request: {item}")
                     continue
-                # An operator picking a rate in the UI cannot know the link's
-                # budget, so clamp it here rather than let a 50 Hz request off a
-                # phone saturate a telemetry radio and drop commands. Say so on
-                # the statustext channel so the clamp is visible, not silent.
-                if hz > 0:
-                    cap = budgeted_hz(self.link_budget_bps, msg_id, shares=1)
-                    if hz > cap:
-                        self._broadcast({
-                            "type": "statustext", "severity": 4,
-                            "text": f"msg {msg_id}: {hz:g} Hz exceeds the link budget, "
-                                    f"capped at {cap:.1f} Hz",
-                            "t": _now_ms()})
-                        hz = cap
-                interval_us = -1 if hz <= 0 else int(1e6 / hz)
+                hz = self.clamp_stream_hz(msg_id, hz)
                 try:
-                    conn.mav.command_long_send(
-                        self.tsys, self.tcomp,
-                        mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
-                        msg_id, interval_us, 0, 0, 0, 0, 0)
+                    mav_cmd, params = build_command("set_message_interval", {
+                        "msgId": msg_id, "hz": hz,
+                    })
+                except (ValueError, TypeError) as exc:
+                    print(f"[gs] ignoring malformed stream request: {item} ({exc})")
+                    continue
+                try:
+                    self._send_command_long(conn, mav_cmd, params, 0)
                 except Exception as exc:
                     print(f"[gs] stream request failed: {exc}")
 
@@ -3038,8 +3091,19 @@ class Bridge:
                 await self._send(ws, {"type": "ack", "id": cid, "ok": False, "result": -1, "text": "not commander"})
                 return
             try:
-                args = msg.get("args")
-                mav_cmd, params = build_command(msg.get("name"), args if isinstance(args, dict) else {})
+                raw_args = msg.get("args")
+                args = raw_args if isinstance(raw_args, dict) else {}
+                if msg.get("name") == "set_message_interval":
+                    # A stream rate is a command now, so it arrives here rather
+                    # than on the legacy `{type:"stream"}` path -- and the link
+                    # budget has to apply to both spellings, or the cap is only
+                    # a suggestion to whichever client asks the old way.
+                    try:
+                        args = {**args, "hz": self.clamp_stream_hz(
+                            int(args.get("msgId")), float(args.get("hz") or 0))}
+                    except (TypeError, ValueError):
+                        pass  # build_command owns the complaint about bad args
+                mav_cmd, params = build_command(msg.get("name"), args)
             except (ValueError, TypeError) as exc:
                 await self._send(ws, {"type": "ack", "id": cid, "ok": False, "result": -1, "text": str(exc)})
                 return

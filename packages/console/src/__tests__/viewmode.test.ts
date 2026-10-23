@@ -58,8 +58,9 @@ describe("view mode is read-only by construction", () => {
 			client.pushFence([]),
 			client.pushRally([]),
 			client.takeCommand(),
-			// setStream returns a promise now: it is authority-gated and the rate
-			// may be clamped, so the caller is told what happened.
+			// A stream rate change is a command now, so it settles like one
+			// rather than silently going nowhere: it is authority-gated and the
+			// rate may be clamped, so the caller is told what happened.
 			client.setStream(30, 10),
 		];
 		client.refreshParams();
