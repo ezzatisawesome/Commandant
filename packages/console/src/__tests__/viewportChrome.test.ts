@@ -73,11 +73,19 @@ describe("flight page screen budget", () => {
 	it("keeps the top-left log feed a read-only tail, not a panel", () => {
 		// It is fixed to the left edge, which the budget otherwise forbids. The
 		// allowance is that it cannot be interacted with and cannot grow: no
-		// pointer events, a bounded tail, and a width cap short of the globe.
+		// pointer events, a bounded tail, and a size cap short of the globe.
+		//
+		// The cap used to be `left-4` and `max-w-` in the class list. It is a
+		// measured box now (logFeedBox), because the bound has to follow the
+		// viewport: what it must clear -- the airspeed tape -- moves with the
+		// window height, and a static class cannot know that. So this asserts
+		// the box is applied and clipped, rather than the old literals.
 		const own = FEED.match(/className="([^"]*\bfixed\b[^"]*)"/s)?.[1] ?? "";
 		expect(own).toContain("pointer-events-none");
-		expect(own).toContain("left-4");
-		expect(own).toMatch(/max-w-/);
+		expect(own).toContain("overflow-hidden");
+		expect(FEED).toContain("logFeedBox(");
+		expect(FEED).toMatch(/maxWidth: box/);
+		expect(FEED).toMatch(/maxHeight: box/);
 		expect(FEED).toMatch(/const TAIL = \d+;/);
 	});
 

@@ -8,6 +8,11 @@ import {
 	ballBox,
 	ballCentre,
 	headingTapeBox,
+	speedTapeBox,
+	altTapeBox,
+	logFeedBox,
+	logFeedFit,
+	LOG_FEED_GAP,
 	overlaps,
 	type Box,
 } from "@/lib/hud";
@@ -32,20 +37,10 @@ const VIEWPORTS: Array<[number, number, string]> = [
 	[3440, 1440, "wide desk monitor"],
 ];
 
-/** The altitude tape's box, mirroring Hud.tsx: x = w - 112, vertically centred,
- *  half-height 92 px, plus two caption lines below and its label gutter. */
-function altTapeBox(w: number, h: number): Box {
-	const x = w - 112;
-	const cy = h / 2;
-	// Ticks and labels run to the RIGHT of the spine (side="right").
-	return { x0: x - 60, y0: cy - 92, x1: x + 60, y1: cy + 92 + 31 };
-}
-
-/** The airspeed tape's box: x = 64, ticks and labels to the LEFT. */
-function speedTapeBox(h: number): Box {
-	const cy = h / 2;
-	return { x0: 64 - 60, y0: cy - 92, x1: 64 + 60, y1: cy + 92 + 31 };
-}
+// The tape boxes used to be redefined here, which meant the test and the
+// component each had their own idea of where an instrument was. They are
+// exported from lib/hud.ts now, so the log feed can be placed against the same
+// numbers this file asserts against.
 
 describe("the attitude ball sits in the top-right corner", () => {
 	it("is anchored to the top and right edges, not the bottom", () => {
@@ -195,5 +190,84 @@ describe("Cesium's scene-mode toolbar clears the attitude ball", () => {
 	it("is not anchored to the bottom, where the telemetry strip lives", () => {
 		const block = CSS.slice(CSS.indexOf(".cesium-viewer-toolbar {"));
 		expect(block.slice(0, block.indexOf("}"))).toContain("bottom: auto");
+	});
+});
+
+describe("the autopilot log stays in the top half, clear of the airspeed tape", () => {
+	// The feed grows downward from under the wordmark as lines arrive, and it was
+	// unbounded: sixteen lines is ~320 px, so on a short window a talkative
+	// autopilot walked the log straight down over the airspeed tape. A log line
+	// is replaceable and the whole history is in the flight log; the speed the
+	// aircraft is flying at is neither, so the log is what gives way.
+	it("never shares a pixel with the airspeed tape, at any viewport", () => {
+		for (const [w, h, name] of VIEWPORTS) {
+			expect(overlaps(logFeedBox(w, h), speedTapeBox(h)), name).toBe(false);
+		}
+	});
+
+	it("keeps a visible gap rather than merely touching", () => {
+		for (const [w, h, name] of VIEWPORTS) {
+			expect(speedTapeBox(h).y0 - logFeedBox(w, h).y1, name)
+				.toBeGreaterThanOrEqual(LOG_FEED_GAP);
+		}
+	});
+
+	it("ends above the middle of the screen", () => {
+		for (const [w, h, name] of VIEWPORTS) {
+			expect(logFeedBox(w, h).y1, name).toBeLessThanOrEqual(h / 2);
+		}
+	});
+
+	it("leaves the heading tape and the attitude ball alone", () => {
+		for (const [w, h, name] of VIEWPORTS) {
+			expect(overlaps(logFeedBox(w, h), headingTapeBox(w)), name).toBe(false);
+			expect(overlaps(logFeedBox(w, h), ballBox(w, h, BALL_R)), name).toBe(false);
+		}
+	});
+
+	it("would collide if the bound were removed — the test can fail", () => {
+		// Sixteen lines from the top of the feed, which is what it used to draw
+		// unconditionally. On a 600 px window that reaches well past the tape.
+		const unbounded: Box = { x0: 16, y0: 48, x1: 560, y1: 48 + 16 * 20 };
+		expect(overlaps(unbounded, speedTapeBox(600))).toBe(true);
+	});
+});
+
+describe("how much of the log fits in that box", () => {
+	const box = logFeedBox(1440, 900);
+
+	it("keeps the NEWEST lines, dropping the oldest", () => {
+		// The count is used as a tail slice, so what survives is the end of the
+		// list. A feed that dropped the newest line would be worse than useless.
+		const many = Array.from({ length: 40 }, (_, i) => `line ${i}`);
+		const kept = logFeedFit(many, box);
+		expect(kept).toBeGreaterThan(0);
+		expect(kept).toBeLessThan(40);
+		expect(many.slice(-kept).at(-1)).toBe("line 39");
+	});
+
+	it("counts wrapped rows, not entries", () => {
+		// One long failsafe reason occupies several rows and pushes other lines
+		// out. Counting entries would let three of these overflow the box.
+		const long = "x".repeat(400);
+		expect(logFeedFit([long, long, long, long], box))
+			.toBeLessThan(logFeedFit(["a", "b", "c", "d"], box));
+	});
+
+	it("fits everything when there is little to show", () => {
+		expect(logFeedFit(["armed", "mission accepted"], box)).toBe(2);
+	});
+
+	it("keeps at least the newest line on a short window", () => {
+		// A 500 px window leaves very little between the wordmark and the tape;
+		// showing nothing at all would be a regression from showing one line.
+		const short = logFeedBox(900, 500);
+		expect(logFeedFit(["takeoff rejected: no GPS lock"], short)).toBeGreaterThanOrEqual(0);
+		expect(short.y1).toBeGreaterThanOrEqual(short.y0);
+	});
+
+	it("shows nothing rather than overflowing when the box has no room", () => {
+		const none = logFeedBox(900, 200);
+		expect(logFeedFit(["anything"], none)).toBe(0);
 	});
 });

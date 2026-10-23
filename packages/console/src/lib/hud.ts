@@ -282,6 +282,113 @@ export function ballBox(w: number, h: number, radiusPx: number, gap = BALL_EDGE_
 	};
 }
 
+// The two side tapes. Both are vertically centred with 92 px of ticks either
+// side of the middle, plus their label gutter and the captions underneath.
+// These were duplicated in hudLayout.test.ts, which is how a box and the
+// component it describes drift apart; they live here now and the test imports
+// them.
+export const SPEED_TAPE_X = 64;
+export const TAPE_HALF_PX = 92;
+/** Label gutter either side of a tape's spine, and the caption lines below. */
+export const TAPE_GUTTER_PX = 60;
+export const TAPE_CAPTION_PX = 31;
+
+/** The airspeed tape, left edge: ticks and labels run LEFT of the spine. */
+export function speedTapeBox(h: number): Box {
+	const cy = h / 2;
+	return {
+		x0: SPEED_TAPE_X - TAPE_GUTTER_PX,
+		y0: cy - TAPE_HALF_PX,
+		x1: SPEED_TAPE_X + TAPE_GUTTER_PX,
+		y1: cy + TAPE_HALF_PX + TAPE_CAPTION_PX,
+	};
+}
+
+/** The altitude tape, right edge: inboard of the speed tape's margin, because
+ *  the dock owns the right edge at the vertical centre. */
+export function altTapeBox(w: number, h: number): Box {
+	const x = w - 112;
+	const cy = h / 2;
+	return {
+		x0: x - TAPE_GUTTER_PX,
+		y0: cy - TAPE_HALF_PX,
+		x1: x + TAPE_GUTTER_PX,
+		y1: cy + TAPE_HALF_PX + TAPE_CAPTION_PX,
+	};
+}
+
+/** Where the autopilot log starts, and how far it must stay from the tape. */
+export const LOG_FEED_LEFT = 16;
+export const LOG_FEED_TOP = 48;
+export const LOG_FEED_GAP = 16;
+/** One log row at 12 px mono, leading-relaxed. */
+export const LOG_LINE_PX = 20;
+/** Advance width of 12 px ui-monospace, and the columns the timestamp takes. */
+export const LOG_CHAR_PX = 7.23;
+export const LOG_TIME_COLS = 9;
+
+/**
+ * Box the log feed may occupy: top-left, and NEVER past the airspeed tape.
+ *
+ * The feed grows downward from under the wordmark as lines arrive, and it was
+ * unbounded — so on a short window a busy autopilot walked the log straight
+ * down over the airspeed tape, which is the one instrument that cannot be
+ * recovered by scrolling or waiting. Log lines are replaceable; the speed the
+ * aircraft is flying at is not, so the log yields.
+ *
+ * The bottom is the higher of two limits: the tape's top edge less a gap, and
+ * the middle of the screen. The tape is the binding one at every size (it
+ * starts 92 px above centre), and the half-screen rule is kept explicit anyway
+ * so the feed stays a top-half instrument if the tape ever moves.
+ */
+export function logFeedBox(w: number, h: number): Box {
+	// max-w-[min(34rem,48vw)]: 34rem at 16 px/rem is 544.
+	const wide = LOG_FEED_LEFT + Math.min(544, w * 0.48);
+	// The heading tape is centred, so on a narrow window the feed's right edge
+	// runs under it. Give way horizontally where there is still a usable column
+	// to the left of it, and drop below it where there is not -- a 48 vw feed on
+	// a 768 px window reaches the screen's centre, which is exactly where the
+	// tape's own labels are. (This overlap predates the vertical bound; it is
+	// the same class of fault in the other axis.)
+	const tape = headingTapeBox(w);
+	const beside = Math.min(wide, tape.x0 - 8);
+	const roomBeside = beside - LOG_FEED_LEFT >= 220;
+	const y0 = roomBeside ? LOG_FEED_TOP : tape.y1 + 8;
+	const bottom = Math.min(speedTapeBox(h).y0 - LOG_FEED_GAP, h / 2);
+	return {
+		x0: LOG_FEED_LEFT,
+		y0,
+		x1: roomBeside ? beside : wide,
+		y1: Math.max(y0, bottom),
+	};
+}
+
+/**
+ * How many of the newest lines fit in that box.
+ *
+ * Counts WRAPPED rows, not entries: one long failsafe reason can take three
+ * rows and push two other lines out of the box. The font is monospace, so the
+ * character count is an honest measure of width rather than a guess — which is
+ * the whole reason this can be decided here instead of by measuring the DOM.
+ *
+ * Returns a count of trailing entries, so the caller slices from the END: the
+ * newest line must always be the one that survives.
+ */
+export function logFeedFit(texts: string[], box: Box): number {
+	const cols = Math.max(8, Math.floor((box.x1 - box.x0) / LOG_CHAR_PX) - LOG_TIME_COLS);
+	const rowsFor = (t: string) => Math.max(1, Math.ceil(t.length / cols));
+	const budget = Math.floor((box.y1 - box.y0) / LOG_LINE_PX);
+	let rows = 0;
+	let kept = 0;
+	for (let i = texts.length - 1; i >= 0; i--) {
+		const r = rowsFor(texts[i]);
+		if (rows + r > budget) break;
+		rows += r;
+		kept++;
+	}
+	return kept;
+}
+
 /** Do two instrument boxes share any pixels? */
 export function overlaps(a: Box, b: Box): boolean {
 	return a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;

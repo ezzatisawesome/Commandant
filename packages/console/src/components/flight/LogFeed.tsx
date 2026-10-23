@@ -1,8 +1,10 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { useStore } from "@nanostores/react";
 
 import { $statusTexts } from "@/stores/statustext.store";
+import { logFeedBox, logFeedFit, LOG_FEED_LEFT, LOG_FEED_TOP } from "@/lib/hud";
 
 // The live autopilot feed, top-left under the wordmark: the last few STATUSTEXT
 // lines in green mono, like a console tailing a log.
@@ -26,6 +28,14 @@ import { $statusTexts } from "@/stores/statustext.store";
 // so it cannot grow into a panel.
 const TAIL = 16;
 
+// ...up to a point. The tail is bounded by the SPACE it has, not only by a line
+// count: sixteen lines is 320 px, and on a 760 px window the feed reached the
+// airspeed tape and drew over it. A log line is replaceable -- the next one is
+// along in a second, and the whole history is in the flight log -- while the
+// airspeed readout is not, so the log is what yields. lib/hud.ts owns the box
+// and the fit, with the rest of the HUD's geometry, and a test asserts the two
+// never share a pixel.
+
 function sevClass(sev: number): string {
 	if (sev <= 3) return "text-red-400";
 	if (sev === 4) return "text-amber-300";
@@ -36,13 +46,41 @@ const hhmmss = (t: number) => new Date(t).toLocaleTimeString([], { hour12: false
 
 export function LogFeed() {
 	const entries = useStore($statusTexts);
-	const shown = entries.slice(-TAIL);
+	// The box depends on the viewport, so the feed has to follow a resize. A
+	// window listener rather than a ResizeObserver: this instrument is positioned
+	// against the window itself, not against a container.
+	const [vp, setVp] = useState<{ w: number; h: number } | null>(null);
+	useEffect(() => {
+		const read = () => setVp({ w: window.innerWidth, h: window.innerHeight });
+		read();
+		window.addEventListener("resize", read);
+		return () => window.removeEventListener("resize", read);
+	}, []);
+
+	const recent = entries.slice(-TAIL);
+	const box = vp ? logFeedBox(vp.w, vp.h) : null;
+	// Slice from the END, so what gets dropped is the oldest line and the newest
+	// is always on screen. Before the first measurement there is nothing to show
+	// anyway — status text only arrives over the socket, which is client-side.
+	const shown = box ? recent.slice(-logFeedFit(recent.map((e) => e.text), box)) : [];
 	if (shown.length === 0) return null;
 
 	return (
 		<div
 			aria-live="polite"
-			className="pointer-events-none fixed left-4 top-12 z-40 max-w-[min(34rem,48vw)]
+			style={{
+				left: box ? box.x0 : LOG_FEED_LEFT,
+				// The top is not always under the wordmark: on a narrow window the
+				// feed drops below the heading tape instead of running under it.
+				top: box ? box.y0 : LOG_FEED_TOP,
+				// A hard stop as well as the computed fit. The fit assumes a
+				// monospace advance width; a glyph that is not in the mono face
+				// falls back to a proportional one and can be wider, and a
+				// mis-estimate must still not reach the tape.
+				maxWidth: box ? box.x1 - box.x0 : undefined,
+				maxHeight: box ? box.y1 - box.y0 : undefined,
+			}}
+			className="pointer-events-none fixed z-40 overflow-hidden
 				font-mono text-[12px] font-semibold leading-relaxed tracking-tight"
 		>
 			{shown.map((e, i) => (
