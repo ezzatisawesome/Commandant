@@ -899,6 +899,12 @@ Create, edit, upload, and watch missions execute. All Commandant.
       `MISSION_CURRENT`, `MISSION_ITEM_REACHED`. (Setpoint trail already exists.)
 - [x] Edit mid-flight & re-upload without full restart; set-current item.
 - [x] Later: geofence + rally points (`MAV_MISSION_TYPE_FENCE` / `_RALLY`).
+- [x] **Mission files in PX4's format** — Open / Save a QGroundControl `.plan`
+      (mission + geofence + rally) from the Mission panel
+      (`console/src/lib/planFile.ts`). The same file QGC edits, a real aircraft
+      flies and AircraftSim reads from its `missions/`. Strict on open: survey /
+      complex items, terrain-relative legs and non-PX4 plans are refused with a
+      reason, never partially loaded.
 
 ## Phase 5 — Configurable display
 

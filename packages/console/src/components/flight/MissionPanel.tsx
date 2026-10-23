@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useStore } from "@nanostores/react";
 
 import {
@@ -13,10 +13,14 @@ import {
 	reorderItem,
 	updateItem,
 	clearMission,
+	setMissionItems,
 } from "@/stores/mission.store";
-import { $fenceItems,
-	setPlacingTarget,
+import { $fenceItems, $rallyItems,
+	setFenceItems, setPlacingTarget, setRallyItems,
 } from "@/stores/geo.store";
+import { $aircraftStore } from "@/stores/aircraft.store";
+import { homeAltM } from "@/lib/altFrames";
+import { fromPlan, planFilename, plannedHome, toPlan } from "@/lib/planFile";
 import { $planRead, $vehicleMission, missionMatchesVehicle } from "@/stores/mission.store";
 import { $linkState, $commander } from "@/stores/link.store";
 import { telemetryClient } from "@/services/telemetry";
@@ -100,6 +104,38 @@ export default function MissionPanel() {
 	// the same as "no rule", and the chip must not say "ready" for it.
 	const ruleKnown = lookupFrom(params)(TKO_LAND_REQ_PARAM) !== undefined;
 
+	// .plan files (PX4 / QGroundControl's mission format): the plan as a file that
+	// QGC, a real aircraft and AircraftSim all read. See lib/planFile.ts.
+	const planRef = useRef<HTMLInputElement>(null);
+	const rally = useStore($rallyItems);
+	function savePlan() {
+		const f = $aircraftStore.get();
+		const home = plannedHome(f ? { lat: f.lat, lon: f.lon, homeAltM: homeAltM(f), relativeAlt: f.relativeAlt } : null, items);
+		const q = toPlan({ mission: items, fence, rally }, home);
+		const blob = new Blob([JSON.stringify(q, null, 4)], { type: "application/json" });
+		const a = document.createElement("a");
+		a.href = URL.createObjectURL(blob);
+		a.download = planFilename();
+		a.click();
+		URL.revokeObjectURL(a.href);
+	}
+	async function openPlan(e: React.ChangeEvent<HTMLInputElement>) {
+		const file = e.target.files?.[0];
+		e.target.value = "";                         // so the same file can be re-picked
+		if (!file) return;
+		const r = fromPlan(await file.text());
+		if ("error" in r) {
+			setStatus({ ok: false, text: `${file.name}: ${r.error}` });
+			return;
+		}
+		setMissionItems(r.plan.mission);
+		setFenceItems(r.plan.fence);
+		setRallyItems(r.plan.rally);
+		setStatus({ ok: true, text: `opened ${file.name}: ${r.plan.mission.length} items` +
+			(r.plan.fence.length ? `, ${r.plan.fence.length} fence` : "") +
+			(r.plan.rally.length ? `, ${r.plan.rally.length} rally` : "") + " (not uploaded)" });
+	}
+
 	async function upload() {
 		setBusy(true);
 		setStatus(null);
@@ -139,6 +175,15 @@ export default function MissionPanel() {
 						title="Click the globe to add waypoints; drag ▲ to set altitude and the ring to set radius">
 						{edit ? "Editing map" : "Edit map"}
 					</Button>
+					<Button size="sm" variant="outline" onClick={() => planRef.current?.click()}
+						className="h-6 px-2 text-[10px]" title="Open a PX4 / QGroundControl .plan file into the draft">
+						Open
+					</Button>
+					<Button size="sm" variant="outline" disabled={items.length === 0} onClick={savePlan}
+						className="h-6 px-2 text-[10px]" title="Save the draft (mission, fence, rally) as a PX4 / QGroundControl .plan">
+						Save
+					</Button>
+					<input ref={planRef} type="file" accept=".plan,application/json" className="hidden" onChange={openPlan} />
 					<Button size="sm" variant="outline" disabled={!live || busy}
 						onClick={() => telemetryClient.pullMission()} className="h-6 px-2 text-[10px]">
 						Download
