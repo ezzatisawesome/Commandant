@@ -60,6 +60,30 @@ const STROKE_DIM = "rgba(126,255,166,0.45)";  // minor ticks and spines only
 const STROKE_UNIT = "rgba(150,255,180,0.95)";
 const FONT = "600 12px ui-monospace, SFMono-Regular, Menlo, monospace";
 
+// The attitude ball's own palette, which is deliberately NOT the HUD green.
+//
+// Monochrome green is right for the tapes: they are numbers, and a tape is read
+// by looking at one. The ball is read differently -- you do not read it, you
+// glance at it and the answer is "which way is up", which is a question about
+// AREA, not about lines. Drawn in one colour it answered that with a single
+// 1.6 px line, and at 92 px over bright terrain that line was the only thing
+// distinguishing 10 degrees of bank from 170.
+//
+// So the two hemispheres carry it, in the colours every attitude indicator ever
+// built has used: sky above, ground below. That is not decoration -- it is the
+// instrument's actual mechanism, and it is instantly legible at a glance and
+// upside down. The symbology that overlays it goes amber, the aviation
+// convention for the fixed aircraft reference, which also stops it merging into
+// the green of the tapes it sits beside.
+const SKY_HI = "#0c4a73";        // deep sky, top of the disc
+const SKY_LO = "#3f9ed6";        // lighter at the horizon, as the real one is
+const GND_HI = "#8a5a28";        // warm earth just below the horizon
+const GND_LO = "#3b2611";        // darker underfoot
+const HORIZON = "rgba(255,255,255,0.95)";
+const LADDER = "rgba(255,255,255,0.85)";
+const LADDER_DIM = "rgba(255,255,255,0.5)";
+const REF = "#ffc24a";           // the fixed aircraft reference, and the roll pointer
+
 /** Attitude ball: radius, and degrees of pitch per pixel inside it. 1.7 px/deg
  *  fits +-30 degrees of pitch either side of the horizon inside the disc. */
 const BALL_R = 46;
@@ -218,38 +242,68 @@ const AttitudeBall = memo(function AttitudeBall({
 	const known = rollDeg !== null && pitchDeg !== null;
 	const marks = known ? ballPitchMarks(pitchDeg!, BALL_R, BALL_PX_PER_DEG) : [];
 	const clipId = "hud-ball-clip";
+	// The hemispheres have to cover the disc at any bank angle, so they extend
+	// well past the radius and the clip disc does the shaping. 3R on each side
+	// covers a 45-degree rotation of a square with room to spare.
+	const span = BALL_R * 3;
+	// Where the horizon sits inside the ball, in pixels from its centre. Positive
+	// is DOWN the screen, which is nose-up: the sky grows as the nose comes up,
+	// same sign convention as the tapes and as lib/hud.ts.
+	const horizonY = known ? pitchDeg! * BALL_PX_PER_DEG : 0;
 	return (
 		<g transform={`translate(${cx} ${cy})`}>
 			<defs>
 				<clipPath id={clipId}>
 					<circle cx={0} cy={0} r={BALL_R} />
 				</clipPath>
+				{/* Gradients, not flat fills: a flat pair reads as a logo, and the
+				    lightening toward the horizon is the cue that tells you which
+				    band is sky at a glance rather than by hue alone -- which
+				    matters for the eight percent of men who would otherwise be
+				    separating these two by brightness only. */}
+				<linearGradient id="hud-ball-sky" x1="0" y1="0" x2="0" y2="1">
+					<stop offset="0%" stopColor={SKY_HI} />
+					<stop offset="100%" stopColor={SKY_LO} />
+				</linearGradient>
+				<linearGradient id="hud-ball-gnd" x1="0" y1="0" x2="0" y2="1">
+					<stop offset="0%" stopColor={GND_HI} />
+					<stop offset="100%" stopColor={GND_LO} />
+				</linearGradient>
 			</defs>
 
-			{/* A dark disc so the horizon reads against the globe rather than
-			    disappearing into terrain of a similar colour. */}
-			<circle cx={0} cy={0} r={BALL_R} fill="rgba(0,0,0,0.42)"
-				stroke={STROKE_DIM} strokeWidth={1} />
-
 			{known ? (
-				// Horizon and pitch scale bank together. Both are positioned from
-				// the ball centre with pitch already folded in by lib/hud.ts, so
-				// this group only rotates.
+				// Sky, ground, horizon and pitch scale all bank together. Everything
+				// is positioned from the ball centre with pitch already folded in,
+				// so this group only rotates.
 				<g clipPath={`url(#${clipId})`} transform={`rotate(${-rollDeg!})`}>
+					<rect x={-span} y={horizonY - span * 2} width={span * 2} height={span * 2}
+						fill="url(#hud-ball-sky)" />
+					<rect x={-span} y={horizonY} width={span * 2} height={span * 2}
+						fill="url(#hud-ball-gnd)" />
 					<line
 						x1={-BALL_R} x2={BALL_R}
-						y1={pitchDeg! * BALL_PX_PER_DEG} y2={pitchDeg! * BALL_PX_PER_DEG}
-						stroke={STROKE} strokeWidth={1.6} />
+						y1={horizonY} y2={horizonY}
+						stroke={HORIZON} strokeWidth={1.6} />
 					{marks.map((m) => (
 						<line key={m.deg}
 							x1={-m.armPx} x2={m.armPx}
 							y1={m.offsetPx} y2={m.offsetPx}
-							stroke={m.major ? STROKE : STROKE_DIM}
+							stroke={m.major ? LADDER : LADDER_DIM}
 							strokeWidth={m.major ? 1.2 : 1}
 							strokeDasharray={m.deg < 0 ? "3 3" : undefined} />
 					))}
 				</g>
-			) : null}
+			) : (
+				// No attitude: an EMPTY disc, not a level one. A ball showing sky
+				// over ground with no data behind it is the lie this gating exists
+				// to prevent, so the hemispheres are not drawn at all.
+				<circle cx={0} cy={0} r={BALL_R} fill="rgba(0,0,0,0.42)" />
+			)}
+
+			{/* The rim, over the hemispheres so they are bounded by a drawn edge
+			    rather than ending on the clip. */}
+			<circle cx={0} cy={0} r={BALL_R} fill="none"
+				stroke={known ? "rgba(255,255,255,0.35)" : STROKE_DIM} strokeWidth={1} />
 
 			{/* Bank ticks on the rim: fixed scale, and the disc's contents rotate
 			    against them. */}
@@ -261,27 +315,36 @@ const AttitudeBall = memo(function AttitudeBall({
 					<line key={deg}
 						x1={Math.cos(rad) * r0} y1={Math.sin(rad) * r0}
 						x2={Math.cos(rad) * r1} y2={Math.sin(rad) * r1}
-						stroke={bankMajor(deg) ? STROKE : STROKE_DIM}
+						stroke={bankMajor(deg) ? LADDER : LADDER_DIM}
 						strokeWidth={bankMajor(deg) ? 1.5 : 1} />
 				);
 			})}
 			{known ? (
 				<g transform={`rotate(${-rollDeg!})`}>
 					<polygon points={`0,${-BALL_R + 2} -4,${-BALL_R + 10} 4,${-BALL_R + 10}`}
-						fill={STROKE} />
+						fill={REF} />
 				</g>
 			) : null}
 
-			{/* Aircraft reference. */}
-			<g stroke={STROKE} strokeWidth={2} fill="none">
-				<line x1={-17} y1={0} x2={-6} y2={0} />
-				<line x1={17} y1={0} x2={6} y2={0} />
+			{/* Aircraft reference. Amber, and drawn twice: a dark stroke underneath
+			    so it survives both a bright sky band and a dark ground one. A
+			    single-colour symbol over a two-colour background is legible
+			    against one of them and not the other. */}
+			<g strokeLinecap="round" fill="none">
+				<g stroke="rgba(0,0,0,0.55)" strokeWidth={4}>
+					<line x1={-17} y1={0} x2={-6} y2={0} />
+					<line x1={17} y1={0} x2={6} y2={0} />
+				</g>
+				<g stroke={REF} strokeWidth={2}>
+					<line x1={-17} y1={0} x2={-6} y2={0} />
+					<line x1={17} y1={0} x2={6} y2={0} />
+				</g>
 			</g>
-			<circle cx={0} cy={0} r={1.6} fill={STROKE} />
+			<circle cx={0} cy={0} r={1.6} fill={REF} />
 
 			{/* The numbers, because reading a 92 px disc to the degree is guesswork. */}
 			<text x={0} y={BALL_R + BALL_LABEL_DROP} textAnchor="middle" style={{ font: FONT }}
-				fill={known ? STROKE : "rgba(255,120,120,0.9)"}>
+				fill={known ? REF : "rgba(255,120,120,0.9)"}>
 				{known ? `${rollLabel(rollDeg)}  ${pitchLabel(pitchDeg)}` : "NO ATTITUDE"}
 			</text>
 		</g>

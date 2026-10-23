@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useMemo, useState } from "react";
+import { memo, useMemo, useRef, useState } from "react";
 import { useStore } from "@nanostores/react";
 import { Plus, X, ChevronLeft, ChevronRight, Rows3, Pencil, Search } from "lucide-react";
 
@@ -15,6 +15,7 @@ import {
 import type { LinkState, TelemetryFrame } from "@/types/app";
 import type { ClearanceBand } from "@/lib/flightGeometry";
 import { GROUP_STALE_MS, groupAgeMs } from "@/lib/flightGeometry";
+import { cellHoverText, isClipped } from "@/lib/strip";
 import { Sparkline } from "./Sparkline";
 import { HealthStrip } from "./HealthStrip";
 import { ControlBar } from "./ControlBar";
@@ -72,20 +73,65 @@ const Cell = memo(function Cell({
 	view: CellView; editing: boolean; onEdit: () => void;
 	spark?: Array<number | undefined>;
 }) {
+	// Hovering a clipped cell shows the whole thing. Measured on enter rather
+	// than on render: what fits depends on how many channels are in the row, how
+	// wide the window is and how many digits the reading currently has, so there
+	// is no static answer, and measuring every cell on every frame to pre-compute
+	// one would cost more than the 25 Hz redraw it sits inside.
+	const labelRef = useRef<HTMLSpanElement>(null);
+	const valueRef = useRef<HTMLSpanElement>(null);
+	const [reveal, setReveal] = useState(false);
+
+	function measure() {
+		setReveal(isClipped(labelRef.current) || isClipped(valueRef.current));
+	}
+
 	return (
 		<button
 			type="button"
 			onClick={editing ? onEdit : undefined}
-			disabled={!editing}
-			title={editing ? "Click to change or remove this field" : view.title}
+			// NOT `disabled` when idle, which is what it used to be. A disabled
+			// button is inert to the pointer in every browser, so it never fired a
+			// hover and the native tooltip below could not appear either -- the
+			// cell's own `title` has been unreachable the whole time. `tabIndex`
+			// keeps it out of the keyboard order instead, and the click handler is
+			// already gated on `editing`.
+			tabIndex={editing ? 0 : -1}
+			onMouseEnter={editing ? undefined : measure}
+			onFocus={editing ? undefined : measure}
+			onMouseLeave={() => setReveal(false)}
+			onBlur={() => setReveal(false)}
+			title={editing ? "Click to change or remove this field" : cellHoverText(view)}
 			// Cells share the row evenly: flex-1 over a zero basis, so every channel
 			// gets the same slice of the width however long its label is. Packed
 			// left with shrink-0, a full-bleed strip left a dead gap on the right
 			// and the columns drifted out of line between rows.
-			className={`flex min-w-0 flex-1 basis-0 flex-col items-start justify-center px-2.5 text-left
+			className={`relative flex min-w-0 flex-1 basis-0 flex-col items-start justify-center px-2.5 text-left
 				${editing ? "cursor-pointer rounded ring-1 ring-sky-400/40 hover:bg-sky-400/10" : "cursor-default"}`}
 		>
-			<span className="w-full truncate text-[9px] uppercase leading-none tracking-wide text-white/45">
+			{/* The reveal. Upward, because the strip is on the bottom edge, and
+			    `whitespace-nowrap` so it is one readable line rather than the same
+			    truncation in a smaller box. Only rendered when something is
+			    actually cut off -- a bubble over a cell you could already read is
+			    noise, and this row is hovered constantly. */}
+			{reveal ? (
+				<div className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-1.5
+					-translate-x-1/2 whitespace-nowrap rounded border border-white/20
+					bg-black/95 px-2 py-1 shadow-lg shadow-black/50">
+					<div className="text-[9px] uppercase tracking-wide text-white/50">{view.label}</div>
+					<div className="font-mono text-[12px] text-white/90">
+						{view.value}{view.unit ? ` ${view.unit}` : ""}
+					</div>
+					{view.title ? (
+						<div className="max-w-[18rem] whitespace-normal pt-0.5 text-[10px] leading-snug text-white/50">
+							{view.title}
+						</div>
+					) : null}
+				</div>
+			) : null}
+
+			<span ref={labelRef}
+				className="w-full truncate text-[9px] uppercase leading-none tracking-wide text-white/45">
 				{view.label}
 			</span>
 			<div className="flex w-full items-baseline gap-1 leading-none">
@@ -93,7 +139,7 @@ const Cell = memo(function Cell({
 				    but struck through and dimmed, so it cannot be mistaken for a
 				    live one at a glance. The frame being fresh does not make every
 				    field in it fresh. */}
-				<span className={`truncate font-mono text-[13px] ${
+				<span ref={valueRef} className={`truncate font-mono text-[13px] ${
 					isNum(view.staleMs) ? "text-white/35 line-through decoration-white/30" : view.tone
 				}`}>{view.value}</span>
 				{view.unit ? <span className="shrink-0 text-[9px] text-white/40">{view.unit}</span> : null}
