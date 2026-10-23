@@ -55,7 +55,10 @@ stop_running_gs() {
   # and escalate rather than guess.
   local waited=0
   while [ "$waited" -lt 100 ]; do
-    pgrep -f "$pattern" >/dev/null 2>&1 || return
+    # `return 0`, not `return`: a bare return passes on pgrep's exit 1 ("none
+    # left"), and under `set -e` that ended the script right after the old gs
+    # exited -- before the new one was ever started.
+    pgrep -f "$pattern" >/dev/null 2>&1 || return 0
     sleep 0.1
     waited=$((waited + 1))
   done
