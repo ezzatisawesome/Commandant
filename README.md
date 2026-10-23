@@ -61,23 +61,18 @@ npm install                                   # first time; also copies Cesium a
 npm run dev                                   # Next app on :4300
 ```
 
-Terminal 3 — PX4 SITL, and Terminal 4 — the sim (both in `AircraftSim`):
+Terminal 3 — the sim, in `AircraftSim`. It starts the PX4 SITL container itself
+(spawned at the scenario's site; the first build compiles PX4, ~30 min, once):
 
 ```sh
-# PX4 in Docker. First run compiles PX4 (~30 min, once); later runs are cached.
-PX4_DIR=../mojave-px4 docker compose up px4
-
-# the host side, which flies it. The aircraft must be named explicitly.
-uv run python -m src run --rig px4_autopilot --aircraft run_h6ue --seconds 600
+uv run python -m aircraftsim run --rig px4_autopilot --aircraft rev6 --seconds 1800
 ```
 
-For a flight meant to run for days, use the supervised path instead, which also
-disables PX4's 850 MB/hour flight log and the lockstep deadlock:
-
-```sh
-uv run python scripts/perpetual_flight.py --lat 37.3985511 --lon -122.148853 \
-    --ground-alt 111 --agl 122 --radius 805
-```
+PX4 uploads and flies the scenario's mission (`missions/*.plan`): a runway
+takeoff, then the loiter. Its MAVLink reaches gs on `udp:14550`; the sim's
+power telemetry (solar, battery, SoC) on `udp:14555`. Start gs first, or the
+aircraft flies with nobody watching. Long flights: see AircraftSim's README,
+"Long-running and perpetual flights".
 
 Open http://localhost:4300 → redirects to `/flight` and autoconnects. In the
 field the console is served by the Pi hub and the WS endpoint is host-relative

@@ -43,3 +43,6 @@ __pycache__/
 .pytest_cache/
 .vercel
 .env*
+
+# recorded flights — run artifacts, hundreds of MB per session
+packages/gs/logs/
