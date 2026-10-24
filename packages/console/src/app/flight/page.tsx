@@ -112,7 +112,8 @@ export default function FlightPage() {
 			<ErrorBoundary name="Log feed"><LogFeed /></ErrorBoundary>
 
 			{/* Wordmark. One line, top-left, the log feed beneath it. */}
-			<div className="pointer-events-none fixed top-4 left-4 z-50 flex items-center gap-2">
+			<div className="pointer-events-none cmd-inset-top cmd-inset-left fixed top-4 left-4 z-50
+				flex items-center gap-2">
 				<Shield className="h-[22px] w-[22px] text-white" />
 				<span className={`${saira.className} text-lg font-semibold uppercase tracking-wide text-white`}>
 					Commandant

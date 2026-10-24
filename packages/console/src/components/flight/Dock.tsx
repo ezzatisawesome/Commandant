@@ -75,7 +75,7 @@ export function Dock({ items }: { items: DockItem[] }) {
 	// when you press it is a control you cannot press twice, which is exactly
 	// what closing a panel requires. Now the icon stays under the cursor.
 	return (
-		<div ref={wrap} className="fixed right-3 top-1/2 z-50 -translate-y-1/2">
+		<div ref={wrap} className="cmd-inset-right fixed right-3 top-1/2 z-50 -translate-y-1/2">
 			{active ? (
 				<div
 					role="dialog"
@@ -83,15 +83,25 @@ export function Dock({ items }: { items: DockItem[] }) {
 					// Opens inboard, centred on the rail independently of its own
 					// height, and capped so it cannot reach the telemetry strip along
 					// the bottom edge or the heading tape across the top.
-					className="absolute right-full top-1/2 mr-2 max-h-[calc(100vh-13rem)]
-						w-max max-w-[calc(100vw-5rem)] -translate-y-1/2 overflow-y-auto rounded-md
+					// `dvh` rather than `vh`, so the cap follows a mobile browser's own
+					// toolbars instead of assuming they are hidden — otherwise a panel
+					// on a phone is capped to a height taller than the screen and its
+					// bottom rows are simply unreachable. `cmd-scroll` gives the
+					// overflow to this element rather than to the document, which is
+					// what stops a flick inside a panel rubber-banding the whole page.
+					className="cmd-scroll absolute right-full top-1/2 mr-2 max-h-[calc(100dvh-13rem)]
+						w-max max-w-[calc(100vw-4.5rem)] -translate-y-1/2 overflow-y-auto rounded-md
 						border border-white/10 bg-black/70 p-3 backdrop-blur"
 				>
 					{active.panel}
 				</div>
 			) : null}
 
-			<div className="flex w-9 flex-col gap-1 rounded-md border border-white/10 bg-black/50 p-1 backdrop-blur">
+			{/* 36 px is a gutter you aim a mouse at. A thumb needs 44, so the rail
+			    widens below `sm` — on a phone the dock is the only way into any
+			    panel, and a missed icon there opens the wrong one. */}
+			<div className="flex w-11 flex-col gap-1 rounded-md border border-white/10 bg-black/50 p-1
+				backdrop-blur sm:w-9">
 				{items.map((i) => (
 					<button
 						key={i.key}
@@ -99,7 +109,7 @@ export function Dock({ items }: { items: DockItem[] }) {
 						aria-label={i.label}
 						aria-pressed={open === i.key}
 						onClick={() => setOpen((o) => nextOpen(o, i.key))}
-						className={`flex h-7 w-7 items-center justify-center rounded ${
+						className={`flex h-9 w-9 items-center justify-center rounded sm:h-7 sm:w-7 ${
 							open === i.key
 								? "bg-white/15 text-white"
 								: "text-white/45 hover:bg-white/10 hover:text-white"

@@ -20,6 +20,7 @@ import {
 
 import { $viewerStore } from "@/stores/cesium.store";
 import { isOverHandle } from "@/lib/pickTag";
+import { isTouchPrimary } from "@/lib/touchCamera";
 
 // Where is the mouse, in the world?
 //
@@ -55,6 +56,14 @@ export default function CursorGround() {
 
 	useEffect(() => {
 		if (!$viewer) return;
+		// Not on a touch screen. The whole layer answers "where is the pointer",
+		// and a finger is not anywhere between taps: Cesium synthesises one
+		// MOUSE_MOVE per touch, so the rod would plant itself where the operator
+		// last tapped and stay there, reading as a live measurement of a place
+		// nobody is pointing at. It is also drawn over the terrain the thumb is
+		// about to drag. A phone gets no cursor decoration because it has no
+		// cursor.
+		if (isTouchPrimary()) return;
 
 		// The live cursor target: a ground position and the stem height to draw
 		// above it. Held in the closure and read by the callbacks below, so a
@@ -90,11 +99,19 @@ export default function CursorGround() {
 			},
 		}));
 
-		// Where it lands: a point with depth testing off, so it survives a
-		// grazing view, plus a ring so the landing still reads from straight down
-		// where the stem foreshortens to nothing.
+		// The head of the rod: a point with depth testing off, so it survives a
+		// grazing view and reads against bright terrain.
+		//
+		// It is at the TOP of the stem, not the bottom. The dot is what the eye
+		// finds first, and at the foot of the rod it sat exactly where the ring
+		// already is — two marks on the same pixels, so the dot added nothing and
+		// the two together made a blob that was hard to place against texture. At
+		// the head it is clear of the ground and of the ring, and it anchors the
+		// readout written beside it: dot, numbers, then a line showing you which
+		// patch of ground they describe. The ring remains the landing mark, which
+		// is the one job the foot of the rod has.
 		ents.push($viewer.entities.add({
-			position: new CallbackPositionProperty(groundPos, false),
+			position: new CallbackPositionProperty(topPos, false),
 			point: {
 				pixelSize: 6,
 				color: Color.WHITE.withAlpha(0.85),
@@ -102,6 +119,12 @@ export default function CursorGround() {
 				outlineWidth: 1,
 				disableDepthTestDistance: Number.POSITIVE_INFINITY,
 			},
+		}));
+
+		// Where it lands: a ring, so the landing still reads from straight down
+		// where the stem foreshortens to nothing.
+		ents.push($viewer.entities.add({
+			position: new CallbackPositionProperty(groundPos, false),
 			ellipse: {
 				semiMajorAxis: new CallbackProperty(() => stem * 0.12, false) as unknown as number,
 				semiMinorAxis: new CallbackProperty(() => stem * 0.12, false) as unknown as number,
@@ -126,7 +149,8 @@ export default function CursorGround() {
 				fillColor: Color.WHITE.withAlpha(0.8),
 				style: LabelStyle.FILL,
 				verticalOrigin: VerticalOrigin.BOTTOM,
-				pixelOffset: new Cartesian2(10, -4),
+				// Clear of the head dot, which is now at this same position.
+				pixelOffset: new Cartesian2(12, -6),
 				disableDepthTestDistance: Number.POSITIVE_INFINITY,
 			},
 		}));

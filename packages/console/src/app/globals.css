@@ -87,3 +87,84 @@
   bottom: auto !important;
   right: 14px !important;
 }
+
+/* Touch. The page is a map, so the browser's own gestures are the enemy: a
+   one-finger drag on the globe must not scroll or rubber-band the document, a
+   double-tap must not zoom the layout, and a swipe from the edge must not
+   trigger back-navigation mid-manoeuvre. None of that is reachable from React,
+   because it is the document that owns the gesture, not the canvas. */
+html,
+body {
+  overscroll-behavior: none;
+  /* No document-level panning or zooming; the globe consumes the gesture. */
+  touch-action: none;
+  /* The console never scrolls — every surface is fixed or internally scrolled —
+     so a document taller than the viewport is a layout bug, not a page. */
+  overflow: hidden;
+  /* 100dvh plus a fixed body: iOS Safari otherwise resizes the globe every time
+     its own toolbar slides in and out, which rebuilds the whole Cesium
+     framebuffer mid-drag. */
+  position: fixed;
+  inset: 0;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* Cesium's canvas handles its own pointers; say so, so no browser is tempted. */
+#cesiumContainer canvas {
+  touch-action: none;
+}
+
+/* Surfaces the operator scrolls *inside* — the field picker, the dock panels —
+   opt back in, and keep their rubber-band to themselves. */
+.cmd-scroll {
+  touch-action: pan-y;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* A row of instruments that is wider than a phone is dragged sideways, which is
+   a horizontal gesture the document must not claim. */
+.cmd-scroll-x {
+  touch-action: pan-x;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.cmd-scroll-x::-webkit-scrollbar {
+  display: none;
+}
+
+/* Chrome pinned to the screen edges clears the notch and the home bar. The
+   globe itself deliberately does not — it runs full-bleed underneath. */
+.cmd-inset-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.cmd-inset-top {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+.cmd-inset-right {
+  margin-right: env(safe-area-inset-right, 0px);
+}
+.cmd-inset-left {
+  margin-left: env(safe-area-inset-left, 0px);
+}
+
+/* The scene-mode button is a 2D/3D toggle, and the one piece of Cesium's own
+   chrome left on the page. On a phone the attitude ball it hangs below is
+   proportionally much closer to it, and 142px puts it under the ball's readout
+   but on top of the altitude tape's labels — so on a narrow screen it moves to
+   the LEFT edge, which is the one edge nothing is pinned to. */
+@media (max-width: 639px) {
+  .cesium-viewer-toolbar {
+    top: calc(env(safe-area-inset-top, 0px) + 96px) !important;
+    right: auto !important;
+    left: calc(env(safe-area-inset-left, 0px) + 10px) !important;
+  }
+  /* Cesium's buttons are sized for a mouse. A 32px square is below every touch
+     guideline there is, and this one is pressed with a thumb. */
+  .cesium-viewer-toolbar .cesium-button {
+    width: 44px !important;
+    height: 44px !important;
+  }
+}

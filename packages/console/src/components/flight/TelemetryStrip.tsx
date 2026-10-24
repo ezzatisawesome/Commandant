@@ -80,14 +80,31 @@ const Cell = memo(function Cell({
 	// one would cost more than the 25 Hz redraw it sits inside.
 	const labelRef = useRef<HTMLSpanElement>(null);
 	const valueRef = useRef<HTMLSpanElement>(null);
-	const [reveal, setReveal] = useState(false);
+	const selfRef = useRef<HTMLButtonElement>(null);
+	// Where to put the bubble, in VIEWPORT coordinates, or null for "don't show".
+	//
+	// It used to be an absolutely-positioned child, which worked only because
+	// nothing between it and the screen clipped. The row is a scroll container
+	// now -- that is what lets a crowded strip be dragged sideways instead of
+	// crushed -- and a scroll container clips in BOTH axes, so an `absolute`
+	// bubble reaching up out of the strip was cut off at the row's top edge:
+	// exactly the cells that need it are the ones that made the row overflow.
+	// `fixed` is measured against the viewport instead, so no ancestor's
+	// overflow applies.
+	const [reveal, setReveal] = useState<{ cx: number; top: number } | null>(null);
 
 	function measure() {
-		setReveal(isClipped(labelRef.current) || isClipped(valueRef.current));
+		if (!isClipped(labelRef.current) && !isClipped(valueRef.current)) {
+			setReveal(null);
+			return;
+		}
+		const r = selfRef.current?.getBoundingClientRect();
+		if (r) setReveal({ cx: r.left + r.width / 2, top: r.top });
 	}
 
 	return (
 		<button
+			ref={selfRef}
 			type="button"
 			onClick={editing ? onEdit : undefined}
 			// NOT `disabled` when idle, which is what it used to be. A disabled
@@ -99,14 +116,36 @@ const Cell = memo(function Cell({
 			tabIndex={editing ? 0 : -1}
 			onMouseEnter={editing ? undefined : measure}
 			onFocus={editing ? undefined : measure}
-			onMouseLeave={() => setReveal(false)}
-			onBlur={() => setReveal(false)}
+			onMouseLeave={() => setReveal(null)}
+			onBlur={() => setReveal(null)}
 			title={editing ? "Click to change or remove this field" : cellHoverText(view)}
 			// Cells share the row evenly: flex-1 over a zero basis, so every channel
 			// gets the same slice of the width however long its label is. Packed
 			// left with shrink-0, a full-bleed strip left a dead gap on the right
 			// and the columns drifted out of line between rows.
-			className={`relative flex min-w-0 flex-1 basis-0 flex-col items-start justify-center px-2.5 text-left
+			//
+			// `justify-start`, not `justify-center`: the label is the top line of
+			// every cell, and it has to sit on one baseline right across the strip
+			// or the row stops reading as a row. Centring the column meant a cell
+			// that carries a sparkline, or a second row that does not, pushed its
+			// own label up or down by a few pixels — so the header line sagged and
+			// rose across the strip and the eye could no longer scan it. Height
+			// differences now fall out of the BOTTOM of the cell, where nothing is
+			// being compared.
+			//
+			// `min-w-[4.75rem]`: an even split with no floor gives a cell about
+			// 40 px on a phone, which truncates every label to two characters, so
+			// the strip is full of "AI…" and "AL…" and says nothing. With a floor
+			// the row overflows and is dragged sideways instead — a readable
+			// instrument you pan, rather than an unreadable one that fits.
+			//
+			// It is NOT a `sm:` rule. The binding constraint is how many channels
+			// are in the row, not how wide the screen is: a phone in landscape is
+			// 750 px, past every mobile breakpoint, and crushed sixteen cells just
+			// as badly as it did in portrait. Below the floor a cell is not a
+			// smaller instrument, it is no instrument.
+			className={`relative flex min-w-[4.75rem] flex-1 basis-0 flex-col items-start justify-start
+				px-2.5 text-left
 				${editing ? "cursor-pointer rounded ring-1 ring-sky-400/40 hover:bg-sky-400/10" : "cursor-default"}`}
 		>
 			{/* The reveal. Upward, because the strip is on the bottom edge, and
@@ -115,9 +154,10 @@ const Cell = memo(function Cell({
 			    actually cut off -- a bubble over a cell you could already read is
 			    noise, and this row is hovered constantly. */}
 			{reveal ? (
-				<div className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-1.5
-					-translate-x-1/2 whitespace-nowrap rounded border border-white/20
-					bg-black/95 px-2 py-1 shadow-lg shadow-black/50">
+				<div
+					style={{ left: reveal.cx, bottom: `calc(100dvh - ${reveal.top}px + 6px)` }}
+					className="pointer-events-none fixed z-[70] -translate-x-1/2 whitespace-nowrap
+						rounded border border-white/20 bg-black/95 px-2 py-1 shadow-lg shadow-black/50">
 					<div className="text-[9px] uppercase tracking-wide text-white/50">{view.label}</div>
 					<div className="font-mono text-[12px] text-white/90">
 						{view.value}{view.unit ? ` ${view.unit}` : ""}
@@ -150,10 +190,11 @@ const Cell = memo(function Cell({
 	);
 });
 
-const Divider = () => <div className="mx-0.5 h-7 w-px shrink-0 bg-white/10" />;
+const Divider = () => <div className="mx-0.5 mt-0.5 h-7 w-px shrink-0 bg-white/10" />;
 
-/** The link column, reserved on every row so the channels line up under it. */
-const LINK_GUTTER = "w-[7.5rem] px-3";
+/** The link column, reserved on every row so the channels line up under it.
+ *  Narrower on a phone, where 7.5rem is a fifth of the screen. */
+const LINK_GUTTER = "w-[5.5rem] px-2 sm:w-[7.5rem] sm:px-3";
 
 export function TelemetryStrip() {
 	const f = useStore($hudFrame);
@@ -320,11 +361,18 @@ export function TelemetryStrip() {
 	);
 
 	return (
-		<div className="pointer-events-none fixed inset-x-0 bottom-0 z-40 flex flex-col items-stretch">
+		// The strip normally sits below the dock (z-50), which is right: the dock is
+		// chrome the operator reaches for, the strip is a readout. But the field
+		// picker opens UPWARD out of the strip, and on a phone it is nearly screen
+		// width — so it ran under the dock rail, and a tap aimed at a channel row
+		// opened a panel instead. While the picker is open it outranks the dock.
+		<div className={`pointer-events-none fixed inset-x-0 bottom-0 flex flex-col items-stretch
+			${picking ? "z-[60]" : "z-40"}`}>
 			{/* Field picker, opened by clicking a cell in edit mode. */}
 			{picking ? (
-				<div className="pointer-events-auto mb-1 flex max-h-96 w-96 self-center flex-col
-					overflow-hidden rounded-md border border-white/15 bg-black/90 text-[11px] backdrop-blur">
+				<div className="pointer-events-auto mb-1 flex max-h-[60dvh] w-[min(24rem,calc(100vw-1.5rem))]
+					self-center flex-col overflow-hidden rounded-md border border-white/15
+					bg-black/90 text-[11px] backdrop-blur">
 					<div className="flex items-center justify-between px-2 pt-2">
 						<span className="uppercase tracking-wide text-white/50">
 							{picking[1] < 0 ? "Add channel" : "Change channel"}
@@ -346,7 +394,7 @@ export function TelemetryStrip() {
 						/>
 					</div>
 
-					<div className="flex-1 overflow-y-auto border-t border-white/10">
+					<div className="cmd-scroll flex-1 overflow-y-auto border-t border-white/10">
 						{groupsShown.map((g) => (
 							<div key={g.ns}>
 								<div className="sticky top-0 bg-black/90 px-2 py-1 text-[9px] uppercase
@@ -364,8 +412,11 @@ export function TelemetryStrip() {
 												if (i < 0) addCell(r, o.key); else setCell(r, i, o.key);
 												setPicking(null); setQuery("");
 											}}
-											className={`flex w-full items-baseline gap-2 px-2 py-1 text-left
-												hover:bg-sky-400/10 ${current ? "bg-white/5" : ""}`}
+											// `py-2` below `sm`: a 22 px row is a mouse target, not a
+											// thumb one, and picking the wrong channel here is a silent
+											// error — the strip just shows something else.
+											className={`flex w-full items-baseline gap-2 px-2 py-2 text-left
+												hover:bg-sky-400/10 sm:py-1 ${current ? "bg-white/5" : ""}`}
 										>
 											<span className={`font-mono ${current ? "text-sky-300" : "text-white/85"}`}>
 												{o.channel}
@@ -431,7 +482,7 @@ export function TelemetryStrip() {
 			{/* Full-bleed: the strip spans the whole viewport width, so the grid
 			    reads as an instrument row along the bottom edge rather than a
 			    floating card. Only the top edge is drawn — the sides are screen. */}
-			<div className="pointer-events-auto flex w-full flex-col
+			<div className="pointer-events-auto cmd-inset-bottom flex w-full flex-col
 				border-t border-white/10 bg-black/70 backdrop-blur">
 
 				{/* Pinned header line. Vehicle health sits here rather than behind a
@@ -467,26 +518,45 @@ export function TelemetryStrip() {
 						// block rather than separate targets — so the row only gains gaps
 						// (and side padding, so the end rings aren't flush against the
 						// screen) while editing. Normal flight keeps the cells tight.
-						className={`flex items-stretch border-t border-white/10 py-1.5
-							${editing ? "gap-1.5 px-1" : ""}`}>
+						// `items-start` so a taller cell cannot drag its neighbours' labels
+						// off the row's top line, and `cmd-scroll-x` so a row with more
+						// channels than fit is dragged sideways — with a thumb or a
+						// trackpad — instead of being crushed. The scrollbar itself is
+						// hidden (see globals.css); a bar across the instrument row would
+						// cost more than it explains, and the clipped cells are the hint.
+						className={`cmd-scroll-x flex items-start overflow-x-auto border-t border-white/10
+							py-1.5 ${editing ? "gap-1.5 px-1" : ""}`}>
 						{/* Link status leads the first row: the first thing to check. The
 						    gutter is a FIXED width and every later row reserves it, so
 						    channels on row 1+ start where row 0's channels do instead of
 						    sliding under the link block — the strip reads as columns. */}
-						<div className={`flex shrink-0 items-center gap-2 ${LINK_GUTTER}`}
+						{/* `sticky`: the channels scroll under this column, the link status
+						    does not. It is the first thing to check, and it is also the
+						    column every later row's channels are lined up against — both
+						    of which stop being true the moment it can be scrolled away.
+						    `self-stretch` so it reads as a column rather than a chip
+						    floating over the row. */}
+						<div className={`sticky left-0 z-10 flex shrink-0 self-stretch items-start gap-2
+							bg-black/70 ${LINK_GUTTER}`}
 							title={r === 0 ? dot.title : undefined} aria-hidden={r > 0}>
 							{r === 0 ? (
 								<>
-									<span className={`h-2 w-2 shrink-0 rounded-full ${dot.className}`} />
+									{/* `mt-0.5` puts the dot on the LABEL's line rather than the
+									    column's centre, now that the column is top-aligned. */}
+									<span className={`mt-0.5 h-2 w-2 shrink-0 rounded-full ${dot.className}`} />
 									<div className="flex min-w-0 flex-col leading-none">
 										<span className="text-[9px] uppercase tracking-wide text-white/45">Link</span>
+										{/* `truncate`: on a phone this column is 88 px, and a long outage
+										    ("stale 11518s") wrapped onto three lines — which made row 0
+										    taller than row 1 and pushed the strip's own bottom row off
+										    the screen. The full figure is in the title either way. */}
 										{frozen ? (
-											<span className="font-mono text-[11px] font-semibold text-red-400"
+											<span className="truncate font-mono text-[11px] font-semibold text-red-400"
 												title={`No new vehicle data for ${Math.round((age as number) / 1000)} s`}>
 												stale {Math.round((age as number) / 1000)}s
 											</span>
 										) : (
-											<span className="font-mono text-[11px] text-white/80">{linkState}</span>
+											<span className="truncate font-mono text-[11px] text-white/80">{linkState}</span>
 										)}
 									</div>
 								</>

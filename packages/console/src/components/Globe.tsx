@@ -9,6 +9,7 @@ import envs from "@/lib/envs";
 import { $viewerStore } from "@/stores/cesium.store";
 import { driveRendering } from "@/lib/driveRendering";
 import { applyQuality } from "@/lib/renderQuality";
+import { applyTouchCamera } from "@/lib/touchCamera";
 import { $timeStore } from "@/stores/states.store";
 
 // Generic Cesium globe. Owns only the Viewer + container; domain layers
@@ -117,6 +118,14 @@ export default function Globe() {
 		// antialiasing passes per frame and roughly halves first-load tile traffic.
 		applyQuality(viewer);
 
+		// Gesture feel: inertia, a zoom floor, and no free-look fighting the
+		// two-finger tilt. See lib/touchCamera.ts for why each one, and note that
+		// it is applied unconditionally — glide and a terrain floor are as right
+		// under a trackpad as under a thumb, and branching on the pointer type
+		// would mean the console the operator practises on behaves differently
+		// from the one in their hand.
+		applyTouchCamera(viewer);
+
 		// Ask for a frame whenever the aircraft state changes. This is what makes
 		// requestRenderMode safe with CallbackProperty-driven entities.
 		const stopDriving = driveRendering(viewer);
@@ -134,6 +143,11 @@ export default function Globe() {
 	}, []);
 
 	return (
-		<div id="cesiumContainer" className="h-screen w-screen" />
+		// `dvh`, not `vh`: on mobile Safari and Chrome `100vh` is the viewport with
+		// the browser's own toolbars hidden, so the globe was ~90 px taller than
+		// the screen and the telemetry strip sat below the fold. `w-full` rather
+		// than `w-screen` for the same class of reason — `w-screen` ignores a
+		// scrollbar gutter and produces a horizontal overflow on desktop.
+		<div id="cesiumContainer" className="h-[100dvh] w-full" />
 	);
 }
