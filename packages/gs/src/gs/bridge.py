@@ -165,6 +165,7 @@ _AGE_GROUPS = {
     "GPS_RAW_INT": "gps",
     "BATTERY_STATUS": "battery",
     "ACTUATOR_OUTPUT_STATUS": "actuators",
+    "HIL_ACTUATOR_CONTROLS": "actuators",   # HITL: the simulated outputs
     "SYS_STATUS": "health",
     "EKF_STATUS_REPORT": "ekf",
     "ESTIMATOR_STATUS": "ekf",      # PX4's name for the same report
@@ -900,6 +901,57 @@ def pwm_pct(us: float) -> float:
     return max(-100.0, min(100.0, ((us - 1500.0) / 500.0) * 100.0))
 
 
+# The vehicle's own output map, read from its params rather than assumed: which
+# output channel carries which servo function (201 + k = Servo k+1), and which
+# surface each servo is (PX4 control_allocator CA_SV_CS<k>_TYPE). Fixed channel
+# positions read one airframe's wiring on every aircraft; on a HITL board they
+# decoded unmapped outputs (aileron pinned near -50 %). HIL_ACT_* is HITL's
+# simulated bank, PWM_MAIN_* the bank ACTUATOR_OUTPUT_STATUS reports otherwise.
+OUTPUT_MAP_CHANNELS = 16
+OUTPUT_MAP_SERVOS = 8
+SERVO_FUNC_FIRST = 201
+SURFACE_TYPES = {1: "left_aileron", 2: "right_aileron", 3: "elevator", 4: "rudder"}
+OUTPUT_MAP_PARAMS = tuple(
+    [f"HIL_ACT_FUNC{n}" for n in range(1, OUTPUT_MAP_CHANNELS + 1)]
+    + [f"PWM_MAIN_FUNC{n}" for n in range(1, OUTPUT_MAP_CHANNELS + 1)]
+    + [f"CA_SV_CS{k}_TYPE" for k in range(OUTPUT_MAP_SERVOS)])
+OUTPUT_MAP_RETRY_MS = 2000   # re-ask for map params still missing this often
+OUTPUT_MAP_TRIES = 10        # ...this many times per vehicle boot
+HIL_CONTROLS_FRESH_MS = 1000  # HIL_ACTUATOR_CONTROLS this recent outrank PWM
+
+
+def surface_channels(omap: dict, prefix: str) -> dict:
+    """{surface: [1-based output channel, ...]} for one output bank, from the
+    vehicle's params (OUTPUT_MAP_PARAMS). A bank or servo the vehicle did not
+    report maps nothing: an unknown surface stays unknown."""
+    out: dict = {}
+    for n in range(1, OUTPUT_MAP_CHANNELS + 1):
+        func = omap.get(f"{prefix}{n}")
+        if func is None:
+            continue
+        k = int(func) - SERVO_FUNC_FIRST
+        if not 0 <= k < OUTPUT_MAP_SERVOS:
+            continue
+        kind = SURFACE_TYPES.get(int(omap.get(f"CA_SV_CS{k}_TYPE", -1)))
+        if kind:
+            out.setdefault(kind, []).append(n)
+    return out
+
+
+def surfaces_pct(channels: dict, value) -> dict:
+    """aileron / elevator / rudder in percent from per-channel deflections
+    (`value(channel)` -> percent or None). Aileron is (right - left) / 2, as
+    before; a surface the vehicle lacks is None, not 0."""
+    def mean(kind):
+        v = [value(c) for c in channels.get(kind, ())]
+        v = [x for x in v if x is not None]
+        return sum(v) / len(v) if v else None
+    left, right = mean("left_aileron"), mean("right_aileron")
+    aileron = (0.5 * (right - left) if left is not None and right is not None
+               else right if right is not None else (-left if left is not None else None))
+    return {"aileron": aileron, "elevator": mean("elevator"), "rudder": mean("rudder")}
+
+
 # The commanded-path overlay's fields, as one group: they are accepted or
 # refused together, because a target latitude from one source and a longitude
 # from another is a point that exists nowhere.
@@ -1178,6 +1230,11 @@ class Bridge:
         self._req_tries: dict[int, int] = {}
         # name -> MAV_PARAM_TYPE, learned from the vehicle. See _start_param_set.
         self._param_types: dict[str, int] = {}
+        # the vehicle's output map (OUTPUT_MAP_PARAMS), and asking for it
+        self._outmap: dict[str, float] = {}
+        self._outmap_asked_at = -OUTPUT_MAP_RETRY_MS
+        self._outmap_tries = 0
+        self._hil_controls_at = -HIL_CONTROLS_FRESH_MS
         # Backoff state for asking PX4 to STOP sending something. Separate from
         # _req_tries, whose reset-on-arrival rule is the opposite of this one's.
         self._trim_at: dict[int, int] = {}
@@ -1311,6 +1368,7 @@ class Bridge:
         self._last_req_at.clear()   # re-request the extra streams on the new link
         self._req_tries.clear()     # ...promptly, not at the backed-off rate
         self._param_types.clear()   # a different airframe may type names differently
+        self._forget_output_map()   # ...and wire its outputs differently
         self._trim_at.clear()       # the new link is back on PX4's defaults
         self._trim_tries.clear()
         # `_vehicle` and `_src_at` are read by the OTHER threads -- the broadcast
@@ -1666,6 +1724,34 @@ class Bridge:
                 except Exception as exc:
                     print(f"[gs] stream request failed: {exc}")
 
+    # --- the vehicle's output map ----------------------------------------------
+    def _forget_output_map(self) -> None:
+        with self._lock:
+            self._outmap.clear()
+            self._hil_controls_at = -HIL_CONTROLS_FRESH_MS
+        self._outmap_tries = 0
+        self._outmap_asked_at = -OUTPUT_MAP_RETRY_MS
+
+    def _request_output_map(self, conn: Any, now: int) -> None:
+        """Read the output-map params the vehicle has not answered yet, by name.
+        A param a vehicle does not have (a SITL build has no HIL_ACT_*) never
+        answers, so the asking stops after OUTPUT_MAP_TRIES rounds per boot."""
+        if (self._vehicle is None or self._outmap_tries >= OUTPUT_MAP_TRIES
+                or now - self._outmap_asked_at < OUTPUT_MAP_RETRY_MS):
+            return
+        with self._lock:
+            missing = [n for n in OUTPUT_MAP_PARAMS if n not in self._outmap]
+        if not missing:
+            return
+        self._outmap_asked_at, self._outmap_tries = now, self._outmap_tries + 1
+        for name in missing:
+            try:
+                conn.mav.param_request_read_send(self.tsys, self.tcomp,
+                                                 name.encode("ascii"), -1)
+            except Exception as exc:
+                print(f"[gs] output-map param read failed: {exc}")
+                return
+
     # --- param protocol (hand-rolled, mav thread) ----------------------------
     def _service_params(self, conn: Any) -> None:
         now = _mono_ms()
@@ -1690,6 +1776,9 @@ class Bridge:
                 self._start_param_refresh(conn)
             elif item["kind"] == "set":
                 self._start_param_set(conn, item)
+
+        # 1b. Ask for the vehicle's output map until it is in (OUTPUT_MAP_PARAMS).
+        self._request_output_map(conn, now)
 
         # 2. Flush the coalesced PARAM_VALUE batch (time- or size-triggered).
         if self._param_batch and (now - self._param_batch_at >= PARAM_BATCH_MS
@@ -1805,6 +1894,7 @@ class Bridge:
         vehicle has dropped it. gs holds no param cache of its own, so this is
         broadcast rather than handled here."""
         now_mono = _mono_ms()
+        self._forget_output_map()   # a reboot (HITL setup does two) may rewire outputs
         self._reboot_times = [t for t in self._reboot_times
                               if now_mono - t < REBOOT_STORM_WINDOW_MS]
         self._reboot_times.append(now_mono)
@@ -2413,14 +2503,25 @@ class Bridge:
             if msg.battery_remaining != -1:
                 L["batteryRemaining"] = msg.battery_remaining
 
+        elif t == "HIL_ACTUATOR_CONTROLS":
+            # HITL: the commands the simulator flies (-1..1), on the board's
+            # HIL_ACT_FUNC map. They outrank the board's PWM report, which on a
+            # board is its REAL outputs (mapped only when they are driven).
+            ch = surface_channels(self._outmap, "HIL_ACT_FUNC")
+            c = msg.controls
+            if ch:
+                self._hil_controls_at = now
+                L.update(surfaces_pct(ch, lambda n: 100.0 * max(-1.0, min(1.0, c[n - 1]))
+                                      if n - 1 < len(c) else None))
+
         elif t == "ACTUATOR_OUTPUT_STATUS":
-            # Post-mixer PWM (µs). idx5/6 = L/R aileron, idx7 = elevator; the
-            # twin fins have no rudder output. Mirrors the sim's mavlink_io.
+            # Post-mixer PWM (µs) of the PWM_MAIN bank, on the vehicle's own map
+            # (unless fresh HIL controls already gave the simulated surfaces).
+            ch = surface_channels(self._outmap, "PWM_MAIN_FUNC")
             a = msg.actuator
-            if a and len(a) > 7:
-                L["aileron"] = 0.5 * (pwm_pct(a[6]) - pwm_pct(a[5]))
-                L["elevator"] = pwm_pct(a[7])
-                L["rudder"] = 0
+            if ch and a and now - self._hil_controls_at >= HIL_CONTROLS_FRESH_MS:
+                L.update(surfaces_pct(ch, lambda n: pwm_pct(a[n - 1])
+                                      if n - 1 < len(a) and a[n - 1] > 0 else None))
 
         elif t == "SYS_STATUS":
             # All enabled sensors healthy? (bitwise: enabled ⊆ healthy.)
@@ -2665,6 +2766,9 @@ class Bridge:
             if not self._param_batch:
                 self._param_batch_at = now
             value = param_decode(msg.param_value, msg.param_type)
+            if name in OUTPUT_MAP_PARAMS:
+                with self._lock:
+                    self._outmap[name] = value
             # Remember the TYPE the vehicle reports (not the value -- see
             # _start_param_set). Bounded by the vehicle's parameter count, ~720
             # on the PX4 this was measured against.

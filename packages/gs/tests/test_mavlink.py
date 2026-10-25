@@ -12,6 +12,7 @@ import asyncio
 import json
 import math
 import threading
+import struct
 import time
 
 import websockets
@@ -65,6 +66,14 @@ def test_mavlink_to_ws_decode():
                 mavutil.mavlink.MAV_BATTERY_TYPE_LIPO, 32767,
                 [24300] + [65535] * 9, 250, -1, -1, 87,
             )
+            # The vehicle states its output map, as PX4 does when asked (gs reads
+            # it rather than assuming channel positions): rev6's SITL wiring,
+            # channels 6/7/8 = servos 1/2/3 = left aileron, right aileron, elevator.
+            for name, value in (("PWM_MAIN_FUNC6", 201), ("PWM_MAIN_FUNC7", 202),
+                                ("PWM_MAIN_FUNC8", 203), ("CA_SV_CS0_TYPE", 1),
+                                ("CA_SV_CS1_TYPE", 2), ("CA_SV_CS2_TYPE", 3)):
+                mav.param_value_send(name.encode(), struct.unpack("<f", struct.pack("<i", value))[0],
+                                     mavutil.mavlink.MAV_PARAM_TYPE_INT32, 1000, 65535)
             # idx5=1500µs(0%), idx6=2000µs(+100%) -> aileron 50; idx7=1000µs -> elevator -100.
             actuator = [0.0] * 32
             actuator[5], actuator[6], actuator[7] = 1500.0, 2000.0, 1000.0
