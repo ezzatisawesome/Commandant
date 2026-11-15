@@ -115,6 +115,26 @@ state (`mission_current`, `mission_reached`) belongs to the run that ended and
 goes too; the stored plan itself usually survives in the autopilot, so it is
 left alone — pull it to be sure.
 
+### `history` (once, as a client connects)
+```json
+{ "type": "history",
+  "track":  [[37.40005, -122.15468, 121.8], ...],
+  "target": [[37.40012, -122.15470, 121.8], ...],
+  "frames": [{ "type": "telemetry", ... }, ...] }
+```
+The run so far, sent to each console before its first `telemetry` frame, so a
+page that reloads or opens mid-run draws where the aircraft has been instead
+of starting blank. `track` is the flown path and `target` the commanded one
+(at the aircraft's altitude), `[lat, lon, alt]` oldest first, thinned exactly
+as the console thins its own trail (a vertex per 2 m, a >2 km jump dropped,
+3000 points); `frames` are recent telemetry frames, one per 250 ms, up to 480
+(the sparkline window). Only live-link frames are kept.
+
+The run is the vehicle's: a `vehicle_reboot` clears it (every SITL run starts a
+fresh PX4, the HITL rig reboots the board), so a new run never inherits the last
+one's track, and the console clears its own on the same message. Not sent while
+gs is replaying a log. gs: `track.py`.
+
 ### `status` (ask the daemon what it decided)
 console → gs: `{ "type": "status" }` → one `status` back.
 

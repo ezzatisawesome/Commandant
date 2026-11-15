@@ -290,3 +290,40 @@ export function clearTrail() {
 	$targetTrailStore.set([]);
 	clearSegmented();
 }
+
+/** Forget the run: both paths and the sparkline history. A new run (the
+ *  vehicle rebooted) starts from nothing rather than joining on to the last. */
+export function clearRun() {
+	clearTrail();
+	clearIfNeeded($historyStore);
+}
+
+/** gs's `history` message: the run so far, sent to a console as it connects. */
+export interface HistoryMessage {
+	/** Flown path, [lat, lon, alt] oldest first, already thinned like appendTrail. */
+	track: [number, number, number][];
+	/** Commanded path, same form, at the aircraft's altitude. */
+	target: [number, number, number][];
+	/** Recent frames, one per HISTORY_INTERVAL_MS, oldest first. */
+	frames: TelemetryFrame[];
+}
+
+/** Rebuild the trails and sparkline history from gs's copy of the run, so a
+ *  reloaded or late page shows where the aircraft has been instead of starting
+ *  blank. Replaces whatever is on screen: gs's copy is the whole run. */
+export function loadHistory(h: HistoryMessage) {
+	clearRun();
+	const load = (rows: [number, number, number][], store: typeof $trailStore, seg: SegmentedTrail) => {
+		const pts = (rows ?? []).map(([lat, lon, alt]) => Cartesian3.fromDegrees(lon, lat, alt));
+		if (!pts.length) return;
+		store.set(pts.slice(-TRAIL_MAX));
+		for (const p of pts.slice(-TRAIL_MAX)) seg.append(p);
+	};
+	load(h.track, $trailStore, flownTrail);
+	load(h.target, $targetTrailStore, targetTrail);
+	const frames = (h.frames ?? []).map((f) => sanitizeFrame(f)).slice(-HISTORY_MAX);
+	if (frames.length) $historyStore.set(frames);
+	// The live frames that follow continue this run: the link-up edge in
+	// pushFrame must not mistake the first of them for a new run and wipe it.
+	if (h.track?.length || frames.length) wasConnected = true;
+}

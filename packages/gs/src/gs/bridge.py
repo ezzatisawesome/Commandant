@@ -51,6 +51,7 @@ from . import host as _host
 from .events import EventDecoder, find_metadata
 from .flightlog import FlightLog
 from .ftp import FtpRead
+from .track import RunTrack
 from .watchdog import Watchdog
 
 if not hasattr(mavutil.mavlink, "MAVLINK_MSG_ID_ACTUATOR_OUTPUT_STATUS"):
@@ -1474,6 +1475,9 @@ class Bridge:
         self._trim_tries: dict[int, int] = {}
 
         self._clients: set[Any] = set()
+        # The run so far, for a console that connects (or reloads) mid-run:
+        # sent to it as one `history` message before live telemetry (track.py).
+        self._track = RunTrack()
 
         # The vehicle we are talking to: (sysid, compid), locked from the first
         # autopilot heartbeat. Until then TX goes to the PX4 default 1/1. Messages
@@ -2296,6 +2300,8 @@ class Bridge:
             return
         self._storm_reported = False
         print(f"[gs] vehicle rebooted (uptime restarted at {boot_ms} ms)")
+        # A new run: its track starts here, not where the last one ended.
+        self._track.clear()
         aborted = self._abandon_in_flight("vehicle rebooted")
         # The extra streams have to be re-requested: the new instance is back on
         # PX4's defaults and never saw our SET_MESSAGE_INTERVALs. The backoff
@@ -3868,6 +3874,10 @@ class Bridge:
         self._loop = asyncio.get_running_loop()
 
         async def handler(ws: Any) -> None:
+            # Where the aircraft has been this run, before where it is now, so a
+            # reloaded or late page draws the track instead of starting blank.
+            if not self.replaying:
+                await self._send(ws, self._track.message())
             self._clients.add(ws)
             try:
                 async for raw in ws:
@@ -3980,6 +3990,8 @@ class Bridge:
         # things and a client should be able to say which it has.
         if src_at:
             frame["ages"] = {g: mono - at for g, at in src_at.items()}
+        if not self.replaying:
+            self._track.add(frame)
         payload = dumps(frame)
         self._drop_slow_clients()
         if self._clients:

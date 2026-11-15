@@ -20,7 +20,7 @@ import type {
 	ServerMessage,
 	TelemetryFrame,
 } from "@/types/app";
-import { pushFrame, markLinkDiscontinuity } from "@/stores/aircraft.store";
+import { pushFrame, markLinkDiscontinuity, loadHistory, clearRun, type HistoryMessage } from "@/stores/aircraft.store";
 import { resetDerived } from "@/stores/derived.store";
 import { $viewerStore } from "@/stores/cesium.store";
 import { $linkState, $commander } from "@/stores/link.store";
@@ -297,12 +297,18 @@ export class TelemetryClient {
 				// vouch for, and say so in the log the operator is already reading.
 				const r = msg as { bootMs?: number; t?: number };
 				clearParams();
+				// A reboot is a new run (every SITL run starts a fresh PX4): gs has
+				// dropped its copy of the track, and so does the screen.
+				clearRun();
 				$missionCurrent.set(null);
 				$missionReached.set(null);
 				$missionProgress.set(null);
 				pushStatus(SEVERITY_WARNING,
 					"vehicle rebooted — parameters cleared, re-read them before trusting any value",
 					r.t ?? Date.now());
+			} else if (type === "history") {
+				// The run so far, sent once as this socket opens (gs track.py).
+				loadHistory(msg as unknown as HistoryMessage);
 			} else if (type === "telemetry" || type === undefined) {
 				this.onTelemetry(msg as TelemetryFrame & { type?: string });
 			} else {
