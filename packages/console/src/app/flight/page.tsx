@@ -28,6 +28,7 @@ const ParamEditor = dynamic(() => import("@/components/flight/ParamEditor"), { s
 const MissionLayer = dynamic(() => import("@/components/flight/MissionLayer"), { ssr: false });
 const MissionPanel = dynamic(() => import("@/components/flight/MissionPanel"), { ssr: false });
 const GeoLayer = dynamic(() => import("@/components/flight/GeoLayer"), { ssr: false });
+const RadiusEntry = dynamic(() => import("@/components/flight/RadiusEntry"), { ssr: false });
 const SituationLayer = dynamic(() => import("@/components/flight/SituationLayer"), { ssr: false });
 const GeoPanel = dynamic(() => import("@/components/flight/GeoPanel"), { ssr: false });
 const CursorGround = dynamic(() => import("@/components/flight/CursorGround"), { ssr: false });
@@ -99,6 +100,8 @@ export default function FlightPage() {
 			{/* The cursor's plumb line to the ground. Globe entities only; it adds
 			    no chrome and takes no clicks. */}
 			<CursorGround />
+			{/* The typed-in diameter box a click on a ring's grabber opens. */}
+			<RadiusEntry />
 
 			{/* The HUD sits above the globe and below the chrome. */}
 			<ErrorBoundary name="HUD"><Hud /></ErrorBoundary>

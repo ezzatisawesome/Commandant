@@ -535,9 +535,10 @@ export function TelemetryStrip() {
 						    column every later row's channels are lined up against — both
 						    of which stop being true the moment it can be scrolled away.
 						    `self-stretch` so it reads as a column rather than a chip
-						    floating over the row. */}
+						    floating over the row. No fill of its own: a second bg-black/70
+						    over the strip's stacked into a black block in the corner. */}
 						<div className={`sticky left-0 z-10 flex shrink-0 self-stretch items-start gap-2
-							bg-black/70 ${LINK_GUTTER}`}
+							${LINK_GUTTER}`}
 							title={r === 0 ? dot.title : undefined} aria-hidden={r > 0}>
 							{r === 0 ? (
 								<>

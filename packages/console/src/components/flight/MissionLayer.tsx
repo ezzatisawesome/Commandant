@@ -17,11 +17,9 @@ import {
 	HeightReference,
 	LabelStyle,
 	Math as CesiumMath,
-	Matrix4,
 	SceneTransforms,
 	ScreenSpaceEventHandler,
 	ScreenSpaceEventType,
-	Transforms,
 	VerticalOrigin,
 } from "cesium";
 
@@ -53,6 +51,9 @@ import { landingGeometry, landingSlopeLimit, lookupFrom, minLegalRunM } from "@/
 import { authoringAltM, drawHeightM, homeAltM } from "@/lib/altFrames";
 import { ALT_HANDLE_MISSION, ALT_HANDLE_OFFSET_PX, ALT_HANDLE_PX } from "@/lib/altHandle";
 import { $aircraftStore } from "@/stores/aircraft.store";
+import { endHandleDrag, setHandleDrag } from "@/stores/drag.store";
+import { openRadiusEntry } from "@/stores/radiusEntry.store";
+import { enuBearing, enuOffset } from "@/lib/enu";
 import type { MissionItem } from "@/types/app";
 
 // Mission authoring + rendering on the globe. Draws the planned route as a white
@@ -116,14 +117,19 @@ export default function MissionLayer() {
 			return Cartesian3.fromDegrees(it.lon, it.lat, altOf(it));
 		};
 
-		// A point `metres` due east of an item, at its own altitude — where the
-		// radius grabber rides. East is arbitrary but stable, which is what makes
-		// the handle findable; local ENU keeps it exact at any latitude.
-		const eastOf = (seq: number, metres: number): Cartesian3 | undefined => {
+		// Where on its ring an item's radius grabber rides: radians CCW from east.
+		// It starts due east (arbitrary but stable, which is what makes it
+		// findable) and follows the pointer's bearing while dragged, so the handle
+		// stays under the mouse in whatever direction the ring is pulled — and
+		// stays where it was left.
+		const rimBearing = new Map<number, number>();
+		const bearingOf = (seq: number) => rimBearing.get(seq) ?? 0;
+		// A point `metres` out along that bearing, at the item's own altitude.
+		const rimOf = (seq: number, metres: number): Cartesian3 | undefined => {
 			const centre = posOf(seq);
 			if (!centre) return undefined;
-			const frame = Transforms.eastNorthUpToFixedFrame(centre);
-			return Matrix4.multiplyByPoint(frame, new Cartesian3(metres, 0, 0), new Cartesian3());
+			const b = bearingOf(seq);
+			return enuOffset(centre, metres * Math.cos(b), metres * Math.sin(b), 0);
 		};
 
 		// --- the landing approach, drawn so it can be dragged into compliance ---
@@ -369,7 +375,7 @@ export default function MissionLayer() {
 					markers.push($viewer.entities.add({
 						id: `mission-rad-${seq}`,
 						position: new CallbackPositionProperty(
-							() => eastOf(seq, ringRadius()), false,
+							() => rimOf(seq, ringRadius()), false,
 						),
 						point: {
 							pixelSize: 9,
@@ -412,6 +418,18 @@ export default function MissionLayer() {
 			| { what: "radius"; seq: number };
 		let drag: Drag | null = null;
 		let didDrag = false;
+		// The held handle's tag, and what it is changing, for the cursor's readout.
+		const dragTag = (d: Drag) =>
+			`${d.what === "alt" ? "mission-alt-" : d.what === "radius" ? "mission-rad-" : "mission-wp-"}${d.seq}`;
+		const dragLabel = (d: Drag): string => {
+			const it = itemOf(d.seq);
+			if (d.what === "alt") return `WP ${d.seq} · alt ${Math.round(relAltOf(it))} m`;
+			if (d.what === "radius") {
+				const r = it ? (radiusOf(it) ?? defaultRadius(it.kind)) : 0;
+				return `WP ${d.seq} · radius ${Math.round(r)} m`;
+			}
+			return `WP ${d.seq} · moving`;
+		};
 		// Set when a single click has just appended a waypoint, so the
 		// double-click that follows it does not append a second one on the same
 		// spot. Cesium delivers LEFT_CLICK then LEFT_DOUBLE_CLICK for the same
@@ -488,7 +506,9 @@ export default function MissionLayer() {
 			const wpSeq = tagSeq(id, "mission-wp-");
 
 			if (altSeq !== null) {
-				drag = { what: "alt", seq: altSeq, startAlt: altOf(itemOf(altSeq)), from: m.position.clone() };
+				// Above home, the frame updateItem stores; altOf() is the MSL draw
+				// height and would jump the waypoint up by home's elevation.
+				drag = { what: "alt", seq: altSeq, startAlt: relAltOf(itemOf(altSeq)), from: m.position.clone() };
 			} else if (radSeq !== null) {
 				drag = { what: "radius", seq: radSeq };
 			} else if (wpSeq !== null) {
@@ -498,11 +518,11 @@ export default function MissionLayer() {
 			}
 			didDrag = false;
 			$viewer.scene.screenSpaceCameraController.enableInputs = false;
+			setHandleDrag(dragTag(drag), dragLabel(drag));
 		}, ScreenSpaceEventType.LEFT_DOWN);
 
-		handler.setInputAction((m: { endPosition: Cartesian2 }) => {
-			if (!drag) return;
-
+		// One mouse-move of an armed drag: write the new position/altitude/radius.
+		const applyDrag = (drag: Drag, m: { endPosition: Cartesian2 }) => {
 			if (drag.what === "alt") {
 				// Resolve the drag along the local vertical as it projects on screen,
 				// so the handle tracks the mouse at any camera tilt. Two samples
@@ -539,6 +559,8 @@ export default function MissionLayer() {
 				if (!cart) return;
 				const cursor = Cartographic.fromCartesian(cart);
 				const centre = Cartographic.fromDegrees(it.lon, it.lat);
+				const at = posOf(drag.seq);
+				if (at) rimBearing.set(drag.seq, enuBearing(at, cart));
 				const geodesic = new EllipsoidGeodesic(centre, cursor, Ellipsoid.WGS84);
 				didDrag = true;
 				updateItem(drag.seq, {
@@ -558,14 +580,41 @@ export default function MissionLayer() {
 				CesiumMath.toDegrees(geo.latitude),
 				CesiumMath.toDegrees(geo.longitude),
 			);
+		};
+
+		handler.setInputAction((m: { endPosition: Cartesian2 }) => {
+			if (!drag) return;
+			applyDrag(drag, m);
+			setHandleDrag(dragTag(drag), dragLabel(drag));
 		}, ScreenSpaceEventType.MOUSE_MOVE);
 
-		handler.setInputAction(() => {
+		// A radius grabber clicked without moving: type the diameter instead.
+		const askRadius = (seq: number, at: Cartesian2) => {
+			const it = itemOf(seq);
+			const key = it ? radiusParamKey(it.kind) : null;
+			if (!it || !key) return;
+			openRadiusEntry({
+				x: at.x, y: at.y,
+				title: `WP ${seq} ${key === "radius" ? "orbit" : "accept"}`,
+				radiusM: radiusOf(it) ?? defaultRadius(it.kind),
+				apply: (r) => {
+					const cur = itemOf(seq);
+					if (cur) updateItem(seq, { params: { ...cur.params, [key]: r } });
+					$viewer.scene.requestRender();
+				},
+			});
+		};
+
+		handler.setInputAction((m: { position: Cartesian2 }) => {
 			if (drag !== null) {
+				if (drag.what === "radius" && !didDrag) askRadius(drag.seq, m.position);
 				drag = null;
+				endHandleDrag();
 				$viewer.scene.screenSpaceCameraController.enableInputs = true;
-				// Clear the drag flag on the next tick so the trailing LEFT_CLICK is
-				// still suppressed, but a later plain click adds normally.
+				// A press on a handle is never also a click on the ground: the
+				// trailing LEFT_CLICK must not add a waypoint, moved or not. Cleared
+				// on the next tick so a later plain click adds normally.
+				didDrag = true;
 				setTimeout(() => { didDrag = false; }, 0);
 			}
 		}, ScreenSpaceEventType.LEFT_UP);
@@ -579,6 +628,7 @@ export default function MissionLayer() {
 			$viewer.entities.remove(route);
 			$viewer.entities.remove(approach);
 			$viewer.entities.remove(legalRing);
+			endHandleDrag();
 			$viewer.scene.screenSpaceCameraController.enableInputs = true;
 		};
 	}, [$viewer]);

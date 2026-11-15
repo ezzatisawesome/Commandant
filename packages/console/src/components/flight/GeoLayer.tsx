@@ -14,18 +14,19 @@ import {
 	Entity,
 	LabelStyle,
 	Math as CesiumMath,
-	Matrix4,
 	PolygonHierarchy,
 	SceneTransforms,
 	ScreenSpaceEventHandler,
 	ScreenSpaceEventType,
-	Transforms,
 	VerticalOrigin,
 } from "cesium";
 
 import { $viewerStore } from "@/stores/cesium.store";
 import { IS_VIEW } from "@/lib/envs";
 import { $aircraftStore } from "@/stores/aircraft.store";
+import { endHandleDrag, setHandleDrag } from "@/stores/drag.store";
+import { openRadiusEntry } from "@/stores/radiusEntry.store";
+import { enuBearing, enuOffset } from "@/lib/enu";
 import {
 	$fenceItems,
 	$rallyItems,
@@ -88,6 +89,22 @@ export default function GeoLayer() {
 		// Geo entities are rebuilt only when either set changes STRUCTURALLY
 		// (count/kind/order). Positions and radii are read live through callback
 		// properties so a marker drag never tears everything down per mouse-move.
+		// Where on its rim a circle fence's radius grabber rides: radians CCW from
+		// east. Due east until dragged, then it follows the pointer's bearing so
+		// it stays under the mouse (as the mission layer's loiter rim does).
+		const rimBearing = new Map<number, number>();
+		const bearingOf = (seq: number) => rimBearing.get(seq) ?? 0;
+		const centreOf = (seq: number): Cartesian3 | undefined => {
+			const cur = $fenceItems.get().find((x) => x.seq === seq);
+			return cur ? Cartesian3.fromDegrees(cur.lon, cur.lat, FENCE_BASE_M) : undefined;
+		};
+		const rimOf = (seq: number, metres: number): Cartesian3 | undefined => {
+			const centre = centreOf(seq);
+			if (!centre) return undefined;
+			const b = bearingOf(seq);
+			return enuOffset(centre, metres * Math.cos(b), metres * Math.sin(b), 0);
+		};
+
 		let ents: Entity[] = [];
 		let structure = "";
 		const rebuild = () => {
@@ -263,15 +280,7 @@ export default function GeoLayer() {
 						clampRadius($fenceItems.get().find((x) => x.seq === seq)?.params?.radius ?? 100);
 					ents.push($viewer.entities.add({
 						id: `geo-circle-r-${seq}`,
-						position: new CallbackPositionProperty(() => {
-							const cur = $fenceItems.get().find((x) => x.seq === seq);
-							if (!cur) return undefined;
-							const centre = Cartesian3.fromDegrees(cur.lon, cur.lat, FENCE_BASE_M);
-							const frame = Transforms.eastNorthUpToFixedFrame(centre);
-							return Matrix4.multiplyByPoint(
-								frame, new Cartesian3(radiusOf(), 0, 0), new Cartesian3(),
-							);
-						}, false),
+						position: new CallbackPositionProperty(() => rimOf(seq, radiusOf()), false),
 						point: {
 							pixelSize: 9, color: Color.WHITE, outlineColor: fenceColor(it.kind),
 							outlineWidth: 2, disableDepthTestDistance: Number.POSITIVE_INFINITY,
@@ -417,6 +426,21 @@ export default function GeoLayer() {
 			| { what: "rally-alt"; seq: number; startAlt: number; from: Cartesian2 };
 		let drag: Drag | null = null;
 		let didDrag = false;
+		// The held handle's tag, and what it is changing, for the cursor's readout.
+		const dragTag = (d: Drag) => `${{
+			radius: "geo-circle-r-", "rally-alt": "geo-rally-alt-", rally: "geo-rally-", fence: "geo-fence-",
+		}[d.what]}${d.seq}`;
+		const dragLabel = (d: Drag): string => {
+			if (d.what === "radius") {
+				const r = $fenceItems.get().find((x) => x.seq === d.seq)?.params?.radius;
+				return `Fence circle · radius ${Math.round(Number(r) || 0)} m`;
+			}
+			if (d.what === "rally-alt") {
+				const a = $rallyItems.get().find((x) => x.seq === d.seq)?.alt;
+				return `Rally ${d.seq} · alt ${Math.round(Number(a) || 0)} m`;
+			}
+			return d.what === "rally" ? `Rally ${d.seq} · moving` : `Fence point ${d.seq} · moving`;
+		};
 
 		const ground = (p: Cartesian2) => {
 			const cart = $viewer.camera.pickEllipsoid(p, $viewer.scene.globe.ellipsoid);
@@ -484,11 +508,11 @@ export default function GeoLayer() {
 			}
 			didDrag = false;
 			$viewer.scene.screenSpaceCameraController.enableInputs = false;
+			setHandleDrag(dragTag(drag), dragLabel(drag));
 		}, ScreenSpaceEventType.LEFT_DOWN);
 
-		handler.setInputAction((m: { endPosition: Cartesian2 }) => {
-			const d = drag;
-			if (!d) return;
+		// One mouse-move of an armed drag: write the new position/altitude/radius.
+		const applyDrag = (d: Drag, m: { endPosition: Cartesian2 }) => {
 
 			if (d.what === "radius") {
 				// Radius is the ground distance from the circle's centre to the
@@ -502,6 +526,8 @@ export default function GeoLayer() {
 					Cartographic.fromDegrees(at.lon, at.lat),
 					Ellipsoid.WGS84,
 				);
+				const centre = centreOf(d.seq);
+				if (centre) rimBearing.set(d.seq, enuBearing(centre, Cartesian3.fromDegrees(at.lon, at.lat)));
 				didDrag = true;
 				updateFenceItem(d.seq, {
 					params: { ...cur.params, radius: snap(clampRadius(geodesic.surfaceDistance)) },
@@ -540,12 +566,39 @@ export default function GeoLayer() {
 			didDrag = true;
 			if (d.what === "fence") moveFencePoint(d.seq, at.lat, at.lon);
 			else moveRallyPoint(d.seq, at.lat, at.lon);
+		};
+
+		handler.setInputAction((m: { endPosition: Cartesian2 }) => {
+			if (!drag) return;
+			applyDrag(drag, m);
+			setHandleDrag(dragTag(drag), dragLabel(drag));
 		}, ScreenSpaceEventType.MOUSE_MOVE);
 
-		handler.setInputAction(() => {
+		// A circle's rim clicked without moving: type the diameter instead.
+		const askRadius = (seq: number, at: Cartesian2) => {
+			const cur = $fenceItems.get().find((x) => x.seq === seq);
+			if (!cur) return;
+			openRadiusEntry({
+				x: at.x, y: at.y,
+				title: `Fence circle ${seq}`,
+				radiusM: clampRadius(cur.params?.radius ?? 100),
+				apply: (r) => {
+					const now = $fenceItems.get().find((x) => x.seq === seq);
+					if (now) updateFenceItem(seq, { params: { ...now.params, radius: r } });
+					$viewer.scene.requestRender();
+				},
+			});
+		};
+
+		handler.setInputAction((m: { position: Cartesian2 }) => {
 			if (drag) {
+				if (drag.what === "radius" && !didDrag) askRadius(drag.seq, m.position);
 				drag = null;
+				endHandleDrag();
 				$viewer.scene.screenSpaceCameraController.enableInputs = true;
+				// A press on a handle is never also a click on the ground: the
+				// trailing LEFT_CLICK must not add a fence point, moved or not.
+				didDrag = true;
 				setTimeout(() => { didDrag = false; }, 0);
 			}
 		}, ScreenSpaceEventType.LEFT_UP);
@@ -557,6 +610,7 @@ export default function GeoLayer() {
 			handler.destroy();
 			ents.forEach((e) => $viewer.entities.remove(e));
 			ents = [];
+			endHandleDrag();
 			$viewer.scene.screenSpaceCameraController.enableInputs = true;
 		};
 	}, [$viewer]);
