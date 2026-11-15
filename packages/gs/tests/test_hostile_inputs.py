@@ -99,9 +99,10 @@ def test_a_packet_of_pure_garbage_does_not_fake_a_live_link():
 
 def test_the_battery_readout_is_protected_while_a_real_aircraft_is_flying():
     """voltage/current/batteryRemaining stay feed-owned even with a vehicle
-    locked, because PX4 SITL's BATTERY_STATUS is a dummy. That makes these
-    checks the only thing between a stray packet and the number an operator
-    uses to decide whether to come home."""
+    locked, because PX4's simulated BATTERY_STATUS is a dummy (measured: 16.2 V,
+    100 %, flat, under AircraftSim). That makes these checks the only thing
+    between a stray packet and the number an operator uses to decide whether to
+    come home."""
     b = _bridge(json_port=0)
     b._vehicle = (1, 1)
     b.latest.update({"voltage": 24.8, "current": 3.1, "batteryRemaining": 71})
@@ -109,6 +110,13 @@ def test_the_battery_readout_is_protected_while_a_real_aircraft_is_flying():
     assert b.latest["voltage"] == 24.8
     assert b.latest["current"] == 3.1
     assert b.latest["batteryRemaining"] == 71
+
+
+def test_with_no_autopilot_the_feed_still_owns_the_battery():
+    """The power-only rig has no PX4: the feed is the only battery there is."""
+    b = _bridge(json_port=0)
+    b._apply_json({"voltage": 25.1, "batteryRemaining": 80})
+    assert b.latest["voltage"] == 25.1 and b.latest["batteryRemaining"] == 80
 
 
 def test_one_packet_cannot_bloat_every_telemetry_frame():

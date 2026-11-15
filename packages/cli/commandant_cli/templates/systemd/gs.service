@@ -38,6 +38,13 @@ ExecStart=/opt/commandant/packages/gs/.venv/bin/python -m gs --mavlink ${GS_MAVL
 StateDirectory=commandant
 Restart=always
 RestartSec=2
+# Restart=always catches a gs that CRASHES. This catches one that HANGS: gs
+# pings the watchdog only while its MAVLink loop and its WebSocket loop both
+# keep turning (gs/watchdog.py), so a mav thread stuck on a wedged serial
+# device stops the pings and systemd restarts it. A stall is declared after
+# 15 s of silence, so a hang is cured within ~35 s; PX4 counts the data link
+# lost after 10 s either way, and this bounds how long it stays lost.
+WatchdogSec=20
 User=commandant
 Group=dialout
 # Serial access needs the dialout group (set above); no elevated caps required.

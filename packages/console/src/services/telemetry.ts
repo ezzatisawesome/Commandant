@@ -75,7 +75,12 @@ interface PendingParam {
 const PARAM_TIMEOUT_MS = 8000;
 
 // A mission upload is the multi-item MISSION_COUNT/REQUEST/ITEM/ACK handshake (gs
-// retransmits on timeout), so give it the longest leash.
+// retransmits on timeout), so give it the longest leash. It is a leash on
+// SILENCE, not on the whole transfer: every mission_progress re-arms it. gs
+// itself only gives up on a stalled handshake, and PX4 pulls items one round
+// trip at a time, so a long plan over a lossy 57600 radio outlasts any fixed
+// total -- the console said "timeout" while the upload went on to succeed, and
+// a second push then came back "busy".
 const MISSION_TIMEOUT_MS = 20000;
 
 // One mission_push awaiting its mission_ack (matched by id).
@@ -86,6 +91,23 @@ interface PendingMission {
 }
 
 // One fence_push / rally_push awaiting its ack (matched by id).
+interface PendingTransfer {
+	reject: (err: Error) => void;
+	timer: ReturnType<typeof setTimeout>;
+}
+
+/** The silence timer on one plan transfer; see MISSION_TIMEOUT_MS. */
+function armTransferTimer(
+	pending: Map<string, PendingTransfer>,
+	id: string,
+	reject: (err: Error) => void,
+): ReturnType<typeof setTimeout> {
+	return setTimeout(() => {
+		pending.delete(id);
+		reject(new Error("timeout"));
+	}, MISSION_TIMEOUT_MS);
+}
+
 interface PendingGeo {
 	resolve: (ack: FenceAckMessage | RallyAckMessage) => void;
 	reject: (err: Error) => void;
@@ -222,6 +244,16 @@ export class TelemetryClient {
 				const p = msg as { phase: "upload" | "download"; seq: number; count: number };
 				$missionProgress.set({ phase: p.phase, seq: p.seq, count: p.count });
 				if (p.count > 0 && p.seq + 1 >= p.count) $missionProgress.set(null);
+				// gs runs one plan transfer at a time, so progress is progress
+				// on whichever is pending (progress carries no request id).
+				const transfers: Map<string, PendingTransfer>[] =
+					[this.pendingMissions, this.pendingFence, this.pendingRally];
+				for (const pending of transfers) {
+					for (const [id, entry] of pending) {
+						clearTimeout(entry.timer);
+						entry.timer = armTransferTimer(pending, id, entry.reject);
+					}
+				}
 			} else if (type === "mission_ack") {
 				this.resolveMissionAck(msg as MissionAckMessage);
 			} else if (type === "mission_current") {
@@ -594,10 +626,7 @@ export class TelemetryClient {
 				return;
 			}
 			const id = uuidv4();
-			const timer = setTimeout(() => {
-				this.pendingMissions.delete(id);
-				reject(new Error("timeout"));
-			}, MISSION_TIMEOUT_MS);
+			const timer = armTransferTimer(this.pendingMissions, id, reject);
 			// An ACCEPTED upload is the other moment the two provably agree.
 			// Recorded from the items that were actually sent, not from the draft
 			// as it stands when the ack arrives -- the operator may have kept
@@ -682,10 +711,7 @@ export class TelemetryClient {
 				return;
 			}
 			const id = uuidv4();
-			const timer = setTimeout(() => {
-				pending.delete(id);
-				reject(new Error("timeout"));
-			}, MISSION_TIMEOUT_MS);
+			const timer = armTransferTimer(pending, id, reject);
 			// An accepted fence push is the other moment the draft and the
 			// vehicle provably agree. From the items SENT, for the same reason as
 			// the mission: the handshake takes seconds over a radio and the

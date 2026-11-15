@@ -33,6 +33,7 @@ import json
 import os
 import queue
 import struct
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -40,11 +41,23 @@ from pathlib import Path
 # A record is 8 bytes of timestamp plus the frame; MAVLink 2 frames run to 280
 # bytes, so files are sized in megabytes rather than records.
 MAX_FILE_BYTES = 32 * 1024 * 1024
-# Total across all files. A 57600 radio carries ~12 MB/hour, so this is days of
-# flying; a USB link is far faster, which is exactly why the cap exists. The hub
-# boots from an SD card, and a full card is a daemon that cannot write anything,
-# including the logs that would explain why.
-MAX_TOTAL_BYTES = 512 * 1024 * 1024
+# Total across all files, by default sized from the disk rather than fixed.
+#
+# It was a fixed 512 MiB, said to be "days of flying". It was not: a 57600
+# radio carries ~12 MB/hour, so ~42 h, and HITL over USB MEASURED on thror ~31
+# kB/s -- ~112 MB/hour, 4.6 h -- while HITL runs and flights last days. Pruning
+# then deleted the start of the run being flown. So the logs may take up to
+# LOG_DISK_SHARE of the filesystem, and always leave DISK_RESERVE_BYTES free,
+# whichever is smaller: a full card is still a daemon that cannot write
+# anything, including the logs that would explain why. `max_total_bytes` (or
+# gs --log-max-mb) pins a fixed cap instead.
+LOG_DISK_SHARE = 0.5
+DISK_RESERVE_BYTES = 1024 * 1024 * 1024
+# Messages logged at most this often, by MAVLink id. HIL_ACTUATOR_CONTROLS (93)
+# is PX4's output to the simulator: 190 Hz MEASURED on thror, over half of
+# HITL's log bytes, and a record of commands that also reach the console as
+# telemetry. 10 Hz keeps the shape of every manoeuvre. --log-full-rate keeps all.
+LOG_RATE_CAPS_HZ = {93: 10.0}
 # Bounded so a stalled disk cannot grow it without limit. At 100 Hz of traffic
 # this is ~80 seconds of slack, far more than any plausible flush.
 QUEUE_MAX = 8192
@@ -78,13 +91,18 @@ class FlightLog:
 
     def __init__(self, directory: str | os.PathLike[str],
                  max_file_bytes: int = MAX_FILE_BYTES,
-                 max_total_bytes: int = MAX_TOTAL_BYTES,
+                 max_total_bytes: int | None = None,
                  queue_max: int = QUEUE_MAX,
                  flush_interval_s: float = FLUSH_INTERVAL_S,
-                 fsync_interval_s: float = FSYNC_INTERVAL_S) -> None:
+                 fsync_interval_s: float = FSYNC_INTERVAL_S,
+                 rate_caps_hz: dict[int, float] | None = None) -> None:
         self.dir = Path(directory)
         self.max_file_bytes = max_file_bytes
-        self.max_total_bytes = max_total_bytes
+        self.max_total_bytes = max_total_bytes      # None: sized from the disk
+        self.rate_caps_hz = LOG_RATE_CAPS_HZ if rate_caps_hz is None else rate_caps_hz
+        self._last_logged: dict[int, float] = {}
+        self.decimated = 0
+        self.budget_bytes: int | None = None        # the cap the last prune used
         self.flush_interval_s = flush_interval_s
         self.fsync_interval_s = fsync_interval_s
         self.fsyncs = 0
@@ -116,12 +134,20 @@ class FlightLog:
     def stamp_us(self) -> int:
         return self._wall0_us + int((time.monotonic() - self._mono0) * 1_000_000)
 
-    def write(self, frame: bytes | bytearray | None) -> None:
+    def write(self, frame: bytes | bytearray | None, msg_id: int | None = None) -> None:
         """Queue one raw frame. Never blocks, never raises: this is called from
         the MAVLink receive loop and from every send, and a logger that can
-        interrupt either is not worth having."""
+        interrupt either is not worth having. `msg_id` lets a capped message
+        (LOG_RATE_CAPS_HZ) be thinned; without it every frame is kept."""
         if not self.enabled or not frame:
             return
+        hz = self.rate_caps_hz.get(msg_id) if msg_id is not None else None
+        if hz:
+            now = time.monotonic()
+            if now - self._last_logged.get(msg_id, -1e9) < 1.0 / hz:
+                self.decimated += 1
+                return
+            self._last_logged[msg_id] = now
         try:
             self._q.put_nowait(("mav", self.stamp_us(), bytes(frame)))
         except queue.Full:
@@ -230,6 +256,14 @@ class FlightLog:
             self.fsyncs += 1
 
     def _run(self) -> None:
+        try:
+            self._drain()
+        except Exception as exc:
+            # The backstop for anything _safely does not wrap: say so and stop
+            # accepting records, rather than die with status() reading healthy.
+            self._fail(f"flight log writer stopped: {exc!r}")
+
+    def _drain(self) -> None:
         last_flush = last_sync = time.monotonic()
         while True:
             try:
@@ -340,8 +374,10 @@ class FlightLog:
                 total += p.stat().st_size
             except OSError:
                 pass
+        budget = self.budget(total)
+        self.budget_bytes = budget
         for p in logs:
-            if total <= self.max_total_bytes:
+            if total <= budget:
                 break
             if p in (self.path, self.json_path):
                 continue        # never the files being written to
@@ -353,14 +389,29 @@ class FlightLog:
             except OSError:
                 pass
 
+    def budget(self, logs_bytes: int) -> int:
+        """The most the logs may occupy, given they occupy `logs_bytes` now."""
+        if self.max_total_bytes is not None:
+            return self.max_total_bytes
+        try:
+            du = shutil.disk_usage(self.dir)
+        except OSError:
+            return logs_bytes           # cannot tell: prune nothing, add nothing
+        return max(0, min(int(du.total * LOG_DISK_SHARE),
+                          logs_bytes + du.free - DISK_RESERVE_BYTES))
+
     def _safely(self, fn, *args) -> bool:
         """Any disk error disables logging and is reported once. A full SD card
         must not take the aircraft's telemetry down with it."""
         try:
             fn(*args)
             return True
-        except OSError as exc:
-            self._fail(f"flight log write failed: {exc}")
+        except Exception as exc:
+            # Not only OSError: a ValueError from a handle closed under a
+            # rotation killed the writer thread outright, after which the
+            # queue filled and counted drops while status() still said
+            # "enabled" -- a log quietly not being written.
+            self._fail(f"flight log write failed: {exc!r}")
             return False
 
     def _fail(self, msg: str) -> None:
@@ -381,6 +432,8 @@ class FlightLog:
             "rotations": self.rotations,
             "fsyncs": self.fsyncs,
             "pruned": self.pruned,
+            "budgetBytes": self.budget_bytes,
+            "decimated": self.decimated,
             "clockWasSet": self.clock_was_set,
             "error": self.error,
         }

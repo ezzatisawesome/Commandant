@@ -524,6 +524,21 @@ def test_restart_always_actually_means_always(rel):
     assert "StartLimitIntervalSec=0" in unit_section
 
 
+def test_gs_unit_restarts_a_hung_daemon_too():
+    """Restart=always sees a crash, not a hang. gs pings the watchdog only while
+    its loops turn, so the unit must set one -- and give gs longer than its own
+    stall window plus one ping period, or a healthy gs would be killed."""
+    u = _unit("gs.service")
+    service = u.split("[Service]")[1]
+    line = next(ln for ln in service.splitlines() if ln.startswith("WatchdogSec="))
+    sec = int(line.split("=")[1])
+    assert 0 < sec < 60
+    # NotifyAccess defaults to `main` once WatchdogSec is set, and ExecStart
+    # must therefore BE gs, not a shell that runs it.
+    assert "ExecStart=/opt/commandant/packages/gs/.venv/bin/python -m gs" in service
+    assert "NotifyAccess=none" not in service
+
+
 def test_gs_unit_names_no_device_and_keeps_dialout():
     """The radio's device name depends on the machine -- /dev/serial0 exists
     only on a Pi -- and gs re-probes until it appears, so the unit orders on

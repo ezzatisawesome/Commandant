@@ -244,13 +244,18 @@ def test_the_sidecar_is_streamed_not_slurped(tmp_path):
     assert peak < size // 4, f"{peak} bytes held for a {size}-byte sidecar"
 
 
-def test_speed_is_honoured_rather_than_drifted_past(tmp_path):
+def test_speed_is_honoured_rather_than_drifted_past(tmp_path, monkeypatch):
     """The clock was open loop: it slept each gap and nothing clawed back the
     overshoot, so the error grew with the record count. MEASURED on a
     2000-record log spanning 2.00 s: 2.64 s at 1x (+32%) and 0.10 s at 100x
     against the 0.02 s asked for, 5x slow. A deadline absorbs each overshoot
-    into the next wait."""
-    import time as _time
+    into the next wait.
+
+    On a simulated clock where every sleep overshoots by the scheduler's ~60 us
+    -- the cost measured above. This test used the wall clock and a 0.12 s
+    bound, and failed whenever the machine was busy (seen 2026-11-11 under a
+    full suite run): it measured the load, not the replay."""
+    from gs import replay as replaymod
     path = tmp_path / "fast.tlog"
     mav = m.MAVLink(None, srcSystem=1, srcComponent=1)
     frame = m.MAVLink_heartbeat_message(
@@ -260,11 +265,20 @@ def test_speed_is_honoured_rather_than_drifted_past(tmp_path):
         for i in range(n):            # 1 ms apart: 4.00 s of recorded flight
             fh.write(struct.pack(">Q", 1_000_000 + i * 1000) + frame)
 
+    clock = {"t": 0.0}
+    overshoot = 60e-6
+
+    def sleep(s):
+        clock["t"] += s + overshoot
+
+    # Replace the module's `time`, not functions on the shared one: other
+    # tests' daemon threads still sleep, and would advance this clock.
+    from types import SimpleNamespace
+    monkeypatch.setattr(replaymod, "time",
+                        SimpleNamespace(monotonic=lambda: clock["t"], sleep=sleep))
     b = _FakeBridge()
-    t0 = _time.monotonic()
     replay(b, path, speed=200.0)      # 4.00 s of flight asks for 0.02 s
-    elapsed = _time.monotonic() - t0
     assert b.seen == n, b.seen
-    # Open loop spent ~0.24 s here: 4000 sleeps of 5 us, each costing the
-    # scheduler's ~60 us minimum and none of it ever recovered.
-    assert elapsed < 0.12, f"{elapsed:.3f}s for 0.02s of replay at 200x"
+    # Open loop would take 4000 x (5 + 60) us = 0.26 s. The deadline loses at
+    # most one overshoot per wait it skips, so it stays near the 0.02 s asked.
+    assert clock["t"] < 0.03, f"{clock['t']:.3f}s for 0.02s of replay at 200x"

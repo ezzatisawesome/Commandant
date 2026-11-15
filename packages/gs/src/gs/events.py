@@ -77,9 +77,13 @@ def find_metadata(explicit: str | None = None) -> Path | None:
 
 
 class EventDecoder:
-    def __init__(self, metadata: str | os.PathLike[str]) -> None:
+    def __init__(self, metadata: str | os.PathLike[str], raw: bytes | None = None) -> None:
+        """From a file, or from `raw` bytes (then `metadata` only labels them:
+        the copy fetched from the vehicle, see ftp.py). `.xz` is decompressed,
+        and its own integrity check is what rejects a corrupt transfer."""
         self.path = Path(metadata)
-        raw = self.path.read_bytes()
+        if raw is None:
+            raw = self.path.read_bytes()
         if self.path.suffix == ".xz":
             raw = lzma.decompress(raw)
         self._parser = Parser()

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
+import threading
 import time
 from typing import Any
 
@@ -16,7 +18,39 @@ from . import __version__
 from .bridge import Bridge
 
 
-def print_status(host: str, port: int) -> int:
+class _StampedLines:
+    """Prefix each line written to a stream with the local time.
+
+    journald stamps every line itself, so under the `commandant` systemd unit
+    this is not installed. Started by hand -- `start-gs-hitl.sh > gs.log` on
+    thror -- nothing did: a 13 s stall in gs's own heartbeat on 2026-10-30
+    could not be lined up against the relay drops or the bench, because no
+    line in gs.log said when it was written."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self._at_line_start = True
+        # The mav, JSON and asyncio threads all print, and print() writes the
+        # text and its newline as two calls.
+        self._lock = threading.Lock()
+
+    def write(self, text: str) -> int:
+        with self._lock:
+            out = []
+            for piece in text.splitlines(keepends=True):
+                if self._at_line_start:
+                    out.append(time.strftime("%Y-%m-%dT%H:%M:%S ") + piece)
+                else:
+                    out.append(piece)
+                self._at_line_start = piece.endswith("\n")
+            self._inner.write("".join(out))
+        return len(text)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+def print_status(host: str, port: int, as_json: bool = False) -> int:
     """Connect to a running daemon, ask for its status, print it, exit.
 
     Deliberately a client of the same WS verb the console uses rather than a
@@ -39,7 +73,10 @@ def print_status(host: str, port: int) -> int:
                 for _ in range(200):          # skip the telemetry stream
                     msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
                     if msg.get("type") == "status":
-                        _print_status(msg)
+                        if as_json:
+                            print(json.dumps(msg))
+                        else:
+                            _print_status(msg)
                         return 0
                 print(f"[gs] no status reply from {url} (is it an older daemon?)")
                 return 1
@@ -89,12 +126,31 @@ def _print_status(s: dict) -> None:
     print("\n quietly survived")
     line("link reopens", f"{reopens}" + ("" if not reopens else "   <-- the link has been dropping"))
     line("handler errors", f"{errors}" + ("" if not errors else "   <-- check the daemon log"))
+    wf = s.get("writeFailures", 0)
+    if wf:
+        line("write timeouts", f"{wf}   <-- the radio or autopilot stopped taking bytes")
+    if s.get("watchdogStalls"):
+        line("loop stalls", f"{s['watchdogStalls']}   <-- a loop hung; the stacks are in the daemon log")
+    h = s.get("host") or {}
+    if h:
+        print("\n hub")
+        if h.get("throttledNow") is not None:
+            since = h.get("throttledSinceBoot")
+            line("power / throttle", (", ".join(h["throttledNow"]) or "ok")
+                 + (f"   (since boot: {', '.join(since)})" if since else ""))
+        if h.get("cpuTempC") is not None:
+            line("cpu temperature", f"{h['cpuTempC']} C")
+        if h.get("logDiskFreeBytes") is not None:
+            line("log disk free", f"{h['logDiskFreeBytes'] / 2**30:.1f} GiB")
     ev = s.get("events") or {}
     if ev.get("metadata"):
+        # The source matters more than the file name: "checkout" is a file
+        # guessed from a sibling PX4 build, which may not be the firmware flying.
         line("PX4 events", f"decoded {ev.get('decoded', 0)}, unknown {ev.get('unknown', 0)}  "
-                           f"({os.path.basename(ev['metadata'])})")
-    elif ev.get("missed"):
-        line("PX4 events", f"{ev['missed']} UNREADABLE — set --events-meta; refusal reasons are being lost")
+                           f"({os.path.basename(ev['metadata'])}, from the {ev.get('source') or '?'})")
+    elif ev.get("missed") or ev.get("fetchFailures"):
+        line("PX4 events", f"{ev.get('missed', 0)} UNREADABLE, {ev.get('fetchFailures', 0)} failed "
+                           "reads from the vehicle — refusal reasons are being lost; see the daemon log")
     trimmed = s.get("trimmedStreams")
     if trimmed:
         # Said plainly, because the alternative is someone hunting a message in
@@ -119,6 +175,11 @@ def _print_status(s: dict) -> None:
         line("on disk", f"{fl.get('bytes', 0) / 1e6:.1f} MB"
                         + (f", {fl['rotations']} rotation(s)" if fl.get("rotations") else "")
                         + (f", {fl['pruned']} pruned" if fl.get("pruned") else ""))
+        if fl.get("budgetBytes") is not None:
+            line("log budget", f"{fl['budgetBytes'] / 1e9:.1f} GB for all logs, oldest pruned first")
+        if fl.get("decimated"):
+            line("thinned", f"{fl['decimated']} actuator frames not logged (10 Hz kept; "
+                            "--log-full-rate keeps all)")
         if not fl.get("clockWasSet"):
             # Worth saying before someone correlates this log with a video.
             line("clock", "was NOT set when this log opened — times are relative")
@@ -169,6 +230,9 @@ def main() -> int:
                         help="ask a RUNNING daemon what it decided and exit. The "
                              "same snapshot the console can request, over the same "
                              "socket -- a field hub has ssh, not a browser.")
+    parser.add_argument("--json", action="store_true",
+                        help="with --status: print the raw snapshot as one JSON "
+                             "line, for scripts (commandant update reads it)")
     parser.add_argument("--replay", metavar="FILE.tlog",
                         help="serve a recorded flight instead of a live link. "
                              "The console connects as usual and every frame is "
@@ -201,12 +265,25 @@ def main() -> int:
                              "(default: ./logs, or $GS_LOG_DIR)")
     parser.add_argument("--no-log", action="store_true",
                         help="do not record a flight log")
+    parser.add_argument("--log-max-mb", type=float,
+                        default=float(os.environ.get("GS_LOG_MAX_MB") or 0) or None,
+                        metavar="MB",
+                        help="fixed cap on all flight logs together, oldest pruned "
+                             "first ($GS_LOG_MAX_MB). Default: up to half the disk, "
+                             "always leaving 1 GiB free -- days of HITL on an SD card")
+    parser.add_argument("--log-full-rate", action="store_true",
+                        default=os.environ.get("GS_LOG_FULL_RATE", "") not in ("", "0"),
+                        help="log every HIL_ACTUATOR_CONTROLS (190 Hz in HITL, over "
+                             "half the log) instead of 10 Hz ($GS_LOG_FULL_RATE=1)")
     parser.add_argument("--flight-id", default="",
                         help="label for this flight on the relay (default: a UTC timestamp)")
     args = parser.parse_args()
 
     if args.status:
-        return print_status(args.ws_host, args.ws_port)
+        return print_status(args.ws_host, args.ws_port, as_json=args.json)
+    if not os.environ.get("JOURNAL_STREAM"):
+        sys.stdout = _StampedLines(sys.stdout)
+        sys.stderr = _StampedLines(sys.stderr)
 
     relay = None
     if args.relay:
@@ -240,6 +317,8 @@ def main() -> int:
         command_token=args.command_token,
         trim_streams=not args.keep_all_streams,
         events_meta=args.events_meta,
+        log_max_bytes=int(args.log_max_mb * 1e6) if args.log_max_mb else None,
+        log_full_rate=args.log_full_rate,
     ).run()
     return 0
 

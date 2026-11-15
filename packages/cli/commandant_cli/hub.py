@@ -43,7 +43,12 @@ DEFAULTS = {
     "user": "commandant",
     # Empty means detect: the machine's WiFi interface, whatever it is named.
     "iface": "",
+    # "hotspot": the hub makes its own WiFi (the field). "existing": it joins
+    # whatever network the machine is already on -- a HITL bench, a Starlink
+    # router -- and only serves gs and the console there.
+    "network": "hotspot",
 }
+NETWORK_MODES = ("hotspot", "existing")
 SERVICES = ("gs.service", "console.service")
 
 # What `install` was told, so `update` -- which re-runs it, usually with no
@@ -56,7 +61,8 @@ SERVICES = ("gs.service", "console.service")
 SAVED = "/etc/commandant/hub.json"
 SAVED_SECRET = "/etc/commandant/hub.psk"
 GS_ENV = "/etc/commandant/gs.env"
-SAVED_KEYS = ("repo", "ssid", "passphrase", "country", "ap_ip", "hostname", "user", "iface")
+SAVED_KEYS = ("repo", "ssid", "passphrase", "country", "ap_ip", "hostname", "user", "iface",
+              "network")
 
 NETWORKMANAGER = "networkmanager"
 DHCPCD = "dhcpcd"
@@ -159,9 +165,41 @@ def _preflight(o: dict[str, str], force: bool) -> str:
         problems.append("not root, and there is no sudo: run this as root.")
     if not Path("/run/systemd/system").exists():
         problems.append("systemd is not running; the hub's services are systemd units.")
+    if o["network"] not in NETWORK_MODES:
+        problems.append(f"--network must be one of {', '.join(NETWORK_MODES)}.")
+    # What hostnamectl accepts and mDNS can announce as <name>.local.
+    if not re.fullmatch(r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?", o["hostname"]):
+        problems.append(f"--hostname {o['hostname']!r} must be letters, digits and "
+                        "inner hyphens, at most 63 characters.")
+    hotspot = o["network"] == "hotspot"
+    backend = _network_backend()
+    # On an existing network there is no access point: no WiFi interface to
+    # take over, no SSID, passphrase or AP address, and nothing to drop.
+    if hotspot:
+        problems += _hotspot_problems(o, backend)
+    if problems:
+        print("Not ready to become a hub:\n" + "\n".join(f"  - {p}" for p in problems),
+              file=sys.stderr)
+        raise SystemExit(2)
+
+    in_use = [a for a in _iface_addresses(o["iface"]) if a != o["ap_ip"]] if hotspot else []
+    if in_use and not force:
+        print(f"{o['iface']} is connected right now ({', '.join(in_use)}). Making it "
+              "the access point will drop that connection -- and this session, if "
+              "you are on it.\nRe-run with --force if that is intended, --iface "
+              "to use another interface, or --network existing to stay on the "
+              "network it is on.", file=sys.stderr)
+        raise SystemExit(2)
+    return backend
+
+
+def _hotspot_problems(o: dict[str, str], backend: str) -> list[str]:
+    """What stops this machine running the hub's own access point."""
+    problems = []
     if not o["iface"]:
         problems.append("no WiFi interface found (nothing under /sys/class/net/*/phy80211); "
-                        "pass --iface if there is one.")
+                        "pass --iface if there is one, or --network existing to use the "
+                        "network this machine is on.")
     elif o["iface"] not in _wifi_ifaces():
         # A typo, a wired interface, or a dongle not plugged in: each would get
         # an access point configured onto it that can never come up.
@@ -174,7 +212,6 @@ def _preflight(o: dict[str, str], force: bool) -> str:
     except ValueError:
         problems.append(f"--ap-ip {o['ap_ip']} must be a private IPv4 host address "
                         "(the hub's own, on a /24), e.g. 192.168.50.1.")
-    backend = _network_backend()
     if not backend:
         problems.append("neither NetworkManager nor dhcpcd manages networking here. "
                         "Install NetworkManager (apt install network-manager) and re-run.")
@@ -185,10 +222,6 @@ def _preflight(o: dict[str, str], force: bool) -> str:
                         f"{len(o['passphrase'])}).")
     if not 1 <= len(o["ssid"].encode()) <= 32:
         problems.append(f"the SSID must be 1-32 bytes (got {len(o['ssid'].encode())}).")
-    # What hostnamectl accepts and mDNS can announce as <name>.local.
-    if not re.fullmatch(r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?", o["hostname"]):
-        problems.append(f"--hostname {o['hostname']!r} must be letters, digits and "
-                        "inner hyphens, at most 63 characters.")
     if backend == NETWORKMANAGER:
         # Either one makes NetworkManager's AP fail with nothing said: hostapd
         # takes the interface, a system dnsmasq holds the DNS/DHCP ports its
@@ -198,19 +231,76 @@ def _preflight(o: dict[str, str], force: bool) -> str:
                 problems.append(f"{unit}.service is running and will keep "
                                 f"NetworkManager's access point from working. If "
                                 f"nothing else needs it: systemctl disable --now {unit}")
-    if problems:
-        print("Not ready to become a hub:\n" + "\n".join(f"  - {p}" for p in problems),
-              file=sys.stderr)
-        raise SystemExit(2)
+    return problems
 
-    in_use = [a for a in _iface_addresses(o["iface"]) if a != o["ap_ip"]]
-    if in_use and not force:
-        print(f"{o['iface']} is connected right now ({', '.join(in_use)}). Making it "
-              "the access point will drop that connection -- and this session, if "
-              "you are on it.\nRe-run with --force if that is intended, or --iface "
-              "to use another interface.", file=sys.stderr)
-        raise SystemExit(2)
-    return backend
+
+def hosts_with_hostname(text: str, hostname: str) -> str:
+    """/etc/hosts with its 127.0.1.1 line naming `hostname` (Debian's
+    convention for the machine's own name), added if there is none."""
+    want = f"127.0.1.1\t{hostname}"
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.split("#")[0].split()[:1] == ["127.0.1.1"]:
+            if line.split("#")[0].split()[1:] == [hostname]:
+                return text
+            lines[i] = want
+            return "\n".join(lines) + "\n"
+    return (text.rstrip("\n") + "\n" if text.strip() else "") + want + "\n"
+
+
+# --- is the aircraft flying? ------------------------------------------------
+#
+# update, down and uninstall stop or restart gs. In flight that is the
+# operator's link going away: no telemetry, no command, and PX4 counting the
+# data link lost after COM_DL_LOSS_T. They were run without a look. Asked of
+# gs itself, over the same `status` the console uses.
+
+FLYING_LANDED_STATES = ("in_air", "takeoff", "landing")
+
+
+def flight_state(status: dict[str, Any] | None) -> str:
+    """Why a gs status says the aircraft is flying, or "" if it does not."""
+    if not status:
+        return ""
+    if status.get("armed"):
+        return "armed"
+    landed = status.get("landedState")
+    return landed if landed in FLYING_LANDED_STATES else ""
+
+
+def _gs_status(o: dict[str, str]) -> dict[str, Any] | None:
+    """The running gs's status, or None if there is none to ask."""
+    py = Path(o["repo"]) / "packages/gs/.venv/bin/python"
+    port = _env_value(_read(GS_ENV, elevate=True), "GS_WS_PORT") or "8790"
+    if not py.exists():
+        return None
+    try:
+        r = subprocess.run([str(py), "-m", "gs", "--status", "--json", "--ws-port", port],
+                           capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    for line in reversed(r.stdout.splitlines()):
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(d, dict) and d.get("type") == "status":
+            return d
+    return None
+
+
+def _refuse_in_flight(o: dict[str, str], args: Any, verb: str) -> bool:
+    """True (and says why) if `verb` would cut the link to a flying aircraft."""
+    if getattr(args, "in_flight", False):
+        return False
+    why = flight_state(_gs_status(o))
+    if not why:
+        return False
+    print(f"!! The aircraft is {why.replace('_', ' ')} (gs says so). `commandant {verb}` "
+          "stops gs, which drops every console's link and command; PX4 will count "
+          "the data link lost.\n   Land and disarm first, or re-run with --in-flight "
+          "if this is really intended.", file=sys.stderr)
+    return True
 
 
 def _flags(args: Any) -> dict[str, str]:
@@ -360,16 +450,28 @@ def cmd_install(args: Any) -> int:
 
     print("== hostname + mDNS ==")
     _sudo(["hostnamectl", "set-hostname", o["hostname"]])
+    # hostnamectl leaves /etc/hosts naming the OLD host, and Pi OS resolves
+    # hosts by files, then mDNS for .local only, then DNS: the new bare name
+    # went to DNS, which in a field with no uplink means every sudo waits on a
+    # lookup that cannot answer, and says "unable to resolve host".
+    hosts = _read("/etc/hosts", elevate=True)
+    fixed = hosts_with_hostname(hosts, o["hostname"])
+    if fixed != hosts:
+        _install_text(fixed, "/etc/hosts", "0644")
     _install_file("avahi/commandant.service", "/etc/avahi/services/commandant.service", "0644", o)
     _sudo(["systemctl", "enable", "--now", "avahi-daemon"])
 
-    print(f"== access point on {o['iface']} ({backend}) ==")
-    if shutil.which("rfkill"):
-        _sudo(["rfkill", "unblock", "wlan"], check=False)
-    if backend == NETWORKMANAGER:
-        _ap_networkmanager(o, set_country="country" in flags or "country" in saved)
+    if o["network"] == "existing":
+        print("== network: joining the existing one (no access point) ==")
+        _remove_ap()
     else:
-        _ap_hostapd(o)
+        print(f"== access point on {o['iface']} ({backend}) ==")
+        if shutil.which("rfkill"):
+            _sudo(["rfkill", "unblock", "wlan"], check=False)
+        if backend == NETWORKMANAGER:
+            _ap_networkmanager(o, set_country="country" in flags or "country" in saved)
+        else:
+            _ap_hostapd(o)
 
     print("== build gs (venv) + console (production) ==")
     _sudo(["chown", "-R", f"{o['user']}:{o['user']}", str(repo)])
@@ -387,8 +489,14 @@ def cmd_install(args: Any) -> int:
     if clear:
         print("   the gs venv's python does not run; rebuilding it")
     _as_user(o["user"], ["python3", "-m", "venv", *(["--clear"] if clear else []), str(venv)])
-    _as_user(o["user"], [str(repo / "packages/gs/.venv/bin/pip"), "install", "-e",
-                         str(repo / "packages/gs")])
+    # Pinned to what the suites ran (uv.lock, exported). Unpinned, a fresh hub
+    # took whatever was newest that day -- MEASURED 2026-11-11: websockets 17.4
+    # against the tested 17.2 -- and the next breaking pymavlink or websockets
+    # would have reached a hub before any test saw it.
+    constraints = repo / "packages/gs/constraints.txt"
+    _as_user(o["user"], [str(repo / "packages/gs/.venv/bin/pip"), "install",
+                         *(["-c", str(constraints)] if constraints.exists() else []),
+                         "-e", str(repo / "packages/gs")])
     _as_user(o["user"], ["npm", "install"], cwd=repo)
     _as_user(o["user"], ["npm", "run", "build", "--workspace", "console"], cwd=repo)
 
@@ -399,7 +507,7 @@ def cmd_install(args: Any) -> int:
     _sudo(["systemctl", "daemon-reload"])
     _sudo(["systemctl", "enable", *SERVICES])
 
-    if o["passphrase"] == DEFAULTS["passphrase"]:
+    if o["network"] == "hotspot" and o["passphrase"] == DEFAULTS["passphrase"]:
         print("\n!! The WiFi passphrase is still the placeholder. Re-run with "
               "--passphrase before taking this to a field.")
     if new_token:
@@ -409,7 +517,13 @@ def cmd_install(args: Any) -> int:
         print("\n!! No GS_COMMAND_TOKEN in /etc/commandant/gs.env: anyone on the hub's "
               "WiFi can arm the aircraft. Set one there and restart gs.")
     print("\n== done ==\nReview /etc/commandant/gs.env (radio), then: sudo reboot")
-    print(f"After reboot: join WiFi '{o['ssid']}' and open http://{o['hostname']}.local/")
+    if o["network"] == "existing":
+        print(f"After reboot: from any device on this machine's network, open "
+              f"http://{o['hostname']}.local/ (or its IP). Anyone on that network can "
+              "load the console; the command token is what stands between them and "
+              "the aircraft.")
+    else:
+        print(f"After reboot: join WiFi '{o['ssid']}' and open http://{o['hostname']}.local/")
     return 0
 
 
@@ -480,7 +594,7 @@ def _install_packages(backend: str, skip: bool) -> bool:
     on top of NodeSource's package is a dependency conflict that fails the
     whole install."""
     have_node = (_node_version() or (0,)) >= NODE_MIN
-    needed = tuple(pkg for pkg in (*COMMON_PACKAGES, *AP_PACKAGES[backend])
+    needed = tuple(pkg for pkg in (*COMMON_PACKAGES, *AP_PACKAGES.get(backend, ()))
                    if not (have_node and pkg in ("nodejs", "npm")))
     if skip:
         print("== packages: skipped (--skip-packages) ==")
@@ -572,6 +686,23 @@ def _ap_networkmanager(o: dict[str, str], set_country: bool = True) -> None:
             _sudo(["iw", "reg", "set", o["country"]], check=False)
     else:
         print(f"   regulatory domain left at {_system_regdom()} (--country to change)")
+
+
+def _remove_ap() -> None:
+    """Take down the access point an earlier install made, for `uninstall` and
+    for a switch to `--network existing` (which must not leave the hub
+    broadcasting too -- nor, on a one-radio Pi, holding the radio the network
+    needs). By what install left behind, not by which daemon runs now: a hub
+    whose NetworkManager is stopped still has the connection saved and will
+    broadcast again when it starts, and one whose networking moved from dhcpcd
+    to NetworkManager has both paths' files."""
+    if shutil.which("nmcli"):
+        _sudo(["nmcli", "connection", "delete", NM_CONNECTION], check=False)
+    if Path("/etc/hostapd/hostapd.conf").exists():
+        _sudo(["systemctl", "disable", "--now", "hostapd", "dnsmasq"], check=False)
+    for path in ("/etc/hostapd/hostapd.conf", "/etc/dnsmasq.d/commandant.conf",
+                 "/etc/NetworkManager/dnsmasq-shared.d/commandant.conf"):
+        _sudo(["rm", "-f", path], check=False)
 
 
 def _nm_has_connection() -> bool:
@@ -701,10 +832,19 @@ def cmd_update(args: Any) -> int:
     # Elevated: a repo or user given to install lives in the root-only file,
     # and pulling the default path instead would update the wrong checkout.
     o = _opts(args, _saved(elevate=True))
+    if _refuse_in_flight(o, args, "update"):
+        return 2
     repo = Path(o["repo"])
     if (repo / ".git").exists() and not args.no_pull:
         print("== git pull ==")
-        _as_user(o["user"], ["git", "pull", "--ff-only"], cwd=repo)
+        # Checked, not raised: with no uplink -- a field without Starlink --
+        # the pull fails, and a traceback is not an answer an operator can use.
+        if _as_user(o["user"], ["git", "pull", "--ff-only"], cwd=repo, check=False) != 0:
+            print("!! git pull failed (no internet here, or local changes in the "
+                  f"repo: `git -C {repo} status`). Nothing was changed. To reinstall "
+                  "what is already checked out: commandant update --no-pull",
+                  file=sys.stderr)
+            return 3
     rc = cmd_install(args)
     if rc == 0:
         print("== restart services ==")
@@ -757,8 +897,11 @@ def cmd_status(args: Any) -> int:
         if active not in ("active", "no systemd"):
             worst = 1
     # NetworkManager runs the AP's DHCP itself; hostapd and dnsmasq are only
-    # this hub's if dhcpcd owns its networking.
-    ap_units = (("NetworkManager",) if _network_backend() == NETWORKMANAGER
+    # this hub's if dhcpcd owns its networking. On an existing network there
+    # is no AP of ours to check.
+    existing = o["network"] == "existing"
+    ap_units = (() if existing
+                else ("NetworkManager",) if _network_backend() == NETWORKMANAGER
                 else ("hostapd", "dnsmasq"))
     for unit in (*ap_units, "avahi-daemon"):
         active, _ = _unit_state(unit)
@@ -767,6 +910,12 @@ def cmd_status(args: Any) -> int:
             worst = 1
 
     # The address the operator actually types, and whether the AP has it.
+    if existing:
+        print(f"\n   on an existing network: http://{o['hostname']}.local/ from any device on it")
+        print(f"\n   the daemon's own view:  "
+              f"{o['repo']}/packages/gs/.venv/bin/python -m gs --status")
+        print("   recent logs:            commandant logs")
+        return worst
     iface = o["iface"]
     addrs = _iface_addresses(iface)
     if not iface:
@@ -793,6 +942,8 @@ def cmd_up(args: Any) -> int:
 def cmd_down(args: Any) -> int:
     """Stop the services. Deliberately leaves the AP up, so a hub you are
     standing next to does not drop its WiFi out from under your laptop."""
+    if _refuse_in_flight(_opts(args), args, "down"):
+        return 2
     _sudo(["systemctl", "stop", *SERVICES])
     return cmd_status(args)
 
@@ -819,25 +970,16 @@ def cmd_uninstall(args: Any) -> int:
               f"The repo at {_opts(args)['repo']} is NOT touched.\n"
               "Re-run with --yes to proceed.", file=sys.stderr)
         return 2
+    if _refuse_in_flight(_opts(args), args, "uninstall"):
+        return 2
     print("== stopping services ==")
     _sudo(["systemctl", "disable", "--now", *SERVICES], check=False)
     print("== removing the access point ==")
-    # By what install left behind, not by which daemon runs right now: a hub
-    # whose NetworkManager is stopped still has the connection saved, and
-    # will broadcast again the next time it starts.
-    if shutil.which("nmcli"):
-        _sudo(["nmcli", "connection", "delete", NM_CONNECTION], check=False)
-    if Path("/etc/hostapd/hostapd.conf").exists():
-        _sudo(["systemctl", "disable", "--now", "hostapd", "dnsmasq"], check=False)
+    _remove_ap()
     print("== removing files ==")
-    # Both paths' files, whichever installed them: a hub whose networking moved
-    # from dhcpcd to NetworkManager in between still comes apart cleanly.
     for path in ("/etc/systemd/system/gs.service",
                  "/etc/systemd/system/console.service",
                  "/etc/avahi/services/commandant.service",
-                 "/etc/dnsmasq.d/commandant.conf",
-                 "/etc/hostapd/hostapd.conf",
-                 "/etc/NetworkManager/dnsmasq-shared.d/commandant.conf",
                  "/etc/modprobe.d/commandant-regdom.conf",
                  SAVED, SAVED_SECRET):
         _sudo(["rm", "-f", path], check=False)

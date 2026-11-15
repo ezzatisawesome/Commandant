@@ -1,0 +1,15 @@
+# The versions gs is tested against (uv.lock), for installs that use pip:
+# commandant install passes this to pip as a constraints file, so a hub gets
+# what the suites ran, not whatever is newest that day. Regenerate with
+#   uv export --frozen --no-hashes --no-dev --no-emit-project > constraints.txt
+# (test_hub.py fails when it drifts from uv.lock).
+fastcrc==0.5.0
+    # via pymavlink
+lxml==6.1.3
+    # via pymavlink
+pymavlink==2.4.50
+    # via gs
+pyserial==3.5
+    # via gs
+websockets==17.2
+    # via gs

@@ -46,9 +46,12 @@ import websockets
 os.environ.setdefault("MAVLINK20", "1")
 from pymavlink import mavutil  # noqa: E402
 
+from . import __version__  # noqa: E402
+from . import host as _host
 from .events import EventDecoder, find_metadata
 from .flightlog import FlightLog
-from . import __version__  # noqa: E402
+from .ftp import FtpRead
+from .watchdog import Watchdog
 
 if not hasattr(mavutil.mavlink, "MAVLINK_MSG_ID_ACTUATOR_OUTPUT_STATUS"):
     mavutil.set_dialect(os.environ.get("MAVLINK_DIALECT", "all"))
@@ -169,7 +172,15 @@ _AGE_GROUPS = {
     "SYS_STATUS": "health",
     "EKF_STATUS_REPORT": "ekf",
     "ESTIMATOR_STATUS": "ekf",      # PX4's name for the same report
+    "EXTENDED_SYS_STATE": "landed",
+    "HOME_POSITION": "home",
 }
+
+# EXTENDED_SYS_STATE.landed_state, named. 0 (undefined) is absent, not a guess.
+# gs ignored this message although PX4 streams it on the GCS link, so neither gs
+# nor the console could say whether the aircraft was in the air: a rehearsal
+# that guessed from relative altitude read EKF drift on the runway as flight.
+_LANDED_STATES = {1: "on_ground", 2: "in_air", 3: "takeoff", 4: "landing"}
 
 # Command TX: who we address, and the retry policy for COMMAND_ACK tracking.
 # 1/1 is the PX4 default; gs locks onto the real ids from the first autopilot
@@ -181,12 +192,35 @@ GCS_COMPONENT = 190      # MAV_COMP_ID_MISSIONPLANNER
 CMD_MAX_TRIES = 3        # total COMMAND_LONG sends before giving up
 CMD_RETRY_MS = 1000      # re-send cadence while awaiting COMMAND_ACK
 CMD_IN_PROGRESS_MS = 15000  # after a MAV_RESULT_IN_PROGRESS, wait this long for the final ack
+# After a command times out its ACKs can still arrive (a saturated radio). For
+# this long they are owed echoes: never a verdict on the next command of that
+# number, and the first is told to the operator, whose console said "timeout"
+# about a vehicle that may well have acted.
+LATE_ACK_WINDOW_MS = 10000
+# A mode command's ACK is not its verdict. MEASURED against PX4 1.16 SITL:
+# DO_SET_MODE to AUTO.MISSION with an unflyable plan ACKs MAV_RESULT_ACCEPTED,
+# then commander says "Switching to Mission is currently not available" and the
+# vehicle stays in AUTO.LOITER -- while gs told the console "accepted". The
+# verdict is the mode the vehicle then reports. HEARTBEAT is 1 Hz on a fat pipe
+# and slower on a rate-capped radio, hence the margin.
+MODE_VERIFY_MS = 5000
+# How often the hub samples its own health (host.py): a few sysfs reads.
+HOST_SAMPLE_MS = 5000
 
 # Transport resilience: reopen the link after an open failure or a run of recv
 # errors (serial unplugged, TCP peer gone) instead of letting the mav thread die.
 LINK_REOPEN_MIN_S = 1.0
 LINK_REOPEN_MAX_S = 10.0
 LINK_RECV_ERRORS_BEFORE_REOPEN = 5
+# A serial write with no timeout blocks until the peer reads. MEASURED on a pty
+# nobody reads: pymavlink's write (pyserial, write_timeout=None) stopped for
+# good after 15 heartbeats, freezing the mav thread -- no GCS heartbeat to PX4,
+# no telemetry, no reopen. 2 s is ~3x the time a 57600 radio takes to drain a
+# full 4 KiB tty buffer, so a write that waits that long is a stuck peer, not a
+# slow one. pymavlink turns the timeout into a -1 return; after a few in a row
+# the link is reopened like any other dead one.
+SERIAL_WRITE_TIMEOUT_S = 2.0
+LINK_WRITE_FAILURES_BEFORE_REOPEN = 3
 
 # Param sync (Phase 2). The PARAM protocol is hand-rolled on the mav thread.
 PARAM_PROGRESS_EVERY = 25    # emit a param_progress at most this often (by count)
@@ -194,6 +228,12 @@ PARAM_GAP_QUIET_MS = 1500    # after the list stream goes quiet, re-request miss
 PARAM_SET_TIMEOUT_MS = 2000  # await the echoed PARAM_VALUE after a PARAM_SET
 PARAM_SET_MAX_TRIES = 3
 PARAM_GAP_MAX_SWEEPS = 10    # give up a refresh after this many fruitless gap sweeps
+# Gap reads per quiet sweep on a fat pipe (a radio takes the paced path). It was
+# 20, and each sweep waits PARAM_GAP_QUIET_MS after its own replies, so the
+# refill ran at a fixed 13 params/s whatever the link. MEASURED against PX4
+# SITL with gs up before PX4 booted -- the field order, hub first -- PX4
+# answered the list with a fragment and the rest took 72 s instead of 0.8 s.
+PARAM_GAP_READS = 200
 PARAM_BATCH_MS = 50          # coalesce streamed PARAM_VALUEs into one WS `params` message
 PARAM_BATCH_MAX = 64
 
@@ -306,12 +346,20 @@ def open_connection(endpoint: str, baud: int = DEFAULT_SERIAL_BAUD) -> Any:
         parts = endpoint.split(":")
         device = parts[1]
         rate = int(parts[2]) if len(parts) > 2 and parts[2] else baud
-        return mavutil.mavlink_connection(device, baud=rate, **_GCS_ID)
+        return _bounded_writes(mavutil.mavlink_connection(device, baud=rate, **_GCS_ID))
     # Bare device path (no udp/tcp scheme) -> serial too, at the fallback baud.
     if "://" not in endpoint and ":" not in endpoint.split("/")[-1] and (
             endpoint.startswith("/dev/") or endpoint.upper().startswith("COM")):
-        return mavutil.mavlink_connection(endpoint, baud=baud, **_GCS_ID)
+        return _bounded_writes(mavutil.mavlink_connection(endpoint, baud=baud, **_GCS_ID))
     return mavutil.mavlink_connection(endpoint, **_GCS_ID)
+
+
+def _bounded_writes(conn: Any) -> Any:
+    """A serial link whose writes give up; see SERIAL_WRITE_TIMEOUT_S."""
+    port = getattr(conn, "port", None)
+    if port is not None and hasattr(port, "write_timeout"):
+        port.write_timeout = SERIAL_WRITE_TIMEOUT_S
+    return conn
 
 
 _GCS_ID = {"source_system": GCS_SYSTEM, "source_component": GCS_COMPONENT}
@@ -354,13 +402,85 @@ PROBE_SERIAL_S = 2.0   # a device that is there answers within one heartbeat per
 PROBE_NET_S = 3.0      # UDP has no handshake: give SITL a moment to send
 
 
+def device_in_use(dev: str, proc_root: str = "/proc") -> bool:
+    """Does another process hold `dev` open? Linux only, and only as far as we
+    may read other processes' fd tables: unknown counts as free, which is the
+    behaviour this replaced.
+
+    The probe opens a candidate, writes a heartbeat into it and reads from it.
+    On a HITL bench the Pixhawk's USB port belongs to the JSBSim bridge, and a
+    probe of it steals bytes from the bridge's HIL stream -- then, finding a
+    heartbeat, gs keeps the port and competes for every byte from then on.
+    thror's launcher pins `--mavlink` for exactly this reason; `auto`, which
+    the hub CLI defaults to, did not know."""
+    try:
+        target = os.path.realpath(dev)
+        pids = [d for d in os.listdir(proc_root) if d.isdigit()]
+    except OSError:
+        return False
+    me = str(os.getpid())
+    for pid in pids:
+        if pid == me:
+            continue
+        fd_dir = os.path.join(proc_root, pid, "fd")
+        try:
+            fds = os.listdir(fd_dir)
+        except OSError:
+            continue            # gone, or not ours to read
+        for fd in fds:
+            try:
+                if os.path.realpath(os.path.join(fd_dir, fd)) == target:
+                    return True
+            except OSError:
+                continue
+    return False
+
+
+SERIAL_BY_ID_DIR = "/dev/serial/by-id"
+
+
+def stable_device_path(dev: str, by_id_dir: str | None = None) -> str:
+    """The /dev/serial/by-id name of `dev`, if udev made one; else `dev`.
+
+    A kernel name is an enumeration order, not an identity: a USB reset -- a
+    brown-out, a loose cable -- brings the Pixhawk back as /dev/ttyACM1 while
+    gs remembers ttyACM0, so the reopen's "retry the link that was working"
+    (see _reopen_endpoint) looked for a node that was gone and fell back to a
+    full re-probe. The by-id name is made from the device's own USB serial
+    number and follows it across re-enumeration."""
+    by_id_dir = by_id_dir or SERIAL_BY_ID_DIR
+    try:
+        target = os.path.realpath(dev)
+        names = sorted(os.listdir(by_id_dir))
+    except OSError:
+        return dev
+    for name in names:
+        link = os.path.join(by_id_dir, name)
+        try:
+            if os.path.realpath(link) == target:
+                return link
+        except OSError:
+            continue
+    return dev
+
+
 def candidate_endpoints() -> list[str]:
     """Endpoints to probe, most specific first. Only serial devices that exist
-    are listed, so an absent radio costs nothing."""
+    are listed, so an absent radio costs nothing; one another process holds
+    open is skipped (see device_in_use). Each is named by its stable path
+    (see stable_device_path)."""
     out: list[str] = []
+    seen: set[str] = set()
     for pattern, baud in SERIAL_CANDIDATES:
         for dev in sorted(glob.glob(pattern)):
-            out.append(f"serial:{dev}:{baud}")
+            real = os.path.realpath(dev)
+            if real in seen:
+                continue            # /dev/serial0 is a link to a UART listed already
+            seen.add(real)
+            if device_in_use(dev):
+                print(f"[gs] autodetect: {dev} is open in another process; not probing it")
+                continue
+            out.append(f"serial:{stable_device_path(dev)}:{baud}")
     out.extend(NET_CANDIDATES)
     return out
 
@@ -403,9 +523,14 @@ def probe_endpoint(endpoint: str, timeout_s: float) -> bool:
                 pass
 
 
-def detect_endpoint(candidates: list[str] | None = None) -> str | None:
-    """Probe every candidate once; return the first that has an autopilot on it."""
+def detect_endpoint(candidates: list[str] | None = None,
+                    on_probe: Any = None) -> str | None:
+    """Probe every candidate once; return the first that has an autopilot on it.
+    `on_probe` is called before each probe (the watchdog's beat: a full sweep
+    can outlast its stall window, one probe cannot)."""
     for endpoint in candidates if candidates is not None else candidate_endpoints():
+        if on_probe is not None:
+            on_probe()
         window = PROBE_NET_S if endpoint.startswith(("udp", "tcp")) else PROBE_SERIAL_S
         if probe_endpoint(endpoint, window):
             return endpoint
@@ -432,8 +557,14 @@ _CDC_ACM_HINTS = ("ttyacm", "usbmodem")
 
 
 def _is_usb_cdc(device: str) -> bool:
-    low = device.lower()
-    return any(h in low for h in _CDC_ACM_HINTS)
+    # By the node a link resolves to, too: a by-id name says
+    # "usb-Holybro_Pixhawk6X_...-if00", which hints at nothing, and a Pixhawk
+    # pinned that way got a 57600 radio's budget.
+    for name in (device, os.path.realpath(device)):
+        low = name.lower()
+        if any(h in low for h in _CDC_ACM_HINTS):
+            return True
+    return False
 
 
 def link_budget_bps(endpoint: str, baud: int = DEFAULT_SERIAL_BAUD) -> float:
@@ -1017,7 +1148,80 @@ _JSON_RANGES: dict[str, tuple[float, float]] = {
     "batteryRemaining": (0.0, 100.0),
     "voltage": (0.0, 1000.0),
     "current": (-1000.0, 1000.0),
+    # An epoch in ms is ~1.8e12, past the 1e12 default bound, so the sim's sun
+    # clock was refused on every frame of every HITL run on thror ("unusable
+    # values for sunEpochMs ... Said once") and the console's globe fell back
+    # to the hub's own clock: a run set at noon on the solstice drew whatever
+    # time it was on the bench. 1970 to 2100.
+    "sunEpochMs": (0.0, 4.1e12),
 }
+
+
+def expected_mode(mav_cmd: int, params: list[float]) -> str | None:
+    """The mode a command is asking for, as decode_mode names it, or None if
+    it does not ask for one (see MODE_VERIFY_MS)."""
+    m = mavutil.mavlink
+    if mav_cmd == m.MAV_CMD_DO_SET_MODE and len(params) >= 3:
+        try:
+            return decode_mode((int(params[1]) << 16) | (int(params[2]) << 24))
+        except (TypeError, ValueError):
+            return None
+    if mav_cmd == m.MAV_CMD_NAV_RETURN_TO_LAUNCH:
+        return "AUTO.RTL"
+    return None
+
+
+def mav_cmd_name(cmd: int) -> str:
+    entry = mavutil.mavlink.enums.get("MAV_CMD", {}).get(cmd)
+    return entry.name if entry is not None else f"MAV_CMD {cmd}"
+
+
+# Messages PX4 addresses to one sender. PX4 replies on the instance a request
+# came in on, so a link gs shares with another sender carries PX4's half of
+# that sender's conversation too. HITL is such a link: the JSBSim bridge
+# forwards the board's ONE USB instance to both the AircraftSim host (sysid
+# 100) and gs; a radio fanned out by mavlink-router to gs and QGC is another.
+# (On SITL each has its own instance, and gs's tlog shows only its own
+# replies.) MEASURED on thror's HITL tlogs: 44
+# COMMAND_ACKs (21 "arm denied", 14 set-mode) and 11 complete mission uploads
+# with readback, all addressed to the host. gs matched them on command number
+# and mission type alone, so the host's verdict answered an operator's arm, and
+# gs answered the host's MISSION_REQUESTs during its own upload, interleaving
+# two plans into one transfer. Target 0 is a broadcast and stays ours.
+_ADDRESSED = frozenset({
+    "COMMAND_ACK", "MISSION_REQUEST_INT", "MISSION_REQUEST", "MISSION_COUNT",
+    "MISSION_ITEM_INT", "MISSION_ACK", "FILE_TRANSFER_PROTOCOL",
+})
+
+# Where PX4 keeps its events metadata on the vehicle (component_general.json's
+# type-4 uri, mftp://etc/extras/all_events.json.xz). The FTP root is "" on
+# NuttX and the rootfs dir on SITL, so the absolute path serves both.
+EVENTS_META_FTP_PATH = "/etc/extras/all_events.json.xz"
+META_RETRY_MIN_MS = 30_000
+META_RETRY_MAX_MS = 600_000
+
+
+def addressed_to_gs(msg: Any) -> bool:
+    sys_ = getattr(msg, "target_system", 0) or 0
+    comp = getattr(msg, "target_component", 0) or 0
+    return sys_ in (0, GCS_SYSTEM) and comp in (0, GCS_COMPONENT)
+
+
+def param_echo_matches(echoed: float, sent: float) -> bool:
+    """Is a PARAM_VALUE echo the value we set?
+
+    PX4 stores a float param as float32, so compare there and not at a fixed
+    1e-4: 25000.1 comes back as 25000.0996 (a false "rejected"), and a gain of
+    1e-4 "matched" a stale echo of 5e-5 (a false "set"). Equal as float32, or
+    within a few float32 ulps of each other, is the vehicle's own value."""
+    try:
+        a = struct.unpack("<f", struct.pack("<f", float(echoed)))[0]
+        b = struct.unpack("<f", struct.pack("<f", float(sent)))[0]
+    except (OverflowError, struct.error, TypeError, ValueError):
+        return False
+    if a == b:
+        return True
+    return abs(a - b) <= 4 * 1.2e-7 * max(abs(a), abs(b))
 
 
 def json_value_ok(key: str, v: Any) -> bool:
@@ -1032,7 +1236,15 @@ def json_value_ok(key: str, v: Any) -> bool:
         return isinstance(v, str) and 0 < len(v) <= JSON_STR_MAX
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return False
-    if not math.isfinite(v):
+    try:
+        finite = math.isfinite(v)
+    except OverflowError:
+        # A JSON integer has no size limit and isfinite() converts to float
+        # first: `{"alt": 1e400}` parses as inf, but `{"alt": 1000...0}` with
+        # 400 digits parses as an int and RAISED here, out of _apply_json and
+        # out of the JSON thread, which then never read another packet.
+        return False
+    if not finite:
         # A NaN is a believable TYPE carrying no reading, which is a different
         # thing from a wrong type. Let it through and let dumps() render it as
         # null, which is the contract the console already reads (see
@@ -1060,7 +1272,13 @@ JSON_ONLY_KEYS = {
     # No MAVLink carrier at all: the solar/power model and the sim's own wind.
     "genW", "loadW", "propW", "motorCurrent", "irradiance", "sunEpochMs",
     "windN", "windE", "windD",
-    # PX4 SITL's BATTERY_STATUS is a static dummy; the feed is the real figure.
+    # The feed's battery, over PX4's. MEASURED 2026-11-11: PX4 SITL reported
+    # its own simulated battery (16.2 V, flat) because AircraftSim injected the
+    # pack from sysid 100, which PX4 drops. AircraftSim now injects it as the
+    # vehicle's battery component and turns PX4's simulator off, and PX4 then
+    # reports the pack (measured: 25.2 V, current following the throttle). Kept
+    # here until the same is seen on the HITL board, whose battery comes from
+    # its power ADC; once it is, PX4 is the one battery path flight also uses.
     "voltage", "current", "batteryRemaining",
     # Already TTL-arbitrated against POSITION_TARGET_GLOBAL_INT in _on_mav_state.
     "targetLat", "targetLon", "targetAlt",
@@ -1158,6 +1376,8 @@ class Bridge:
         log_dir: str | None = None,
         command_token: str = "",
         events_meta: str | None = None,
+        log_max_bytes: int | None = None,
+        log_full_rate: bool = False,
     ) -> None:
         self.mavlink_endpoint = mavlink_endpoint
         self.json_port = json_port
@@ -1188,18 +1408,30 @@ class Bridge:
         meta = find_metadata(events_meta)
         self._events = EventDecoder(meta) if meta else None
         self._events_missed = 0
+        # Where the metadata came from. Only an operator's explicit choice
+        # outranks the vehicle's own copy (_service_event_metadata); a file
+        # found in a sibling checkout is a guess, and on a laptop with two
+        # builds it guessed the SITL file for the 6X board.
+        explicit = bool(events_meta or os.environ.get("GS_EVENTS_META"))
+        self._events_source = ("explicit" if explicit else "checkout") if meta else None
+        self._meta_fetch: FtpRead | None = None
+        self._meta_next_try_ms = 0
+        self._meta_failures = 0
         if self._events is not None:
-            print(f"[gs] PX4 event metadata: {meta}")
+            print(f"[gs] PX4 event metadata: {meta}"
+                  + ("" if explicit else " (replaced by the vehicle's own copy once it is read)"))
         else:
-            print("[gs] no PX4 event metadata found: refusal reasons sent as EVENTs will "
-                  "not be readable. Point --events-meta at build/<target>/events/all_events.json")
+            print("[gs] no PX4 event metadata on disk: it will be read from the vehicle "
+                  "over MAVLink FTP once one is locked")
         # True while serving a recorded flight. Carried on every frame, because
         # a console that cannot tell a replay from a live aircraft is a console
         # that will eventually be read as live while something is on fire.
         self.replaying = False
         # Everything that crosses the link, written where someone can replay it.
         # None disables it; the daemon still flies, it just forgets.
-        self.flight_log = FlightLog(log_dir) if log_dir else None
+        self.flight_log = (FlightLog(log_dir, max_total_bytes=log_max_bytes,
+                                     rate_caps_hz={} if log_full_rate else None)
+                           if log_dir else None)
         # Optional outbound-only uplink to the public relay (see gs/relay.py).
         # It is handed every payload the local clients get; it rate-limits and
         # reconnects on its own, and nothing it does can block this daemon.
@@ -1216,6 +1448,7 @@ class Bridge:
         # PX4's MAVLink was dead and the console re-drew the same frozen position —
         # a GCS showing a stale aircraft as live, which is the worst failure it has.
         self.last_mav_at = 0
+        self._opened_at_ms = 0      # when the current transport opened; see _reopen_endpoint
         self.last_json_at = 0
 
         # Source-arbitration / stream-health bookkeeping (mirrors the TS bridge).
@@ -1271,6 +1504,7 @@ class Bridge:
         self._param_last_progress = 0
         self._param_set_pending: dict[str, dict[str, Any]] = {}  # name -> set job
         self._param_gap_sweeps = 0
+        self._param_relisted = False     # one whole re-list per refresh; see PARAM_GAP_READS
         self._param_batch: list[dict[str, Any]] = []   # mav-thread only
         self._param_batch_at = 0
         # Paced-refresh state (narrow links; see PARAM_PACED_BELOW_BPS).
@@ -1286,6 +1520,14 @@ class Bridge:
         self._param_refresh_opened_at = 0   # see PARAM_REFRESH_COOLDOWN_MS
         self._plan_pull_opened_at = 0        # see PLAN_PULL_COOLDOWN_MS
         self.clients_dropped = 0            # see _drop_slow_clients
+        self.json_errors = 0                # frames _apply_json raised on
+        self.broadcast_errors = 0           # 25 Hz ticks that raised
+        # mav_cmd -> {"n": stale ACKs still owed, "until": mono ms}; see
+        # COMMAND_ACK in _on_mav_protocol.
+        self._ack_echoes: dict[int, dict[str, int]] = {}
+        # cid -> {"expect": mode, "until": mono ms, "reason": str | None}; see
+        # MODE_VERIFY_MS. Mav thread only.
+        self._mode_verify: dict[str, dict[str, Any]] = {}
         # Partially-received chunked status messages, keyed by STATUSTEXT id.
         self._text_runs: dict[int, dict[str, Any]] = {}
         self._boot_suspect: int | None = None
@@ -1325,6 +1567,13 @@ class Bridge:
         # `auto`, and can change across a reopen).
         self.active_endpoint = mavlink_endpoint
         self.handler_errors = 0                        # diagnostics: swallowed handler exceptions
+        self._write_failures = 0                       # consecutive; see SERIAL_WRITE_TIMEOUT_S
+        self.write_failures = 0                        # diagnostics: total
+        # The loops that must keep turning beat this; see watchdog.py.
+        self.watchdog = Watchdog()
+        self._host_watch = _host.HostWatch()
+        self._host_at = 0                              # last host sample (mono ms)
+        self.host: dict[str, Any] | None = None        # latest host.sample()
 
         # --- mission path (Phase 4) ----------------------------------------
         # Upload/download handshakes run on the mav thread; `_mission` holds the
@@ -1380,6 +1629,16 @@ class Bridge:
         with self._lock:
             self._vehicle = None
             self._src_at.clear()    # the new link's streams have their own ages
+        # The next vehicle may run other firmware: read its metadata again. The
+        # current decoder stays until that copy replaces it.
+        for cid in list(self._mode_verify):
+            self._report(cid, ok=False, result=-1, text="link reopened before the mode was confirmed")
+        self._mode_verify.clear()
+        self._meta_fetch = None
+        self._meta_next_try_ms = 0
+        self._meta_failures = 0
+        if self._events_source == "vehicle":
+            self._events_source = "previous vehicle"
 
     def _resolve_endpoint(self) -> str | None:
         """The endpoint to open. With `auto`, probe for one; the result is
@@ -1387,7 +1646,7 @@ class Bridge:
         the radio instead is a hardware action, not a restart."""
         if self.mavlink_endpoint != AUTODETECT:
             return self.mavlink_endpoint
-        found = detect_endpoint()
+        found = detect_endpoint(on_probe=lambda: self.watchdog.beat("mav"))
         if found is None:
             # Nothing on the wire yet -- which is the normal state while the
             # aircraft is still powering up. Fall back to the UDP port PX4 and
@@ -1399,12 +1658,35 @@ class Bridge:
             return NET_CANDIDATES[0]
         return found
 
+    def _reopen_endpoint(self) -> str | None:
+        """Under `auto`, the endpoint a reopen should try BEFORE re-probing.
+
+        A reopen re-ran the whole probe: 2 s per serial device (and a Pi always
+        has /dev/serial0) plus 3 s per network port, ~10 s in which gs sends PX4
+        no GCS heartbeat -- past COM_DL_LOSS_T's 10 s default, so a burst of
+        recv errors on a healthy radio could itself trip the data-link-loss
+        failsafe. The link that was just working is the best candidate, so it
+        goes first, on two conditions: it delivered data since it was opened
+        (a dead device must not be retried forever ahead of a live one), and
+        its device node still exists (unplugging the USB for the radio is
+        still a hardware action, not a restart)."""
+        last = self.active_endpoint
+        if (self.mavlink_endpoint != AUTODETECT or not last or last == AUTODETECT
+                or self.last_mav_at <= self._opened_at_ms):
+            return None
+        dev = next((part for part in last.split(":") if part.startswith("/")), None)
+        if dev is not None and not os.path.exists(dev):
+            return None
+        return last
+
     def _open_with_retry(self) -> Any:
         """Open the transport, retrying with backoff. A serial device that is not
         plugged in yet, or a TCP peer that is not up, must not kill the daemon."""
         delay = LINK_REOPEN_MIN_S
+        preferred = self._reopen_endpoint()
         while True:
-            endpoint = self._resolve_endpoint()
+            self.watchdog.beat("mav")
+            endpoint, preferred = (preferred or self._resolve_endpoint()), None
             try:
                 conn = open_connection(endpoint, self.baud)
             except Exception as exc:
@@ -1412,12 +1694,14 @@ class Bridge:
                 time.sleep(delay)
                 delay = min(delay * 2, LINK_REOPEN_MAX_S)
                 continue
+            self._write_failures = 0
             self._record_sends(conn)
             # The link budget follows the transport we actually got, not the one
             # configured -- under `auto` they are only known now, and asking a
             # 57600 radio for 25 Hz is the fault H2 fixed.
             self._on_reopen()
             self.active_endpoint = endpoint
+            self._opened_at_ms = _mono_ms()
             if self._budget_pin is None:
                 self.link_budget_bps = link_budget_bps(endpoint, self.baud)
             print(f"[gs] listening for MAVLink on {endpoint} "
@@ -1425,7 +1709,9 @@ class Bridge:
             return conn
 
     def _record_sends(self, conn: Any) -> None:
-        """Log what gs transmits, by wrapping the one place it leaves.
+        """Log what gs transmits, and count the writes that failed, by wrapping
+        the one place it leaves. pymavlink's serial write returns -1 rather
+        than raising (see SERIAL_WRITE_TIMEOUT_S); the mav loop reads the count.
 
         Every send helper in pymavlink -- command_long_send, param_set_send,
         mission_item_int_send -- ends at `conn.write`, so wrapping that covers
@@ -1436,16 +1722,23 @@ class Bridge:
         Commands are the half of a debrief that says what the OPERATOR did; a
         log of only what arrived answers "what did the aircraft do" and leaves
         "what were we asking it to do" to memory."""
-        if self.flight_log is None or getattr(conn, "_gs_logged", False):
+        inner = getattr(conn, "write", None)
+        if inner is None or getattr(conn, "_gs_logged", False):
             return
-        inner = conn.write
 
         def logged_write(buf):
-            try:
-                self.flight_log.write(buf)
-            except Exception:
-                pass            # logging never breaks a transmit
-            return inner(buf)
+            if self.flight_log is not None:
+                try:
+                    self.flight_log.write(buf)
+                except Exception:
+                    pass            # logging never breaks a transmit
+            n = inner(buf)
+            if n == -1:
+                self._write_failures += 1
+                self.write_failures += 1
+            else:
+                self._write_failures = 0
+            return n
 
         conn.write = logged_write
         conn._gs_logged = True
@@ -1454,6 +1747,19 @@ class Bridge:
         conn = self._open_with_retry()
         errors = 0
         while True:
+            self.watchdog.beat("mav")
+            if self._write_failures >= LINK_WRITE_FAILURES_BEFORE_REOPEN:
+                # The peer stopped taking bytes (a wedged USB device, a radio
+                # holding flow control). Reopening is the only cure gs has.
+                print(f"[gs] {self._write_failures} writes in a row timed out; reopening the link")
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                self.link_reopens += 1
+                conn = self._open_with_retry()
+                errors = 0
+                continue
             try:
                 msg = conn.recv_match(blocking=True, timeout=0.5)
                 if self.flight_log is not None and msg is not None:
@@ -1461,7 +1767,7 @@ class Bridge:
                     # re-encode records what gs believes rather than what the
                     # aircraft said. The two differing is the kind of thing a
                     # log exists to settle.
-                    self.flight_log.write(msg.get_msgbuf())
+                    self.flight_log.write(msg.get_msgbuf(), msg.get_msgId())
                 # UDP/TCP connections expose the sender; serial has no peer.
                 addr = getattr(conn, "last_address", None)
                 self._mav_peer = (f"{addr[0]}:{addr[1]}"
@@ -1501,6 +1807,7 @@ class Bridge:
                 self._service_params(conn)
                 self._service_misc(conn)
                 self._service_missions(conn)
+                self._service_event_metadata(conn)
                 # A chunked status message whose last chunk was lost would
                 # otherwise sit in the buffer forever; the operator gets what
                 # arrived, marked as partial. See _on_statustext.
@@ -1551,20 +1858,32 @@ class Bridge:
                 item = self._cmd_queue.get_nowait()
             except queue.Empty:
                 break
-            self._pending[item["id"]] = {**item, "tries": 0, "last_send_ms": 0}
-        # 2. Send / retry / expire.
+            self._pending[item["id"]] = {**item, "tries": 0, "last_send_ms": 0,
+                                         "expect_mode": expected_mode(item["mav_cmd"], item["params"])}
+        # 2. Mode commands PX4 accepted but has not (yet) carried out.
+        for cid, v in list(self._mode_verify.items()):
+            if now > v["until"]:
+                del self._mode_verify[cid]
+                with self._lock:
+                    current = self.latest.get("mode") or "an unknown mode"
+                self._report(cid, ok=False, result=mavutil.mavlink.MAV_RESULT_ACCEPTED,
+                             text=f"PX4 accepted it but stayed in {current}"
+                                  + (f": {v['reason']}" if v["reason"] else ""))
+        # 3. Send / retry / expire.
         for cid, e in list(self._pending.items()):
             if e.get("in_progress_ms"):
                 # PX4 said IN_PROGRESS: stop resending, wait (bounded) for the final ack.
                 if now - e["in_progress_ms"] > CMD_IN_PROGRESS_MS:
                     del self._pending[cid]
                     self._report(cid, ok=False, result=-1, text="timeout (in progress)")
+                    self._owe_late_acks(e["mav_cmd"], now)
                 continue
             if now - e["last_send_ms"] < CMD_RETRY_MS:
                 continue
             if e["tries"] >= CMD_MAX_TRIES:
                 del self._pending[cid]
                 self._report(cid, ok=False, result=-1, text="timeout")
+                self._owe_late_acks(e["mav_cmd"], now)
                 continue
             try:
                 self._send_command_long(conn, e["mav_cmd"], e["params"], e["tries"])
@@ -1574,6 +1893,13 @@ class Bridge:
                 continue
             e["tries"] += 1
             e["last_send_ms"] = now
+
+    def _owe_late_acks(self, mav_cmd: int, now: int) -> None:
+        """One ACK, not one per send: a timeout usually means the ACKs were LOST,
+        and owing all of them would swallow the operator's immediate retry's
+        replies until it timed out too. One swallowed reply costs that retry a
+        single resend; it has CMD_MAX_TRIES."""
+        self._ack_echoes[mav_cmd] = {"n": 1, "until": now + LATE_ACK_WINDOW_MS, "late": 1}
 
     def _report(self, cid: str, ok: bool, result: int, text: str, final: bool = True) -> None:
         """Hand a command result to the asyncio loop for WS delivery. `final=False`
@@ -1695,6 +2021,44 @@ class Bridge:
     # The Hz -> microseconds mapping is NOT repeated here: it comes from
     # build_command, so the two paths cannot drift into disagreeing about what
     # "0 Hz" means.
+    def _service_event_metadata(self, conn: Any) -> None:
+        """Read the vehicle's own event metadata over MAVLink FTP (see ftp.py),
+        unless the operator named a file. One request in flight at a time, so
+        on a radio this costs a trickle, not a burst."""
+        if (self._vehicle is None or self.replaying
+                or self._events_source in ("explicit", "vehicle")):
+            return
+        now = _mono_ms()
+        if self._meta_fetch is None:
+            if now < self._meta_next_try_ms:
+                return
+            self._meta_fetch = FtpRead(EVENTS_META_FTP_PATH)
+        job = self._meta_fetch
+        if not job.finished:
+            req = job.request(now)
+            if req is not None:
+                conn.mav.file_transfer_protocol_send(0, self.tsys, self.tcomp, list(req))
+            if not job.finished:
+                return
+        self._meta_fetch = None
+        if job.state == "done":
+            try:
+                decoder = EventDecoder(f"vehicle:{EVENTS_META_FTP_PATH}", raw=bytes(job.data))
+            except Exception as exc:
+                job.error = f"unreadable ({exc!r})"
+            else:
+                self._events, self._events_source = decoder, "vehicle"
+                self._meta_failures = 0
+                print(f"[gs] PX4 event metadata read from the vehicle "
+                      f"({len(job.data)} B over MAVLink FTP)")
+                return
+        self._meta_failures += 1
+        backoff = min(META_RETRY_MAX_MS, META_RETRY_MIN_MS * 2 ** (self._meta_failures - 1))
+        self._meta_next_try_ms = now + backoff
+        if self._meta_failures == 1 or backoff == META_RETRY_MAX_MS:
+            print(f"[gs] could not read event metadata from the vehicle: {job.error}; "
+                  f"retrying in {backoff / 1000:.0f} s")
+
     def _service_misc(self, conn: Any) -> None:
         while True:
             try:
@@ -1813,9 +2177,21 @@ class Bridge:
                     except Exception:
                         pass
                     self._param_last_rx_ms = now
+                elif (not self._param_relisted
+                      and got < self._param_count // 2):
+                    # Most of the table is missing: the list was cut short (PX4
+                    # still booting). One whole list is cheaper than hundreds of
+                    # single reads; once only, so a vehicle that keeps cutting
+                    # it short falls through to the reads below.
+                    self._param_relisted = True
+                    try:
+                        conn.mav.param_request_list_send(self.tsys, self.tcomp)
+                    except Exception:
+                        pass
+                    self._param_last_rx_ms = now
                 else:
                     missing = [i for i in range(self._param_count) if i not in self._param_received]
-                    for idx in missing[:20]:  # bounded per tick
+                    for idx in missing[:PARAM_GAP_READS]:  # bounded per tick
                         try:
                             conn.mav.param_request_read_send(
                                 self.tsys, self.tcomp, b"", idx)
@@ -2002,6 +2378,7 @@ class Bridge:
         self._param_refresh_active = True
         self._param_last_progress = 0
         self._param_gap_sweeps = 0
+        self._param_relisted = False
         self._param_last_rx_ms = _mono_ms()
         self._param_req_at.clear()
         self._param_paced_at = 0
@@ -2062,6 +2439,15 @@ class Bridge:
         except (TypeError, ValueError, KeyError, UnicodeEncodeError) as exc:
             self._report_param_ack(job, ok=False, text=f"bad request: {exc}")
             return
+        prior = self._param_set_pending.get(job["name"])
+        if prior is not None:
+            # A second set of the same name used to overwrite the first job
+            # silently: its client never got an answer, and the FIRST value's
+            # echo, arriving next, "rejected" the second set. The first is
+            # answered now, and its value is remembered so its echo is
+            # recognised as stale rather than as the vehicle refusing.
+            self._report_param_ack(prior, ok=False, text="superseded by a newer set")
+            job["stale"] = prior.get("stale", []) + [prior["value"]]
         self._param_set_pending[job["name"]] = job
         self._send_param_set(conn, job)
 
@@ -2492,7 +2878,8 @@ class Bridge:
 
         elif t == "BATTERY_STATUS":
             # Yield to the sim/HW battery when its JSON feed is fresh -- PX4's
-            # SITL BATTERY_STATUS is a static dummy that would clobber it.
+            # simulated BATTERY_STATUS is a static dummy that would clobber it.
+            # See JSON_ONLY_KEYS.
             if now - self._json_battery_at < BATTERY_SOURCE_TTL_MS:
                 return
             mv = [v for v in (msg.voltages or []) if v != 65535]
@@ -2555,6 +2942,17 @@ class Bridge:
         elif t == "GPS_RAW_INT":
             L["gpsFix"] = msg.fix_type
             L["gpsSats"] = msg.satellites_visible
+
+        elif t == "EXTENDED_SYS_STATE":
+            L["landedState"] = _LANDED_STATES.get(msg.landed_state)
+
+        elif t == "HOME_POSITION":
+            # Where RTL goes. PX4 streams it at 0.5 Hz on the GCS link and gs
+            # dropped it, so the console could not show the operator the one
+            # point the aircraft returns to on a failsafe.
+            L["homeLat"] = msg.latitude / 1e7
+            L["homeLon"] = msg.longitude / 1e7
+            L["homeAlt"] = msg.altitude / 1000.0
 
         elif t in ("EKF_STATUS_REPORT", "ESTIMATOR_STATUS"):
             # Healthy when attitude + horizontal velocity + absolute horizontal
@@ -2690,8 +3088,16 @@ class Bridge:
     def _emit_statustext(self, severity: int, text: str) -> None:
         # `now` in the caller is monotonic (a duration clock); a statustext
         # carries a timestamp an operator reads, so stamp it off the wall clock.
-        self._broadcast({"type": "statustext", "severity": severity,
-                         "text": text.rstrip("\x00").strip(), "t": _now_ms()})
+        text = text.rstrip("\x00").strip()
+        self._note_refusal(severity, text)
+        self._broadcast({"type": "statustext", "severity": severity, "text": text, "t": _now_ms()})
+
+    def _note_refusal(self, severity: int, text: str) -> None:
+        """An error from the vehicle while a mode change is unconfirmed is,
+        overwhelmingly, the reason it is not happening; keep it for the verdict."""
+        if self._mode_verify and severity <= mavutil.mavlink.MAV_SEVERITY_ERROR:
+            for v in self._mode_verify.values():
+                v["reason"] = text
 
     def _trim_stream(self, conn: Any, t: str) -> None:
         """Ask the vehicle to stop sending a message gs never reads.
@@ -2736,6 +3142,12 @@ class Bridge:
         if t in _TRIMMABLE:
             self._trim_stream(conn, t)
             return      # nothing below reads these
+        if t in _ADDRESSED and not addressed_to_gs(msg):
+            return      # PX4 answering another sender on our link; see _ADDRESSED
+        if t == "FILE_TRANSFER_PROTOCOL":
+            if self._meta_fetch is not None:
+                self._meta_fetch.reply(msg.payload)
+            return
         if t == "UNKNOWN_410":
             # An EVENT, which this dialect cannot name. Decoded against the
             # firmware's metadata it is the sentence the STATUSTEXT would have
@@ -2745,11 +3157,12 @@ class Bridge:
             if self._events is None:
                 self._events_missed += 1
                 if self._events_missed == 1:
-                    print("[gs] PX4 is sending events gs cannot read (no --events-meta); "
-                          "refusal reasons will be missing from the log feed")
+                    print("[gs] PX4 is sending events gs cannot read yet (metadata not "
+                          "read from the vehicle); refusal reasons are missing until it is")
                 return
             d = self._events.decode(bytes(msg.get_msgbuf()))
             if d is not None:
+                self._note_refusal(d["severity"], d["text"])
                 self._broadcast({"type": "statustext", "severity": d["severity"],
                                  "text": d["text"], "event": d["event"], "t": _now_ms()})
             return
@@ -2793,14 +3206,36 @@ class Bridge:
             # refusing/clamping the write -> fail now, don't wait for timeout.
             job = self._param_set_pending.get(name)
             if job is not None:
-                if abs(value - job["value"]) <= 1e-4:
+                if param_echo_matches(value, job["value"]):
                     del self._param_set_pending[name]
                     self._report_param_ack(job, ok=True, text="set")
+                elif any(param_echo_matches(value, v) for v in job.get("stale", ())):
+                    pass        # the superseded set's echo; ours is still coming
                 elif idx == 65535 and job["tries"] > 0:
                     del self._param_set_pending[name]
                     self._report_param_ack(job, ok=False, text=f"rejected (vehicle kept {value})")
 
         elif t == "COMMAND_ACK":
+            # (Another sender's ACK never gets here: see _ADDRESSED.)
+            # A command that needed a retry is owed one ACK per extra send. The
+            # first ACK resolves it; the rest are echoes, and an echo of a
+            # retried ARM must not resolve the DISARM sent next (both are 400).
+            echo = self._ack_echoes.get(msg.command)
+            if echo is not None:
+                if now > echo["until"] or echo["n"] <= 0:
+                    del self._ack_echoes[msg.command]
+                elif msg.result != mavutil.mavlink.MAV_RESULT_IN_PROGRESS:
+                    echo["n"] -= 1
+                    if echo.get("late"):
+                        echo["late"] = 0
+                        self._broadcast({
+                            "type": "statustext", "severity": 4, "t": _now_ms(),
+                            "text": f"late reply to {mav_cmd_name(msg.command)} after its "
+                                    f"timeout: {result_text(msg.result)}"})
+                    # Swallowing a genuine ACK by mistake costs one retry of
+                    # the next command, which re-ACKs; mis-resolving it costs
+                    # the operator a wrong answer. Hence this side.
+                    return
             # Resolve the oldest pending command with this MAV command number.
             # (Commands are infrequent; typically one is in flight.)
             match_id = next(
@@ -2815,9 +3250,21 @@ class Bridge:
                     self._report(match_id, ok=True, result=msg.result,
                                  text=result_text(msg.result), final=False)
                 else:
-                    del self._pending[match_id]
+                    done = self._pending.pop(match_id)
+                    if done.get("tries", 0) > 1 and not done.get("in_progress_ms"):
+                        self._ack_echoes[msg.command] = {
+                            "n": done["tries"] - 1,
+                            "until": now + CMD_RETRY_MS * CMD_MAX_TRIES}
                     ok = (msg.result == mavutil.mavlink.MAV_RESULT_ACCEPTED)
-                    self._report(match_id, ok=ok, result=msg.result, text=result_text(msg.result))
+                    if ok and done.get("expect_mode"):
+                        # Not final yet: the console's timer re-arms on this.
+                        self._mode_verify[match_id] = {"expect": done["expect_mode"],
+                                                       "until": now + MODE_VERIFY_MS,
+                                                       "reason": None}
+                        self._report(match_id, ok=True, result=msg.result, final=False,
+                                     text=f"accepted; waiting for {done['expect_mode']}")
+                    else:
+                        self._report(match_id, ok=ok, result=msg.result, text=result_text(msg.result))
 
         elif t in ("MISSION_REQUEST_INT", "MISSION_REQUEST"):
             # Autopilot pulling items during our upload. Answer whatever seq it
@@ -2857,6 +3304,12 @@ class Bridge:
         elif t == "MISSION_ITEM_INT":
             op = self._mission
             if op is not None and op["op"] == "download" and getattr(msg, "mission_type", 0) == op["mtype"]:
+                if op["count"] is None or not 0 <= msg.seq < op["count"]:
+                    # Before MISSION_COUNT, or past it: not an item of this
+                    # transfer. Stored, it filled a slot so `len >= count`
+                    # declared a readback complete with a real item missing --
+                    # the console showing a plan the vehicle does not hold.
+                    return
                 op["items"][msg.seq] = mission_item_to_console(msg)
                 op["last"] = now
                 op["tries"] = 0
@@ -2895,6 +3348,13 @@ class Bridge:
             self._broadcast({"type": "mission_reached", "seq": msg.seq})
 
         elif t == "HEARTBEAT":
+            if self._mode_verify:
+                mode = decode_mode(msg.custom_mode)
+                for cid, v in list(self._mode_verify.items()):
+                    if mode == v["expect"]:
+                        del self._mode_verify[cid]
+                        self._report(cid, ok=True, result=mavutil.mavlink.MAV_RESULT_ACCEPTED,
+                                     text=f"accepted (now {mode})")
             # PX4 omits ACTUATOR_OUTPUT_STATUS / WIND_COV / POSITION_TARGET on
             # the GCS link by default; ask for them, and keep asking while they
             # are not ARRIVING. This used to gate on "have we ever seen one?"
@@ -2950,7 +3410,15 @@ class Bridge:
                 continue
             if not isinstance(obj, dict):
                 continue
-            self._apply_json(obj)
+            try:
+                self._apply_json(obj)
+            except Exception as exc:
+                # The same isolation the mav thread has: one bad frame costs
+                # that frame, never the feed for the rest of the run.
+                self.json_errors += 1
+                if self.json_errors == 1:
+                    print(f"[gs] JSON telemetry frame raised {exc!r}; "
+                          "dropping it and carrying on (said once)")
 
     def _apply_json(self, obj: dict[str, Any]) -> None:
         """Fold one JSON telemetry frame into `latest`, ownership rules and all.
@@ -3032,6 +3500,10 @@ class Bridge:
                            else "flood"),
             # --- what it found on the other end ---------------------------
             "vehicle": list(self._vehicle) if self._vehicle else None,
+            # Whether the aircraft is flying, for tools that are about to
+            # disturb gs (`commandant update` restarts it). See landedState.
+            "armed": self.latest.get("armed"),
+            "landedState": self.latest.get("landedState"),
             "linkState": self._link_state(mono, mav_at if mav_at else json_at),
             "dataAgeMs": (mono - (mav_at if mav_at else json_at)
                           if (mav_at or json_at) else None),
@@ -3045,9 +3517,11 @@ class Bridge:
             "commandTokenRequired": bool(self.command_token),
             # What gs asked the vehicle to STOP sending, so a missing message
             # in a log is attributable rather than mysterious. See _TRIMMABLE.
-            "events": ({"metadata": str(self._events.path), "decoded": self._events.decoded,
+            "events": ({"metadata": str(self._events.path), "source": self._events_source,
+                        "decoded": self._events.decoded,
                         "unknown": self._events.unknown} if self._events
-                       else {"metadata": None, "missed": self._events_missed}),
+                       else {"metadata": None, "missed": self._events_missed,
+                             "fetchFailures": self._meta_failures}),
             "trimmedStreams": (sorted(k for k, v in _TRIMMABLE.items()
                                       if v in self._trim_at)
                                if self.trim_streams else []),
@@ -3057,6 +3531,17 @@ class Bridge:
             # sender on the flight line. Worth seeing rather than silently
             # dropping. See json_value_ok.
             "clientsDropped": self.clients_dropped,
+            # Frames and ticks that raised and were dropped rather than allowed
+            # to stop their thread. Non-zero is a bug to report, not a fault.
+            "jsonErrors": self.json_errors,
+            # Serial writes that timed out (a peer that stopped reading).
+            "writeFailures": self.write_failures,
+            # The hub itself: brown-out, throttling, temperature, disk.
+            "host": self.host,
+            # Seconds since each must-turn loop last turned; see watchdog.py.
+            "loopAgesS": {n: round(a, 1) for n, a in self.watchdog.ages_s().items()},
+            "watchdogStalls": self.watchdog.stalls,
+            "broadcastErrors": self.broadcast_errors,
             "jsonHost": self.json_host,
             "jsonRejected": self.json_rejected,
             "pendingCommands": len(self._pending),
@@ -3427,71 +3912,98 @@ class Bridge:
             interval = 1.0 / BROADCAST_HZ
             while True:
                 await asyncio.sleep(interval)
-                # Two clocks, deliberately: `mono` for freshness (it cannot step),
-                # `wall` for the timestamp the console and the logs display.
-                mono, wall = _mono_ms(), _now_ms()
-                with self._lock:
-                    mav_at, json_at = self.last_mav_at, self.last_json_at
-                    frame = dict(self.latest)
-                    src_at = dict(self._src_at)
-                # A MAVLink vehicle, once seen, is the sole authority on link health:
-                # the JSON feed must never keep the link green for a dead autopilot.
-                # A pure flightlink run (no PX4) falls back to the JSON feed, which
-                # is then genuinely the only source there is.
-                last = mav_at if mav_at else json_at
-                state = self._link_state(mono, last)
-                frame["type"] = "telemetry"
-                # `t` stays the wall clock: it is the timestamp a human and a log
-                # read, and the contract has always said so.
-                frame["t"] = wall
-                # `upMs` is new, and is the clock a CLIENT should difference.
-                # The console was throttling its HUD and sampling its history on
-                # `t` -- i.e. on this hub's wall clock -- so a backward NTP step
-                # froze the HUD for the length of the step. Monotonic ms since
-                # the daemon started cannot step, cannot go backward, and
-                # doubles as a daemon-uptime readout.
-                frame["upMs"] = mono - _MONO_ORIGIN_MS
-                frame["linkState"] = state
-                frame["connected"] = (state == "alive")
-                if self.replaying:
-                    frame["replay"] = True
-                # How old the newest vehicle data actually is, so the UI can say
-                # "frozen 42 s ago" instead of quietly showing a stale position.
-                # Both sides monotonic, so a clock step cannot make it negative.
-                frame["dataAgeMs"] = (mono - last) if last else None
-                # Per-group ages, so a client can tell a stopped stream from a
-                # live one instead of redrawing its last value forever. A group
-                # that has never been seen is simply absent -- "no wind estimate
-                # yet" and "a wind estimate from four minutes ago" are different
-                # things and a client should be able to say which it has.
-                if src_at:
-                    frame["ages"] = {g: mono - at for g, at in src_at.items()}
-                payload = dumps(frame)
-                self._drop_slow_clients()
-                if self._clients:
-                    websockets.broadcast(self._clients, payload)
-                if self.relay is not None:
-                    self.relay.offer(payload, "telemetry")
-                if state != self._last_link_state:
-                    # Say it in the daemon's own log too. When the PX4 container
-                    # went away under a live run, every console was told and gs's
-                    # log recorded nothing -- so the operator reading the daemon
-                    # (the thing `commandant logs` shows) had no line to find.
-                    print(f"[gs] link {self._last_link_state} -> {state}"
-                          + ("" if state == "alive" else
-                             f" (no vehicle data for {(mono - last) / 1000:.0f}s)" if last else ""))
-                    # lastMsgMs is documented as a wall-clock figure, so convert
-                    # the monotonic watermark back rather than leak uptime into it.
-                    link = dumps({"type": "link", "state": state,
-                                  "lastMsgMs": (wall - (mono - last)) if last else 0})
-                    if self._clients:
-                        websockets.broadcast(self._clients, link)
-                    if self.relay is not None:
-                        self.relay.offer(link, "link")
-                # Track transitions even with no clients so the next connect is correct.
-                self._last_link_state = state
+                self.watchdog.beat("ws")
+                try:
+                    self._service_host()
+                    self._broadcast_tick()
+                except Exception as exc:
+                    # This loop IS the daemon: an exception out of it ends
+                    # asyncio.run and takes command authority and every open
+                    # operation with it. Lose the tick, keep the daemon.
+                    self.broadcast_errors += 1
+                    if self.broadcast_errors == 1 or self.broadcast_errors % 1000 == 0:
+                        print(f"[gs] telemetry tick raised {exc!r} "
+                              f"({self.broadcast_errors} so far); continuing")
         finally:
             await server_cm.__aexit__(None, None, None)
+
+    def _service_host(self) -> None:
+        """Every HOST_SAMPLE_MS: sample the hub, and tell operators what began."""
+        mono = _mono_ms()
+        if mono - self._host_at < HOST_SAMPLE_MS:
+            return
+        self._host_at = mono
+        self.host = _host.sample(str(self.flight_log.dir) if self.flight_log else None)
+        for text in self._host_watch.alerts(self.host):
+            print(f"[gs] {text}")
+            self._broadcast({"type": "statustext", "severity": 4,
+                             "text": f"gs: {text}", "t": _now_ms()})
+
+    def _broadcast_tick(self) -> None:
+        """One 25 Hz telemetry frame to every console and the relay."""
+        # Two clocks, deliberately: `mono` for freshness (it cannot step),
+        # `wall` for the timestamp the console and the logs display.
+        mono, wall = _mono_ms(), _now_ms()
+        with self._lock:
+            mav_at, json_at = self.last_mav_at, self.last_json_at
+            frame = dict(self.latest)
+            src_at = dict(self._src_at)
+        # A MAVLink vehicle, once seen, is the sole authority on link health:
+        # the JSON feed must never keep the link green for a dead autopilot.
+        # A pure flightlink run (no PX4) falls back to the JSON feed, which
+        # is then genuinely the only source there is.
+        last = mav_at if mav_at else json_at
+        state = self._link_state(mono, last)
+        frame["type"] = "telemetry"
+        # `t` stays the wall clock: it is the timestamp a human and a log
+        # read, and the contract has always said so.
+        frame["t"] = wall
+        # `upMs` is new, and is the clock a CLIENT should difference.
+        # The console was throttling its HUD and sampling its history on
+        # `t` -- i.e. on this hub's wall clock -- so a backward NTP step
+        # froze the HUD for the length of the step. Monotonic ms since
+        # the daemon started cannot step, cannot go backward, and
+        # doubles as a daemon-uptime readout.
+        frame["upMs"] = mono - _MONO_ORIGIN_MS
+        frame["linkState"] = state
+        frame["connected"] = (state == "alive")
+        if self.replaying:
+            frame["replay"] = True
+        # How old the newest vehicle data actually is, so the UI can say
+        # "frozen 42 s ago" instead of quietly showing a stale position.
+        # Both sides monotonic, so a clock step cannot make it negative.
+        frame["dataAgeMs"] = (mono - last) if last else None
+        # Per-group ages, so a client can tell a stopped stream from a
+        # live one instead of redrawing its last value forever. A group
+        # that has never been seen is simply absent -- "no wind estimate
+        # yet" and "a wind estimate from four minutes ago" are different
+        # things and a client should be able to say which it has.
+        if src_at:
+            frame["ages"] = {g: mono - at for g, at in src_at.items()}
+        payload = dumps(frame)
+        self._drop_slow_clients()
+        if self._clients:
+            websockets.broadcast(self._clients, payload)
+        if self.relay is not None:
+            self.relay.offer(payload, "telemetry")
+        if state != self._last_link_state:
+            # Say it in the daemon's own log too. When the PX4 container
+            # went away under a live run, every console was told and gs's
+            # log recorded nothing -- so the operator reading the daemon
+            # (the thing `commandant logs` shows) had no line to find.
+            print(f"[gs] link {self._last_link_state} -> {state}"
+                  + ("" if state == "alive" else
+                     f" (no vehicle data for {(mono - last) / 1000:.0f}s)" if last else ""))
+            # lastMsgMs is documented as a wall-clock figure, so convert
+            # the monotonic watermark back rather than leak uptime into it.
+            link = dumps({"type": "link", "state": state,
+                          "lastMsgMs": (wall - (mono - last)) if last else 0})
+            if self._clients:
+                websockets.broadcast(self._clients, link)
+            if self.relay is not None:
+                self.relay.offer(link, "link")
+        # Track transitions even with no clients so the next connect is correct.
+        self._last_link_state = state
 
     def run_replay(self, path: str, speed: float = 1.0, loop: bool = False) -> None:
         """Serve a recorded flight to the console instead of a live link.
@@ -3513,6 +4025,7 @@ class Bridge:
             self.flight_log.start()
         threading.Thread(target=self._mav_loop, daemon=True).start()
         threading.Thread(target=self._json_loop, daemon=True).start()
+        self.watchdog.start()
         try:
             asyncio.run(self._serve())
         finally:

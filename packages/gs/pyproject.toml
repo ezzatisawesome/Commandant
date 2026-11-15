@@ -5,6 +5,10 @@ description = "Commandant ground-station daemon — pymavlink link, command auth
 requires-python = ">=3.11"
 dependencies = [
     "pymavlink>=2.4.41",
+    # pymavlink imports it only when a serial link is opened, and does not
+    # depend on it: without this line every radio and USB autopilot was
+    # "unusable (No module named 'serial')" on a fresh install.
+    "pyserial>=3.5",
     "websockets>=12.0",
 ]
 

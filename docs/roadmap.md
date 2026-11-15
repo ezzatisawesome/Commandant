@@ -1,6 +1,148 @@
 # Commandant — Implementation Roadmap
 
-Status: **draft** · Last updated: 2026-10-18
+Status: **draft** · Last updated: 2026-11-11
+
+**Battery (2026-11-11):** making PX4 the only battery source was tried and
+reverted on measurement: PX4 SITL reported its own simulated battery (16.2 V,
+flat), not the pack AircraftSim injects. The cause was in AircraftSim: it
+injected from sysid 100, which PX4 drops (only the vehicle's own sysid, from a
+non-autopilot component, is accepted), and PX4's battery simulator competed for
+the same slot. Fixed there (inject as (1, 180); SITL sets SIM_BAT_ENABLE=0), and
+measured: PX4 now reports the pack, 25.2 V with the current following the
+throttle -- so PX4's battery failsafes finally act on it. gs keeps the feed's
+battery until the HITL board is checked, then can take PX4's.
+
+**Logs for multi-day runs (2026-11-11):** the 512 MiB cap was ~4.6 h of HITL.
+Logs may now take half the disk, keeping 1 GiB free (`--log-max-mb` pins a
+cap), and HIL_ACTUATOR_CONTROLS is logged at 10 Hz (`--log-full-rate`).
+MEASURED through gs at HITL rates: 118 -> 53 MB/hour, ~12 days on a 32 GB card.
+
+**Hub on an existing network (2026-11-11):** `commandant install --network
+existing` makes no WiFi of its own (a HITL bench, a Starlink router), needs no
+WiFi interface, and takes down a hotspot an earlier install made.
+
+**Installer faults (2026-11-11, second pass):** pinned in
+`packages/cli/tests/test_hub_reliability.py`.
+- **A fresh hub did not get the tested versions.** `pip install -e packages/gs`
+  ignored uv.lock; MEASURED: websockets 17.4 against the tested 17.2. The suite
+  passes on 17.4 today, so it is drift, not breakage -- yet. The installer now
+  passes `packages/gs/constraints.txt` (exported from uv.lock, held to it by a test).
+- **`update`, `down` and `uninstall` stopped gs mid-flight with no check.** They
+  now ask gs (`gs --status --json`, which reports `armed` and `landedState`) and
+  refuse while armed or in the air; `--in-flight` overrides. Checked end to end
+  against a live gs and a stand-in PX4 sending armed/in-air and disarmed/on-ground.
+- **The new hostname did not resolve.** hostnamectl leaves `/etc/hosts` on the
+  old name, so the name went to DNS -- with no uplink in a field, every sudo
+  waited on it. The installer rewrites the 127.0.1.1 line.
+- **`update` with no internet was a traceback.** It now says to use `--no-pull`.
+- Ruled out by measurement: `npm install` leaves package-lock.json alone (npm
+  10.8), so `update`'s `git pull --ff-only` is not blocked by it. The console
+  build peaks at ~880 MB in one process (30 s on an M-series Mac): fine on a
+  2 GB+ Pi, not on a 512 MB one. Not measured on a Pi.
+
+**Hub self-recovery (2026-11-11):** what keeps a field hub up with nobody
+there, pinned in `packages/gs/tests/test_hub_health.py`.
+- **gs could not open a serial port on a fresh install.** pymavlink imports
+  pyserial only when a serial link opens and does not depend on it, and gs did
+  not either, so every radio and USB autopilot probed "unusable". HITL hid it:
+  the bridge hands gs MAVLink over UDP. `pyserial` is now a gs dependency.
+  An existing install needs `pip install -e packages/gs` (or `commandant install`).
+- **A peer that stops reading froze gs.** MEASURED on a pty: a serial write
+  with no timeout blocked for good after 15 heartbeats, taking the GCS
+  heartbeat to PX4 with it. Serial writes now time out at 2 s, and three in a
+  row reopen the link.
+- **A hang is now restarted, not only a crash.** gs pings systemd's watchdog
+  (`WatchdogSec=20`) only while its MAVLink and WebSocket loops both turn; a
+  stall is logged once with every thread's stack (`gs/watchdog.py`). Off
+  systemd -- thror's launcher -- the stall is logged and nothing is killed.
+- **Devices are named by their USB serial number** (`/dev/serial/by-id`), so
+  the reopen's "retry the working link" survives a Pixhawk re-enumerating as
+  ttyACM1. A Pixhawk pinned that way had been given a 57600 radio's budget.
+- **The hub reports itself:** Pi under-voltage/throttling, CPU temperature and
+  log-disk space in `status` and `gs --status`, and their onset as a
+  `gs: hub ...` statustext to every console (`gs/host.py`). Not yet seen on a
+  Pi: thror was unreachable when this was written, so the sysfs paths are the
+  documented ones, untested on thror.
+
+**HITL-readiness pass (2026-11-04):** gs measured against its own recordings
+from thror (the Pi that flew the Pixhawk 6X in HITL, Oct 24–31: 233 MB of
+tlogs, gs.log, 28 run records), not against a stand-in. Twenty-two faults fixed,
+each pinned in `packages/gs/tests/test_hitl_readiness.py` by a test that fails
+on the old code. The two worst were only visible because HITL shares the link:
+the JSBSim bridge forwards the board's single USB MAVLink instance to both the
+AircraftSim host and gs, so gs's link carried PX4's half of the host's
+conversation (SITL, with an instance each, does not: checked in gs's own SITL
+tlog, which held only replies addressed to gs) — 44 COMMAND_ACKs (21 "arm
+denied") and 11 mission uploads with readback, all addressed to sysid 100. gs
+matched on command number and mission type alone, so the host's verdict could
+answer an operator's arm, and gs answered the host's MISSION_REQUESTs mid-upload.
+Now every addressed message (`_ADDRESSED`) must be for us or a broadcast. Also:
+a retried command's echo ACK can no longer resolve the next command of the same
+number (arm/disarm are both 400); a mission readback can no longer complete with
+an item missing; the sim's `sunEpochMs` (≈1.8e12, past the 1e12 default bound)
+was refused on every HITL frame; one 400-digit JSON integer killed the JSON
+thread; the 25 Hz tick had no guard; param echoes compare as float32; the relay
+uplink resends link/mission/fence/rally on reconnect (the relay clears them on
+every drop, every few minutes on thror) and says when reconnects keep failing;
+an `auto` reopen tries the link that was working before a ~10 s re-probe with
+no GCS heartbeat; gs.log lines carry a timestamp when not under journald.
+Second round: an ACK arriving after its command timed out is an owed echo for
+`LATE_ACK_WINDOW_MS` -- never the next command's verdict -- and the first is
+told to the operator on the log feed; a second set of the same parameter
+answers the first ("superseded") instead of orphaning it, and the first value's
+echo is no longer read as a refusal of the second; the flight log's writer
+reports any failure, not just OSError, instead of dying with status() healthy;
+the relay holds a telemetry frame back while the uplink's socket still has
+unsent bytes, so frames cannot queue ahead of the keepalive ping; and the
+console's plan-transfer timeout is a leash on silence, re-armed by every
+`mission_progress`, since gs only ever gives up on a stalled handshake and a
+long plan over a 57600 radio outlasts any fixed 20 s total.
+Third round: PX4's event metadata is read from the vehicle itself over MAVLink
+FTP (`gs/ftp.py`, `mftp://etc/extras/all_events.json.xz`), so arming refusals
+are readable on thror, which had no file, and no longer decoded against the
+SITL build when the vehicle is the 6X. One request in flight, resend-same-seq
+on loss, never a session reset (PX4 has one, and it may be another GCS's), the
+xz CRC as the integrity check, and an explicit `--events-meta` still wins.
+VALIDATED against live PX4 SITL (AircraftSim's container): 16,964 B read
+within a second of the vehicle lock, byte-for-byte the build's file. Not yet
+against the 6X board itself. And `--mavlink auto` no longer probes a serial
+port another process holds open (`device_in_use`, /proc on Linux): on a HITL
+bench that port is the JSBSim bridge's, and the probe stole its bytes.
+Measured on thror: 6.9 ms per check across 160 processes.
+Fourth round, against live PX4 SITL (AircraftSim's container, driven by
+`scripts/day_in_the_life.py --attach`): **a mode command is judged by the mode,
+not the ACK.** PX4 1.16 ACKs DO_SET_MODE ACCEPTED and then refuses ("Switching
+to Mission is currently not available", reproduced by hand), so gs told the
+console "accepted" while the aircraft stayed in AUTO.LOITER. Now an accepted
+set_mode/hold/RTL is an interim ack until HEARTBEAT shows the mode, and a
+refusal carries PX4's own text (`MODE_VERIFY_MS`). **A param refresh with the hub
+up before the vehicle** -- the field order -- took 72 s: PX4, still booting,
+answered the list with a fragment and gs refilled it 20 reads per 1.5 s quiet
+sweep. It now re-lists once and reads 200 per sweep: 3.2 s, same boot order.
+gs now decodes `EXTENDED_SYS_STATE` (`landedState`) and `HOME_POSITION`
+(`homeLat/Lon/Alt`), both streamed by PX4 and both dropped, so the console can
+say whether the aircraft is in the air and where RTL goes. The rehearsal itself
+had three faults the stand-in hid: its plan violated its own fence, it took an
+interim ack as a verdict, and it expected a disarm in the air to succeed.
+Result: all 18 steps against PX4 when PX4 is settled; with gs up first, PX4
+refuses AUTO.MISSION for about its first minute and gs reports exactly that.
+The stand-in passes 21/21 on the 57600 model at 5 % loss with a reboot.
+Correction to the first round: PX4 does NOT echo addressed replies on every
+instance. On SITL gs's own instance carried only its own; on thror they leak
+because the JSBSim bridge forwards one USB instance to both host and gs.
+
+Ruled out, measured: gs on the Pi at HITL's ~510 msg/s (31 kB/s) uses 27 % of
+one core, 48 MB, console ticks p99 44 ms; per-message handling is 3.9 µs (the
+rest is pymavlink's decode). The apparent 0.5 % tlog loss is PX4-only message
+ids the analysis dialect could not decode, matching one-for-one. thror→relay
+held 6 min with zero drops as an idle viewer. The streams gs trims on the shared
+HITL USB channel (HIGHRES_IMU, ATTITUDE_QUATERNION, ODOMETRY) have no consumer
+in AircraftSim or the JSBSim bridge.
+
+Open: the deployed relay predates 63184f7 (`/healthz` fails the way the old
+code did); JSON still owns battery voltage/current with a real vehicle locked
+(right for SITL's dummy battery, wrong for a real pack); at HITL rates the
+512 MiB log cap holds ~4.6 h, 37 % of it HIL_ACTUATOR_CONTROLS at 190 Hz.
 
 Turning Commandant from an ingest-only telemetry viewer into a real
 QGroundControl-replacement GCS for the solar aircraft.

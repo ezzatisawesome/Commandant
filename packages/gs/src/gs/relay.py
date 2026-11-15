@@ -31,11 +31,30 @@ DEFAULT_HZ = 5.0
 # than buffering a whole flight in RAM.
 EVENT_QUEUE_MAX = 256
 
+# Unsent bytes in the uplink's socket buffer past which a telemetry frame is
+# held back. Latest-wins stopped OUR queue growing, but every frame ws.send()
+# accepted still sat in the transport ahead of the keepalive ping; on a field
+# hotspot that is how a healthy socket reads as "keepalive ping timeout". Two
+# frames' worth: a backlog that size means the link is not keeping up, and the
+# next tick carries newer data anyway.
+TELEMETRY_BACKLOG_BYTES = 4 * 1024
+
 RECONNECT_MIN_S = 1.0
 RECONNECT_MAX_S = 30.0
 
 # Kinds that are state (latest-wins, rate-limited) rather than events.
 _STATE_KINDS = ("telemetry",)
+# Message types the relay retains for late joiners (relay/server.py RETAINED,
+# less `telemetry`, which is resent at 5 Hz anyway, and `flight`, sent on every
+# connect). The relay DROPS its retained state when the publisher disconnects
+# and sets `link` to "lost"; gs sends `link` only on a state change and a plan
+# only on a readback. So after the first uplink drop -- every few minutes on
+# thror, see gs.log -- viewers read "lost" over live telemetry and a new viewer
+# never got the mission or the fence. The newest of each is resent on connect.
+_RESENT_TYPES = ("link", "mission", "fence", "rally")
+# A failing reconnect is said once, then every this many attempts, so a hub
+# whose uplink is down says so instead of going silent after "lost".
+RECONNECT_SAY_EVERY = 20
 
 
 class RelayPublisher:
@@ -61,6 +80,7 @@ class RelayPublisher:
         self._events: list[str] = []             # ordered sparse events
         self._wake: asyncio.Event | None = None
         self._last_sent_at: dict[str, float] = {}
+        self._resend: dict[str, str] = {}        # type -> newest payload, see _RESENT_TYPES
 
         # Diagnostics for the operator (printed on transitions).
         self.connected = False
@@ -85,6 +105,9 @@ class RelayPublisher:
                 self.dropped += 1
             self._latest[kind] = payload
         else:
+            mtype = _message_type(payload)
+            if mtype in _RESENT_TYPES:
+                self._resend[mtype] = payload
             if len(self._events) >= EVENT_QUEUE_MAX:
                 self._events.pop(0)
                 self.dropped += 1
@@ -107,7 +130,7 @@ class RelayPublisher:
                 self.sent += 1
             now = time.monotonic()
             for kind in list(self._latest):
-                if self._due(kind, now):
+                if self._due(kind, now) and not _backlogged(ws):
                     await ws.send(self._latest.pop(kind))
                     self._last_sent_at[kind] = now
                     self.sent += 1
@@ -127,6 +150,7 @@ class RelayPublisher:
         self._loop = asyncio.get_running_loop()
         self._wake = asyncio.Event()
         delay = RECONNECT_MIN_S
+        failures = 0
         headers = {"Authorization": f"Bearer {self.token}"}
         while True:
             try:
@@ -136,11 +160,18 @@ class RelayPublisher:
                 ) as ws:
                     self.connected = True
                     delay = RECONNECT_MIN_S
+                    failures = 0
                     print(f"[gs] relay uplink connected: {self.url}")
                     if self.flight_id:
                         await ws.send(json.dumps(
                             {"type": "flight", "id": self.flight_id,
                              "startedAt": self.started_at_ms}))
+                        self.sent += 1
+                    # Queued copies would be sent twice; the resend supersedes them.
+                    queued = set(self._resend.values())
+                    self._events = [e for e in self._events if e not in queued]
+                    for payload in list(self._resend.values()):
+                        await ws.send(payload)
                         self.sent += 1
                     await self._pump(ws)
             except asyncio.CancelledError:
@@ -150,6 +181,30 @@ class RelayPublisher:
                 self.connected = False
                 if was:
                     print(f"[gs] relay uplink lost: {exc!r}")
+                else:
+                    failures += 1
+                    if failures == 1 or failures % RECONNECT_SAY_EVERY == 0:
+                        print(f"[gs] relay uplink: connect failed ({failures} in a row): {exc!r}")
                 # Jittered backoff so a fleet of hubs doesn't synchronize.
                 await asyncio.sleep(delay * (0.8 + 0.4 * random.random()))
                 delay = min(delay * 2, RECONNECT_MAX_S)
+
+
+def _message_type(payload: str) -> str | None:
+    """The `type` of a sparse event. Only events pay this parse; telemetry is
+    latest-wins and never reaches it."""
+    try:
+        obj = json.loads(payload)
+    except (ValueError, TypeError):
+        return None
+    return obj.get("type") if isinstance(obj, dict) else None
+
+
+def _backlogged(ws: Any) -> bool:
+    transport = getattr(ws, "transport", None)
+    if transport is None:
+        return False
+    try:
+        return transport.get_write_buffer_size() > TELEMETRY_BACKLOG_BYTES
+    except Exception:
+        return False

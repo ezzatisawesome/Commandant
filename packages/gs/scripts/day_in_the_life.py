@@ -66,7 +66,7 @@ class Rehearsal:
                 return got
         return None
 
-    async def step(self, name, send, pred, note=lambda g: ""):
+    async def step(self, name, send, pred, note=lambda g: "", expect_refusal=False):
         s = Step(name)
         self.steps.append(s)
         t0 = time.monotonic()
@@ -78,11 +78,21 @@ class Rehearsal:
         # for a param write whose ack said "timeout", because arriving was all
         # it checked -- a rehearsal that passes a failed flight is worse than no
         # rehearsal. Anything carrying `ok` or `error` is judged on it.
-        s.ok = got is not None and got.get("ok", True) is not False \
+        accepted = got is not None and got.get("ok", True) is not False \
             and not got.get("error")
+        # Some refusals are the right answer: a fixed-wing in the air must not
+        # disarm, and PX4 saying so is the vehicle working.
+        s.ok = (got is not None and not accepted) if expect_refusal else accepted
         s.note = note(got) if got else "no reply"
         print(f"  {'ok ' if s.ok else 'FAIL'} {name:38s} {s.secs:6.2f}s  {s.note}")
         return got
+
+
+def final_ack(cid):
+    """gs's verdict on command `cid`. A mode change is answered twice -- an
+    interim "accepted; waiting for <mode>" (final: false), then the vehicle's
+    actual mode -- and only the second says whether it happened."""
+    return lambda g: g.get("type") == "ack" and g.get("id") == cid and g.get("final", True) is not False
 
 
 def mission(n):
@@ -99,11 +109,18 @@ def mission(n):
 def fence():
     # A square inclusion polygon around the field, plus a keep-out circle. gs
     # derives the vertex counts (H13), so they are deliberately not sent.
-    d = 0.01
+    #
+    # The plan has to be one the aircraft can fly. It was not: the waypoints run
+    # 0.004 deg apart to ~0.04 deg north, past this square's old 0.01, and the
+    # keep-out sat on the track. The stand-in never checks a plan against its
+    # fence, so it passed; real PX4 refused AUTO.MISSION ("Geofence violation
+    # for waypoint 4") and the rehearsal blamed "mission progress". The
+    # keep-out is now well west of a track that never leaves lon +0.006.
+    d = 0.06
     poly = [{"kind": "fence_inclusion", "lat": HOME_LAT + dy, "lon": HOME_LON + dx}
             for dy, dx in ((-d, -d), (-d, d), (d, d), (d, -d))]
     return poly + [{"kind": "fence_circle_exclusion", "lat": HOME_LAT + 0.02,
-                    "lon": HOME_LON, "params": {"radius": 300}}]
+                    "lon": HOME_LON - 0.03, "params": {"radius": 300}}]
 
 
 async def fly(args):
@@ -144,7 +161,7 @@ async def fly(args):
                          lambda g: g.get("linkState") == "alive",
                          lambda g: f"dataAge {g['dataAgeMs']} ms, {b.active_endpoint}")
             await r.step("take command", {"type": "claim", "id": "k"},
-                         lambda g: g.get("type") == "ack" and g.get("id") == "k",
+                         final_ack("k"),
                          lambda g: g["text"])
             await r.step("read the params", {"type": "param_refresh"},
                          lambda g: g.get("type") == "param_progress" and g.get("done"),
@@ -155,6 +172,29 @@ async def fly(args):
                          lambda g: g.get("type") == "param_ack" and g.get("id") == "p1",
                          lambda g: g["text"])
 
+            if args.wait_ready:
+                # Real PX4 refuses to arm until its estimator has a position and
+                # a home, which takes tens of seconds into a fresh SITL run.
+                # Waited for BEFORE the plan, which is the order an operator
+                # works in. Not sufficient on its own, MEASURED: with gs up
+                # before PX4 booted, AUTO.MISSION is still refused for the first
+                # ~minute ("Switching to Mission is currently not available")
+                # with EKF, fix and home all reported, and the same plan flies
+                # a minute later. That is one of PX4's own AUTO.MISSION
+                # requirements settling (mode_requirements.cpp: global
+                # position, a mission its feasibility check passed); gs now
+                # reports the refusal with PX4's reason instead of "accepted".
+                # Without this the first --attach run reports FAIL for `arm` and
+                # looks like a Commandant bug, when the honest reading is "the
+                # aircraft was not ready yet". Waits for what the autopilot
+                # itself says, rather than sleeping a guessed interval.
+                await r.step("wait until the vehicle is armable", None,
+                             lambda g: (g.get("type") == "telemetry"
+                                        and g.get("ekfOk") is True
+                                        and (g.get("gpsFix") or 0) >= 3
+                                        and g.get("homeLat") is not None),
+                             lambda g: f"ekfOk, gps fix {g.get('gpsFix')} "
+                                       f"({g.get('gpsSats')} sats), home set")
             print(" plan")
             await r.step("upload the geofence",
                          {"type": "fence_push", "id": "f1", "items": fence()},
@@ -173,21 +213,8 @@ async def fly(args):
                          lambda g: f"{g['count']} items")
 
             print(" fly")
-            if args.wait_ready:
-                # Real PX4 refuses to arm until its estimator has a position and
-                # a home, which takes tens of seconds into a fresh SITL run.
-                # Without this the first --attach run reports FAIL for `arm` and
-                # looks like a Commandant bug, when the honest reading is "the
-                # aircraft was not ready yet". Waits for what the autopilot
-                # itself says, rather than sleeping a guessed interval.
-                await r.step("wait until the vehicle is armable", None,
-                             lambda g: (g.get("type") == "telemetry"
-                                        and g.get("ekfOk") is True
-                                        and (g.get("gpsFix") or 0) >= 3),
-                             lambda g: f"ekfOk, gps fix {g.get('gpsFix')} "
-                                       f"({g.get('gpsSats')} sats)")
             await r.step("arm", {"type": "command", "id": "a1", "name": "arm"},
-                         lambda g: g.get("type") == "ack" and g.get("id") == "a1",
+                         final_ack("a1"),
                          lambda g: g["text"])
             await r.step("the console sees it armed", None,
                          lambda g: g.get("type") == "telemetry" and g.get("armed"),
@@ -195,7 +222,7 @@ async def fly(args):
             await r.step("switch to AUTO.MISSION",
                          {"type": "command", "id": "s1", "name": "set_mode",
                           "args": {"main": 4, "sub": 4}},
-                         lambda g: g.get("type") == "ack" and g.get("id") == "s1",
+                         final_ack("s1"),
                          lambda g: g["text"])
             await r.step("mission progress arrives", None,
                          lambda g: g.get("type") == "mission_reached",
@@ -203,7 +230,7 @@ async def fly(args):
             await r.step("fly-to-here mid-mission",
                          {"type": "command", "id": "r1", "name": "reposition",
                           "args": {"lat": HOME_LAT + 0.01, "lon": HOME_LON, "alt": 90}},
-                         lambda g: g.get("type") == "ack" and g.get("id") == "r1",
+                         final_ack("r1"),
                          lambda g: g["text"])
 
             if args.reboot and px4 is None:
@@ -223,22 +250,37 @@ async def fly(args):
                                        f"dataAge {g.get('dataAgeMs')} ms")
                 await r.step("still commandable after the reboot",
                              {"type": "command", "id": "a2", "name": "arm"},
-                             lambda g: g.get("type") == "ack" and g.get("id") == "a2",
+                             final_ack("a2"),
                              lambda g: g["text"])
 
             print(" come home")
             await r.step("RTL", {"type": "command", "id": "h1", "name": "rtl"},
-                         lambda g: g.get("type") == "ack" and g.get("id") == "h1",
+                         final_ack("h1"),
                          lambda g: g["text"])
             await r.step("the console sees AUTO.RTL", None,
                          lambda g: g.get("type") == "telemetry" and g.get("mode") == "AUTO.RTL",
                          lambda g: f"mode {g['mode']}")
-            await r.step("disarm", {"type": "command", "id": "d1", "name": "disarm"},
-                         lambda g: g.get("type") == "ack" and g.get("id") == "d1",
-                         lambda g: g["text"])
-            await r.step("the console sees it disarmed", None,
-                         lambda g: g.get("type") == "telemetry" and g.get("armed") is False,
-                         lambda g: "armed=false")
+            # The stand-in disarms anywhere. A real fixed-wing after RTL is
+            # loitering over home, and there PX4 must refuse ("Disarming
+            # denied: not landed"); asserting otherwise failed every --attach
+            # run on the vehicle doing the right thing.
+            # PX4's own landed state, not altitude: relative altitude drifts on
+            # the runway, and the first version of this read that as flight.
+            # Real autopilots only: the stand-in models no landed check.
+            states = [g.get("landedState") for g in r.seen
+                      if g.get("type") == "telemetry" and g.get("landedState")]
+            airborne = bool(args.attach) and bool(states) and states[-1] != "on_ground"
+            if airborne:
+                await r.step("disarm in the air is refused",
+                             {"type": "command", "id": "d1", "name": "disarm"},
+                             final_ack("d1"), lambda g: g["text"], expect_refusal=True)
+            else:
+                await r.step("disarm", {"type": "command", "id": "d1", "name": "disarm"},
+                             final_ack("d1"),
+                             lambda g: g["text"])
+                await r.step("the console sees it disarmed", None,
+                             lambda g: g.get("type") == "telemetry" and g.get("armed") is False,
+                             lambda g: "armed=false")
 
             # What did the daemon decide? This is the question a field failure
             # always comes down to, so the rehearsal ends by asking it.

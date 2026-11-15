@@ -123,8 +123,22 @@ console → gs: `{ "type": "status" }` → one `status` back.
   "configuredEndpoint": "auto", "linkBudgetBps": 3456, "paramFetch": "paced",
   "vehicle": [1, 1], "linkState": "alive", "streamAges": { "position": 42 },
   "pendingCommands": 0, "missionOp": null,
-  "linkReopens": 0, "handlerErrors": 0, "upMs": 91234, "version": "0.1.0" }
+  "linkReopens": 0, "handlerErrors": 0, "writeFailures": 0,
+  "loopAgesS": { "mav": 0.3, "ws": 0.0 }, "watchdogStalls": 0,
+  "host": { "throttledNow": [], "throttledSinceBoot": ["under-voltage"],
+            "cpuTempC": 54.2, "logDiskFreeBytes": 21474836480 },
+  "upMs": 91234, "version": "0.1.0" }
 ```
+
+`host` is the hub itself, read from sysfs; any part a machine does not have is
+`null` (a laptop has no throttle word). `throttledNow` / `throttledSinceBoot`
+are the Pi firmware's conditions (`under-voltage`, `CPU frequency capped`,
+`throttled`, `soft temperature limit`): under-voltage means the hub's supply is
+too weak, and USB radios drop on it. Its onset, and a log disk under 256 MiB,
+are also said once to every console as a `statustext` beginning `gs: hub`.
+`writeFailures` counts serial writes that timed out (a peer that stopped
+reading); `loopAgesS` is how long since each of gs's must-turn loops last
+turned, which systemd's watchdog acts on.
 
 Read-only, open to any client, and it **allocates nothing** — every field is
 state gs already keeps, so asking cannot grow the daemon or drift from the
@@ -243,7 +257,10 @@ Same `{type:"command", id, name, args}` envelope + `ack` response. Shapes mirror
 Merged into the `telemetry` frame (not separate messages):
 - `ekfOk` (bool, from `EKF_STATUS_REPORT` flags), `gpsFix` (int, `GPS_RAW_INT.fix_type`),
   `gpsSats` (int), `failsafe` (bool), `sysHealthy` (bool, from `SYS_STATUS`),
-  `batteryWarning` (string | null).
+  `batteryWarning` (string | null), `landedState` (`"on_ground"` | `"in_air"` |
+  `"takeoff"` | `"landing"` | null, from `EXTENDED_SYS_STATE.landed_state`;
+  ages group `landed`), `homeLat` / `homeLon` (deg) / `homeAlt` (m AMSL), from
+  `HOME_POSITION`: where RTL goes (ages group `home`).
 
 ## STATUSTEXT (gs → console)
 ```json

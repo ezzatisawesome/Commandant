@@ -38,10 +38,19 @@ def _add_provision_opts(p: argparse.ArgumentParser) -> None:
     p.add_argument("--hostname", help=f"Hub hostname (default: {DEFAULTS['hostname']})")
     p.add_argument("--user", help=f"Service user (default: {DEFAULTS['user']})")
     p.add_argument("--iface", help="WiFi interface to run the AP on (default: detected)")
+    p.add_argument("--network", choices=("hotspot", "existing"),
+                   help="hotspot: the hub makes its own WiFi (default). existing: it "
+                        "joins the network this machine is already on (a HITL bench, "
+                        "a Starlink router) and makes no WiFi of its own. Remembered.")
     p.add_argument("--skip-packages", dest="skip_packages", action="store_true",
                    help="Don't apt-get install (off apt, install the listed equivalents yourself)")
     p.add_argument("--force", action="store_true",
                    help="Take over the WiFi interface even though it is connected")
+
+
+def _add_in_flight(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--in-flight", dest="in_flight", action="store_true",
+                   help="Go ahead even though gs says the aircraft is armed or flying")
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -56,6 +65,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     p = sub.add_parser("update", help="Pull + re-run the installer + restart services")
     _add_provision_opts(p)
     p.add_argument("--no-pull", action="store_true", help="Don't git-pull before re-running")
+    _add_in_flight(p)
     p.set_defaults(fn=cmd_update)
 
     # The rest of the lifecycle. These were in the package description and the
@@ -71,6 +81,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     p = sub.add_parser("down", help="Stop them (the WiFi AP stays up)")
     _add_provision_opts(p)
+    _add_in_flight(p)
     p.set_defaults(fn=cmd_down)
 
     p = sub.add_parser("logs", help="Follow both services' journals together")
@@ -81,6 +92,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     p = sub.add_parser("uninstall", help="Remove the services and AP config")
     _add_provision_opts(p)
     p.add_argument("--yes", action="store_true", help="Required; this is destructive")
+    _add_in_flight(p)
     p.set_defaults(fn=cmd_uninstall)
 
     args = parser.parse_args(argv)

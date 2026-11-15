@@ -1,9 +1,14 @@
 "use client";
 
+import { useState } from "react";
 import { useStore } from "@nanostores/react";
 
 import { $hudFrame } from "@/stores/aircraft.store";
+import { $linkState } from "@/stores/link.store";
+import { $params, $paramProgress, $paramsStale } from "@/stores/params.store";
+import { $missionItems, $vehicleMission, missionMatchesVehicle } from "@/stores/mission.store";
 import { GROUP_STALE_MS, groupAgeMs, isNum } from "@/lib/flightGeometry";
+import { LANDED_LABEL, distanceM, preflightChecks, preflightVerdict } from "@/lib/preflight";
 
 // GPS fix-type labels (GPS_RAW_INT.fix_type).
 const GPS_FIX = ["NO GPS", "NO FIX", "2D", "3D", "DGPS", "RTK→", "RTK"];
@@ -83,11 +88,85 @@ export function HealthStrip() {
 				title={gpsCold ? staleTitle(groupAgeMs(f?.ages, "gps")! / 1000) : undefined}
 			/>
 			<Chip label="FS" ok={f?.failsafe === false} warn={f?.failsafe === undefined} text={fsActive ? "ACTIVE" : f?.failsafe === undefined ? "—" : "clear"} />
+			{f?.landedState ? (
+				// PX4's own answer to "is it flying", not one guessed from altitude.
+				<Chip label="STATE" ok={!cold("landed")} warn
+					text={cold("landed") ? "stale" : LANDED_LABEL[f.landedState]}
+					title={cold("landed") ? staleTitle(groupAgeMs(f?.ages, "landed")! / 1000)
+						: "PX4's landed state (EXTENDED_SYS_STATE)"} />
+			) : null}
+			<HomeChip />
 			{batt ? (
 				<Chip label="BATT" ok={false} text={healthCold ? `${batt} (stale)` : batt}
 					title={healthCold
 						? staleTitle(groupAgeMs(f?.ages, "health")! / 1000)
 						: undefined} />
+			) : null}
+			{f?.armed ? null : <PreArm />}
+		</div>
+	);
+}
+
+// Where RTL goes, and how far that is. Red when PX4 has none: an RTL then has
+// nowhere to return to, which is worth knowing before arming, not after.
+function HomeChip() {
+	const f = useStore($hudFrame);
+	if (!f) return null;
+	const home = isNum(f.homeLat) && isNum(f.homeLon);
+	const here = isNum(f.lat) && isNum(f.lon);
+	const d = home && here ? distanceM(f.lat!, f.lon!, f.homeLat!, f.homeLon!) : null;
+	const text = !home ? "none"
+		: d === null ? "set"
+		: d < 1000 ? `${d.toFixed(0)} m` : `${(d / 1000).toFixed(1)} km`;
+	return (
+		<Chip label="HOME" ok={home} text={text}
+			title={home
+				? `RTL returns to ${f.homeLat!.toFixed(6)}, ${f.homeLon!.toFixed(6)}`
+					+ (isNum(f.homeAlt) ? ` (${f.homeAlt!.toFixed(0)} m MSL)` : "")
+				: "PX4 has not set a home position: RTL has nowhere to return to"} />
+	);
+}
+
+// Pre-arm go/no-go (lib/preflight.ts). Advisory: PX4's arming checks decide.
+// Shown only while disarmed -- once armed the question has been answered.
+function PreArm() {
+	const [open, setOpen] = useState(false);
+	const frame = useStore($hudFrame);
+	const linkState = useStore($linkState);
+	const params = useStore($params);
+	const progress = useStore($paramProgress);
+	const paramsStale = useStore($paramsStale);
+	const items = useStore($missionItems);
+	const vehicle = useStore($vehicleMission);
+	const checks = preflightChecks({
+		frame, linkState,
+		paramCount: Object.keys(params).length,
+		paramsReading: progress !== null,
+		paramsStale,
+		missionItems: items.length,
+		missionOnVehicle: missionMatchesVehicle(items, vehicle),
+	});
+	const v = preflightVerdict(checks);
+	const mark = { go: "●", nogo: "▲", unknown: "○" } as const;
+	const tone = { go: "text-emerald-400", nogo: "text-red-400", unknown: "text-amber-300" } as const;
+	return (
+		<div className="relative">
+			<button onClick={() => setOpen((o) => !o)}
+				title={checks.map((c) => `${mark[c.state]} ${c.label}: ${c.detail}`).join("\n")}>
+				<Chip label="PRE-ARM" ok={v.state === "go"} warn={v.state === "unknown"} text={v.summary} />
+			</button>
+			{open ? (
+				<ul className="absolute bottom-full left-0 z-20 mb-1 w-72 space-y-0.5 rounded border
+					border-white/15 bg-black/90 p-2 text-[10px] leading-snug backdrop-blur">
+					{checks.map((c) => (
+						<li key={c.key} className="flex gap-1.5">
+							<span aria-hidden className={tone[c.state]}>{mark[c.state]}</span>
+							<span className="w-16 shrink-0 text-white/60">{c.label}</span>
+							<span className="text-white/80">{c.detail}</span>
+						</li>
+					))}
+					<li className="pt-1 text-white/35">Advisory: PX4&apos;s own checks decide whether it arms.</li>
+				</ul>
 			) : null}
 		</div>
 	);

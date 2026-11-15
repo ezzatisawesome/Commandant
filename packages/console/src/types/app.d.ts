@@ -107,7 +107,16 @@ export interface TelemetryFrame {
     failsafe?: boolean,     // vehicle in a failsafe
     sysHealthy?: boolean,   // SYS_STATUS: all enabled sensors healthy
     batteryWarning?: string | null, // e.g. "LOW" / "CRITICAL", else null
+    // EXTENDED_SYS_STATE: what PX4 believes about being airborne. Not derived
+    // from altitude here: an EKF drifting on the ground reads as a climb.
+    landedState?: LandedState,
+    // HOME_POSITION: where RTL returns to. Absent until PX4 has set one.
+    homeLat?: number,       // deg
+    homeLon?: number,       // deg
+    homeAlt?: number,       // m MSL
 }
+
+export type LandedState = "on_ground" | "in_air" | "takeoff" | "landing";
 
 // --- WS envelope (console <-> gs), see docs/ws-contract.md --------------------
 // Link health as reported by the gs daemon's link manager.

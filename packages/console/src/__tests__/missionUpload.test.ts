@@ -204,6 +204,35 @@ describe("command authority is visible and recoverable", () => {
 		expect($commander.get()).toBe(true);
 	});
 
+	it("keeps waiting while a long upload is still making progress", async () => {
+		// A plan over a lossy radio: PX4 pulls items one round trip at a time,
+		// so the whole transfer outlasts MISSION_TIMEOUT_MS while every gap is short.
+		client.connect();
+		ws().open();
+		const p = client.pushMission([{ seq: 0, kind: "waypoint", lat: 1, lon: 2, alt: 50 }]);
+		let settled: string | null = null;
+		p.then(() => { settled = "acked"; }, (e: Error) => { settled = e.message; });
+		const push = lastOfType("mission_push");
+		for (let seq = 0; seq < 30; seq++) {
+			vi.advanceTimersByTime(1000);
+			ws().recv({ type: "mission_progress", phase: "upload", seq, count: 200 });
+		}
+		await Promise.resolve();
+		expect(settled).toBeNull();
+		ws().recv({ type: "mission_ack", id: push.id, ok: true, result: 0, text: "accepted" });
+		await p;
+		expect(settled).toBe("acked");
+	});
+
+	it("still times out a transfer that has gone silent", async () => {
+		client.connect();
+		ws().open();
+		const p = client.pushMission([{ seq: 0, kind: "waypoint", lat: 1, lon: 2, alt: 50 }]);
+		ws().recv({ type: "mission_progress", phase: "upload", seq: 0, count: 200 });
+		vi.advanceTimersByTime(21000);
+		await expect(p).rejects.toThrow("timeout");
+	});
+
 	it("does not mistake an unrelated rejection for lost authority", async () => {
 		client.connect();
 		ws().open();

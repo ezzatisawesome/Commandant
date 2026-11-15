@@ -26,13 +26,22 @@ on Guppi's CLI.
 | `commandant update` | `git pull` + re-run the installer + restart services. No delta updates — the installer is the source of truth. Flags given to an earlier `install` are remembered (`/etc/commandant/hub.json`, and the passphrase in root-only `hub.psk`), so a bare `update` keeps your SSID, passphrase and country. |
 | `commandant status` | Services, the AP, and the address clients should reach. Nonzero if anything is down. |
 | `commandant up` / `down` | Start / stop `gs` and `console` (`down` leaves the AP up). |
+| | `update`, `down` and `uninstall` first ask gs whether the aircraft is armed or in the air, and refuse if it is: each stops gs, which is every console's link. `--in-flight` overrides. |
 | `commandant logs [-f]` | Both services' journals, interleaved. |
 | `commandant uninstall --yes` | Remove what `install` added; leaves the repo alone. |
 
 The hub autostarts on boot (systemd), so day to day there's nothing to "start".
 
 Install flags (install/update): `--ssid --passphrase --country --ap-ip --radio
---iface --hostname --user --repo --skip-packages --force`. All default to
+--iface --hostname --user --repo --skip-packages --force`.
+
+`--network existing` makes no WiFi of its own: the machine stays on whatever
+network it is already on (a HITL bench like thror, a Starlink router) and serves
+gs and the console there, at `http://<hostname>.local/` for any device on that
+network. No WiFi interface is needed, and a hotspot an earlier install made is
+taken down. Remembered, so `update` keeps it; `--network hotspot` switches back.
+Anyone on that network can load the console, so the command token is the only
+thing between them and the aircraft. All default to
 sensible values; the WiFi passphrase defaults to a placeholder you should
 override. `/etc/commandant/gs.env` (root-only) is written once and is yours
 afterwards (relay token, events metadata); `update` leaves it alone, and

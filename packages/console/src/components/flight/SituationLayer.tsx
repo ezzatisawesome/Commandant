@@ -172,6 +172,30 @@ export default function SituationLayer() {
 			},
 		}));
 
+		// --- home ------------------------------------------------------------
+		// Where RTL goes (HOME_POSITION). Not behind a toggle: unlike the other
+		// overlays it is not situational colour but the destination of the one
+		// command an operator reaches for when things go wrong. A label, not a
+		// new hue -- rule 1.
+		ents.push($viewer.entities.add({
+			position: new CallbackPositionProperty(() => {
+				const f = $aircraftStore.get();
+				if (!f || !isNum(f.homeLat) || !isNum(f.homeLon)) return undefined;
+				return Cartesian3.fromDegrees(f.homeLon, f.homeLat, isNum(f.homeAlt) ? f.homeAlt : 0);
+			}, false),
+			point: { pixelSize: 7, color: Color.WHITE, outlineColor: Color.BLACK, outlineWidth: 2 },
+			label: {
+				text: "H",
+				font: "bold 12px monospace",
+				fillColor: Color.WHITE,
+				outlineColor: Color.BLACK,
+				outlineWidth: 3,
+				style: LabelStyle.FILL_AND_OUTLINE,
+				verticalOrigin: VerticalOrigin.BOTTOM,
+				pixelOffset: new Cartesian2(0, -8),
+			},
+		}));
+
 		// --- wind arrow -----------------------------------------------------
 		// Drawn pointing the way the wind BLOWS (reciprocal of the reported
 		// "from" bearing), scaled by speed, with a label carrying the number.
