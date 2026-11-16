@@ -468,7 +468,9 @@ def test_plug_and_play_end_to_end(ports, monkeypatch):
             # And the extra streams were requested at the fat-pipe rate, since
             # this transport is UDP (the radio case is covered by H2).
             assert px4.stream_requests, "no SET_MESSAGE_INTERVAL reached PX4"
-            assert all(iv == 40000 for iv in px4.stream_requests.values()), px4.stream_requests
+            imu = m.MAVLINK_MSG_ID_HIGHRES_IMU      # capped at LOAD_FACTOR_HZ, not the link rate
+            assert all(iv == 40000 for mid, iv in px4.stream_requests.items() if mid != imu), px4.stream_requests
+            assert px4.stream_requests.get(imu) == 100000, px4.stream_requests
         serve.cancel()
 
     try:

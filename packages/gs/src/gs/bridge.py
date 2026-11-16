@@ -164,6 +164,7 @@ TARGET_STALE_MS = 3000        # re-request msg 87 once the setpoint stream goes 
 _AGE_GROUPS = {
     "GLOBAL_POSITION_INT": "position",
     "ATTITUDE": "attitude",
+    "HIGHRES_IMU": "imu",
     "VFR_HUD": "airdata",
     "WIND_COV": "wind",
     "GPS_RAW_INT": "gps",
@@ -624,6 +625,11 @@ _POS_IGNORE_BITS = 0b11
 MSG_ACTUATOR_OUTPUT_STATUS = mavutil.mavlink.MAVLINK_MSG_ID_ACTUATOR_OUTPUT_STATUS  # 375
 MSG_POSITION_TARGET_GLOBAL_INT = mavutil.mavlink.MAVLINK_MSG_ID_POSITION_TARGET_GLOBAL_INT  # 87
 MSG_WIND_COV = mavutil.mavlink.MAVLINK_MSG_ID_WIND_COV  # 231 — EKF wind estimate
+# The IMU, for the load factor (its body-z specific force): the one structural
+# number a ground station can watch live, on SITL, HITL and the aircraft alike.
+# PX4's GCS stream does not carry it, and gs had switched it off where it did.
+MSG_HIGHRES_IMU = mavutil.mavlink.MAVLINK_MSG_ID_HIGHRES_IMU  # 105
+LOAD_FACTOR_HZ = 10.0   # plenty for a human; a fifth of PX4's rate on a fast link
 # The extras gs asks for, by the type name a decoded message reports. Keyed by
 # name rather than by msg.get_msgId() so that anything shaped like a message
 # works here -- the id is a pymavlink implementation detail and the name is the
@@ -649,7 +655,6 @@ MSG_WIND_COV = mavutil.mavlink.MAVLINK_MSG_ID_WIND_COV  # 231 — EKF wind estim
 # PX4 is already pacing itself and these mostly will not appear; the case this
 # is for is USB and HITL, where bandwidth is free and the hub's CPU is not.
 _TRIMMABLE = {
-    "HIGHRES_IMU": mavutil.mavlink.MAVLINK_MSG_ID_HIGHRES_IMU,
     "ATTITUDE_QUATERNION": mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE_QUATERNION,
     "ODOMETRY": mavutil.mavlink.MAVLINK_MSG_ID_ODOMETRY,
     # LOCAL_POSITION_NED is NOT here, though gs reads it no more than the
@@ -663,7 +668,14 @@ _TRIMMABLE = {
     # would break is not, and that asymmetry decides it.
 }
 
+# HIGHRES_IMU fields_updated bit for zacc.
+_IMU_ZACC = 1 << 2
+# Load-factor smoothing per 10 Hz sample: ~0.3 s, enough to quiet the IMU's
+# vibration while keeping a gust's or a pull-up's load.
+LOAD_FACTOR_ALPHA = 0.3
+
 _REQUESTED_IDS = {
+    "HIGHRES_IMU": MSG_HIGHRES_IMU,
     "ACTUATOR_OUTPUT_STATUS": MSG_ACTUATOR_OUTPUT_STATUS,
     "POSITION_TARGET_GLOBAL_INT": MSG_POSITION_TARGET_GLOBAL_INT,
     "WIND_COV": MSG_WIND_COV,
@@ -1094,7 +1106,7 @@ JSON_KEYS = {
     "lat", "lon", "alt", "roll", "pitch", "yaw", "airspeed", "groundspeed",
     "heading", "throttle", "elevator", "aileron", "rudder",
     "voltage", "current", "batteryRemaining", "armed", "mode",
-    "genW", "loadW", "propW", "motorCurrent", "irradiance", "sunEpochMs",
+    "genW", "loadW", "propW", "motorCurrent", "motorRpm", "irradiance", "sunEpochMs",
     "targetLat", "targetLon", "targetAlt",
     # Course over ground, straight from the FDM's inertial velocity. Far better
     # than differencing position fixes (that path is what fabricated 8.6 m/s of
@@ -1270,8 +1282,9 @@ def json_value_ok(key: str, v: Any) -> bool:
 # already hands to it. With no vehicle locked -- the genuine no-PX4 rig -- JSON
 # owns everything, exactly as before.
 JSON_ONLY_KEYS = {
-    # No MAVLink carrier at all: the solar/power model and the sim's own wind.
-    "genW", "loadW", "propW", "motorCurrent", "irradiance", "sunEpochMs",
+    # No MAVLink carrier at all: the solar/power model, the sim's propeller speed
+    # and its own wind.
+    "genW", "loadW", "propW", "motorCurrent", "motorRpm", "irradiance", "sunEpochMs",
     "windN", "windE", "windD",
     # The feed's battery, over PX4's. MEASURED 2026-11-11: PX4 SITL reported
     # its own simulated battery (16.2 V, flat) because AircraftSim injected the
@@ -2640,7 +2653,8 @@ class Bridge:
         else:
             self._do_broadcast(dumps(payload))
 
-    def _request_message(self, conn: Any, tsys: int, tcomp: int, msg_id: int) -> None:
+    def _request_message(self, conn: Any, tsys: int, tcomp: int, msg_id: int,
+                         hz_max: float = REQUEST_HZ_MAX) -> None:
         """Ask the vehicle to stream a message, with a backoff that matters.
 
         The caller re-asks on every heartbeat for anything it has not seen, and
@@ -2666,9 +2680,9 @@ class Bridge:
             return
         self._last_req_at[msg_id] = now
         self._req_tries[msg_id] = tries + 1
-        # Rate from the link budget, not a constant. There are three of these
-        # extra streams, so each gets a third of gs's slice.
-        hz = budgeted_hz(self.link_budget_bps, msg_id, shares=3)
+        # Rate from the link budget, not a constant: the extra streams share
+        # gs's slice equally, however many there are.
+        hz = min(hz_max, budgeted_hz(self.link_budget_bps, msg_id, shares=len(_REQUESTED_IDS)))
         conn.mav.command_long_send(
             tsys, tcomp,
             mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
@@ -2836,6 +2850,14 @@ class Bridge:
             L["roll"] = msg.roll
             L["pitch"] = msg.pitch
             L["yaw"] = msg.yaw
+
+        elif t == "HIGHRES_IMU":
+            # Body-frame (FRD) specific force: level flight reads zacc = -g, so
+            # the load factor is -zacc / g. Smoothed: see LOAD_FACTOR_ALPHA.
+            if msg.fields_updated & _IMU_ZACC and math.isfinite(msg.zacc):
+                n = -msg.zacc / 9.80665
+                prev = L.get("loadFactor")
+                L["loadFactor"] = n if prev is None else prev + LOAD_FACTOR_ALPHA * (n - prev)
 
         elif t == "POSITION_TARGET_GLOBAL_INT":
             # PX4's setpoint is the authority: this is the point the autopilot is
@@ -3375,6 +3397,7 @@ class Bridge:
             with self._lock:
                 act_at = self._src_at.get("actuators", 0)
                 wind_at = self._src_at.get("wind", 0)
+                imu_at = self._src_at.get("imu", 0)
             tsys, tcomp = msg.get_srcSystem(), msg.get_srcComponent()
             if now - act_at > STREAM_STALE_MS:
                 self._request_message(conn, tsys, tcomp, MSG_ACTUATOR_OUTPUT_STATUS)
@@ -3383,6 +3406,8 @@ class Bridge:
                 self._request_message(conn, tsys, tcomp, MSG_WIND_COV)
             if now - self._last_target_at > TARGET_STALE_MS:
                 self._request_message(conn, tsys, tcomp, MSG_POSITION_TARGET_GLOBAL_INT)
+            if now - imu_at > STREAM_STALE_MS:
+                self._request_message(conn, tsys, tcomp, MSG_HIGHRES_IMU, hz_max=LOAD_FACTOR_HZ)
 
 
     # --- JSON ingest (flightlink / no-PX4 path) ------------------------------
