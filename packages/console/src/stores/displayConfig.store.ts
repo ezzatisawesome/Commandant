@@ -63,6 +63,7 @@ export const FIELD_CATALOG: FieldDef[] = [
 	{ key: "groundspeed", label: "Groundspeed", channel: "nav.groundspeed", group: "position", unit: "m/s", digits: 1, kind: "num", sparkClassName: "text-emerald-400/60" },
 	{ key: "alt", label: "Altitude", channel: "nav.alt", group: "position", unit: "m", digits: 0, kind: "num", sparkClassName: "text-sky-400/80" },
 	{ key: "heading", label: "Heading", channel: "nav.heading", group: "position", unit: "°", digits: 0, kind: "num" },
+	{ key: "loadFactor", label: "Load factor", channel: "air.load_factor", group: "airdata", unit: "g", digits: 2, kind: "num", sparkClassName: "text-orange-300/80" },
 	{ key: "throttle", label: "Throttle", channel: "ctl.throttle", group: "airdata", unit: "%", digits: 0, kind: "num", sparkClassName: "text-amber-400/80" },
 	{ key: "roll", label: "Roll", channel: "att.roll", group: "attitude", unit: "rad", digits: 2, kind: "num" },
 	{ key: "pitch", label: "Pitch", channel: "att.pitch", group: "attitude", unit: "rad", digits: 2, kind: "num" },
@@ -84,7 +85,7 @@ export const FIELD_CATALOG: FieldDef[] = [
 // stores/derived.store.ts (terrain clearance, wind, sun, geofence). They are in
 // the same catalog so the strip is configured from ONE list rather than having a
 // hardcoded "situation" section the operator cannot rearrange.
-export const DERIVED_KEYS = ["aglFt", "wind", "drift", "sunEl", "fenceDist", "targetDist"] as const;
+export const DERIVED_KEYS = ["aglFt", "wind", "drift", "sunEl", "fenceDist", "targetDist", "wingBend", "loadEnv"] as const;
 export type DerivedKey = (typeof DERIVED_KEYS)[number];
 
 export const DERIVED_CATALOG: Array<{
@@ -96,6 +97,8 @@ export const DERIVED_CATALOG: Array<{
 	{ key: "sunEl", label: "Sun", channel: "derived.sun_el", unit: "°" },
 	{ key: "fenceDist", label: "Fence", channel: "derived.fence_dist", unit: "m" },
 	{ key: "targetDist", label: "To setpoint", channel: "derived.target_dist", unit: "m" },
+	{ key: "wingBend", label: "Wing root", channel: "derived.wing_root_bending", unit: "N·m" },
+	{ key: "loadEnv", label: "Stall load", channel: "derived.load_envelope", unit: "%" },
 ];
 
 export const DERIVED_BY_KEY = Object.fromEntries(

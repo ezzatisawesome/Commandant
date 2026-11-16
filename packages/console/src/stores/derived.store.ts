@@ -1,4 +1,5 @@
-// Derived flight state: terrain clearance, wind, sun geometry, fence proximity.
+// Derived flight state: terrain clearance, wind, sun geometry, fence proximity,
+// wing loads.
 //
 // Computed once per HUD tick and shared, rather than recomputed by each consumer
 // (the HUD readout, the globe overlay, a future warning). All the maths lives in
@@ -12,7 +13,9 @@ import {
 	type Wind, type SunPosition, type FenceProximity, type ClearanceBand, isNum,
 	groupAgeMs, GROUP_STALE_MS,
 } from "@/lib/flightGeometry";
+import { wingLoadNow, type WingLoadNow } from "@/lib/wingLoads";
 import { $hudFrame } from "@/stores/aircraft.store";
+import { $modelMeta } from "@/stores/modelMeta.store";
 import { $vehicleFence } from "@/stores/geo.store";
 import { $linkState } from "@/stores/link.store";
 
@@ -36,11 +39,14 @@ export interface DerivedState {
 	 *  definition. If this reads ~= the loiter radius, the separation is right. If
 	 *  it reads kilometres, something is wrong. */
 	targetDistM: number | null;
+	/** The wing's root loads now, from the load factor and the model's 1 g
+	 *  loading (lib/wingLoads); null without either. */
+	wingLoad: WingLoadNow | null;
 }
 
 export const EMPTY_DERIVED: DerivedState = {
 	aglM: null, clearance: "unknown", terrainM: null,
-	wind: null, trackDeg: null, sun: null, fence: null, targetDistM: null,
+	wind: null, trackDeg: null, sun: null, fence: null, targetDistM: null, wingLoad: null,
 };
 
 export const $derived = atom<DerivedState>(EMPTY_DERIVED);
@@ -165,6 +171,7 @@ export function recomputeDerived(): void {
 		targetDistM: (isNum(f.targetLat) && isNum(f.targetLon))
 			? distanceM(f.lat, f.lon, f.targetLat, f.targetLon)
 			: null,
+		wingLoad: wingLoadNow(f, $modelMeta.get()?.loads),
 	});
 
 	// Every recompute re-arms the watchdog: geometry is only allowed to stay on

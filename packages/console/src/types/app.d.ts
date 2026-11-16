@@ -44,6 +44,8 @@ export interface TelemetryFrame {
     loadW?: number,         // W     total electrical load
     propW?: number,         // W     propulsion demand
     motorCurrent?: number,  // A     gross propulsion pack current
+    motorRpm?: number,      // rpm   propeller speed (the sim's JSBSim; no MAVLink carrier)
+    loadFactor?: number,    // g     body-z specific force from PX4's IMU (HIGHRES_IMU), smoothed
     irradiance?: number,    // W/m^2 usable flux (incl. bank tilt)
     sunEpochMs?: number,    // ms    simulated instant (UTC epoch) for the sun/day-night clock
     armed?: boolean,        // HEARTBEAT

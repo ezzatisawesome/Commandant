@@ -1,13 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import { useStore } from "@nanostores/react";
 
 import {
-	$showTriad, $showHorizPlane, $showClearance, $showWind, $showSun,
+	$showTriad, $showHorizPlane, $showClearance, $showWind, $showSun, $followAircraft,
+	$exaggerateSurfaces, SURFACE_EXAGGERATION, $showWingLoads,
 } from "@/stores/viewControls.store";
 import { $aircraftEntityStore } from "@/stores/aircraft.store";
-import { $viewerStore } from "@/stores/cesium.store";
 
 // Scene-inspection controls (right rail, under the Telemetry panel). Toggles the
 // debug overlays; state lives in viewControls.store so the Aircraft component can
@@ -18,20 +17,12 @@ export default function ViewControls() {
 	const showClearance = useStore($showClearance);
 	const showWind = useStore($showWind);
 	const showSun = useStore($showSun);
-	// Follow (chase camera): the aircraft entity carries a `viewFrom` offset, so
-	// setting it as Cesium's trackedEntity gives a follow cam. The built-in track
-	// button lives in the InfoBox, which is disabled on this viewer — so drive it
-	// explicitly here. Re-applies if the entity is (re)created while following.
+	// Follow (chase camera): a toggle on $followAircraft, applied by Aircraft.tsx
+	// so it outlives this panel (which closes on any press on the globe).
 	const entity = useStore($aircraftEntityStore);
-	const [follow, setFollow] = useState(false);
-	useEffect(() => {
-		const viewer = $viewerStore.get();
-		if (!viewer || viewer.isDestroyed()) return;
-		viewer.trackedEntity = follow ? (entity ?? undefined) : undefined;
-		return () => {
-			if (viewer && !viewer.isDestroyed()) viewer.trackedEntity = undefined;
-		};
-	}, [follow, entity]);
+	const follow = useStore($followAircraft);
+	const exaggerate = useStore($exaggerateSurfaces);
+	const wingLoads = useStore($showWingLoads);
 
 	return (
 		<div className="w-64 rounded-md border border-white/10 bg-black/60 p-3 text-xs text-white backdrop-blur">
@@ -42,9 +33,17 @@ export default function ViewControls() {
 						type="checkbox"
 						checked={follow}
 						disabled={!entity}
-						onChange={(e) => setFollow(e.target.checked)}
+						onChange={(e) => $followAircraft.set(e.target.checked)}
 					/>
 					Follow aircraft (chase cam)
+				</label>
+				<label className="flex items-center gap-2">
+					<input type="checkbox" checked={exaggerate} onChange={(e) => $exaggerateSurfaces.set(e.target.checked)} />
+					Exaggerate control surfaces (×{SURFACE_EXAGGERATION})
+				</label>
+				<label className="flex items-center gap-2">
+					<input type="checkbox" checked={wingLoads} onChange={(e) => $showWingLoads.set(e.target.checked)} />
+					Wing loads (live lift along the span)
 				</label>
 				<label className="flex items-center gap-2">
 					<input type="checkbox" checked={showTriad} onChange={(e) => $showTriad.set(e.target.checked)} />

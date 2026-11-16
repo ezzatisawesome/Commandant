@@ -16,6 +16,7 @@ import {
 	Matrix3,
 	Matrix4,
 	PolygonHierarchy,
+	PropertyBag,
 	Quaternion,
 	ScreenSpaceEventHandler,
 	ScreenSpaceEventType,
@@ -27,11 +28,15 @@ import {
 	$aircraftStore, $trailChunks, $trailTail, $targetChunks, $targetTail,
 	$aircraftEntityStore, hasFix, isNum,
 } from "@/stores/aircraft.store";
-import { $showTriad, $showHorizPlane } from "@/stores/viewControls.store";
+import {
+	$showTriad, $showHorizPlane, $followAircraft, $exaggerateSurfaces, SURFACE_EXAGGERATION, $showWingLoads,
+} from "@/stores/viewControls.store";
 import { $linkState } from "@/stores/link.store";
 import { pushStatus } from "@/stores/statustext.store";
 import { telemetryClient } from "@/services/telemetry";
 import { IS_VIEW } from "@/lib/envs";
+import { nodeTransformations } from "@/lib/modelAnimation";
+import { MODEL_URL, loadModelMeta } from "@/stores/modelMeta.store";
 
 // Live aircraft: a glTF model driven by MAVLink position + attitude, plus a
 // flight-path trail. Entities read the store inside CallbackProperty so updates
@@ -110,11 +115,29 @@ export default function Aircraft() {
 				// Rendered at true real-world size (the glTF is in metres, ~7 m span),
 				// so it grows/shrinks accurately with zoom. No minimumPixelSize clamp —
 				// the yellow point below keeps it locatable when zoomed far out.
-				uri: "/models/solar-airplane.glb",
+				uri: MODEL_URL,
 				scale: 1.0,
 			},
-			// Chase-camera offset (east, north, up in local frame) used by trackedEntity.
-			viewFrom: new Cartesian3(-600, 0, 250),
+			// Chase-camera offset (east, north, up in local frame) used by trackedEntity:
+			// close enough to see the control surfaces and propeller on a 6 m aircraft
+			// (it was 600 m back, where the airframe is a few pixels). Scroll to zoom.
+			viewFrom: new Cartesian3(-30, 0, 12),
+		});
+
+		// Control surfaces, propeller and lift bars, as the model itself says to move
+		// them (its glTF extras: stores/modelMeta, lib/modelAnimation). Read on frames
+		// already being drawn; asks for none. The extras also carry the wing loads.
+		let animating = true;
+		let drawn = 0;   // frames actually rendered: preRender fires only for those
+		const countFrame = $viewer.scene.preRender.addEventListener(() => { drawn++; });
+		void loadModelMeta().then((meta) => {
+			if (!animating || !meta?.animation || $viewer.isDestroyed() || !model.model) return;
+			model.model.nodeTransformations = new PropertyBag(nodeTransformations(meta.animation, {
+				frame: () => $aircraftStore.get(),
+				frameNumber: () => drawn,
+				surfaceGain: () => ($exaggerateSurfaces.get() ? SURFACE_EXAGGERATION : 1),
+				showLiftBars: () => $showWingLoads.get(),
+			}));
 		});
 
 		// Body-frame XYZ triad drawn from the flight orientation: X (red) = the frame's
@@ -288,6 +311,15 @@ export default function Aircraft() {
 			axisX.id, axisY.id, axisZ.id, horizPlane.id,
 		];
 		$aircraftEntityStore.set(model);
+		// Follow (chase cam): the entity's `viewFrom` makes Cesium's trackedEntity a
+		// follow camera. Applied here, where the entity lives, so the View panel
+		// closing (any press on the globe closes it) does not cancel it; a drag then
+		// orbits the camera around the aircraft, still following.
+		const unsubFollow = $followAircraft.subscribe((on) => {
+			if ($viewer.isDestroyed()) return;
+			if (on) $viewer.trackedEntity = model;
+			else if ($viewer.trackedEntity === model) $viewer.trackedEntity = undefined;
+		});
 
 		// "Fly to here": double-click the globe to command a reposition to that
 		// point (PX4 fixed-wing loiters there). Double-click so it doesn't fight
@@ -330,6 +362,10 @@ export default function Aircraft() {
 		});
 
 		return () => {
+			unsubFollow();
+			if (!$viewer.isDestroyed() && $viewer.trackedEntity === model) $viewer.trackedEntity = undefined;
+			animating = false;
+			countFrame();
 			unsubscribe();
 			unsubChunks();
 			unsubTargetChunks();

@@ -97,7 +97,7 @@ describe("field catalog", () => {
 		expect(seen).toEqual([...seen].sort((a, b) => a - b));
 		// Derived values are marked as computed rather than read off the wire.
 		expect(allFieldOptions().filter((o) => o.derived).map((o) => o.key))
-			.toEqual(["aglFt", "drift", "fenceDist", "sunEl", "targetDist", "wind"]);
+			.toEqual(["aglFt", "drift", "fenceDist", "loadEnv", "sunEl", "targetDist", "wind", "wingBend"]);
 	});
 
 	it("distinguishes derived keys, which are computed rather than on the wire", () => {

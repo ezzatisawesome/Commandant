@@ -278,6 +278,29 @@ export function TelemetryStrip() {
 						tone: d.sun && d.sun.elevationDeg < 0 ? "text-sky-300/60" : "text-white",
 						title: d.sun ? `azimuth ${d.sun.azimuthDeg.toFixed(0)}°` : "needs the sim clock",
 					};
+				case "wingBend": {
+					const w = d.wingLoad;
+					return {
+						label: meta.label, unit: w ? meta.unit : undefined,
+						value: w ? w.rootBendingNm.toFixed(0) : "—",
+						tone: w ? "text-white" : "text-white/40",
+						title: w ? `one half-wing at ${w.n.toFixed(2)} g: bending ${w.rootBendingNm.toFixed(0)} N·m, `
+								+ `shear ${w.rootShearN.toFixed(0)} N, from lift alone (the wing's weight, `
+								+ `which relieves it, is not subtracted)`
+							: "needs PX4's IMU (load factor) and the model's wing loading",
+					};
+				}
+				case "loadEnv": {
+					const pct = d.wingLoad?.envelopePct ?? null;
+					return {
+						label: meta.label, unit: pct === null ? undefined : meta.unit,
+						value: pct === null ? "—" : pct.toFixed(0),
+						tone: pct === null ? "text-white/40" : pct >= 90 ? "text-red-400"
+							: pct >= 75 ? "text-amber-400" : "text-emerald-400",
+						title: "the load factor as a share of the most the wing can make at this "
+							+ "airspeed before it stalls, (V / Vstall)²: 100 % is the stall line",
+					};
+				}
 				case "targetDist":
 					return {
 						label: meta.label, unit: d.targetDistM === null ? undefined : meta.unit,
