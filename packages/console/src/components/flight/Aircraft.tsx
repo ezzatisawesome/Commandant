@@ -348,7 +348,7 @@ export default function Aircraft() {
 				.catch((err) => pushStatus(4, `reposition failed: ${err instanceof Error ? err.message : "error"}`));
 		}, ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
 
-		// Fly to the aircraft once, on the first position fix. camera.flyTo to the
+		// Fly to the aircraft once, on the first position fix, unless following. camera.flyTo to the
 		// actual coordinates is reliable (no dependency on the model loading).
 		let flown = false;
 		const unsubscribe = $aircraftStore.subscribe((f) => {
@@ -356,6 +356,7 @@ export default function Aircraft() {
 				return;
 			}
 			flown = true;
+			if ($followAircraft.get()) return;   // the chase camera already has it
 			$viewer.camera.flyTo({
 				destination: Cartesian3.fromDegrees(f.lon!, f.lat!, f.alt! + 1200),
 				duration: 1.5,

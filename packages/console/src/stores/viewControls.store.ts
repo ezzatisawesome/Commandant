@@ -16,8 +16,9 @@ export const $showSun = atom(false);
 // Follow the aircraft (chase camera). A store, not the View panel's own state:
 // the panel unmounts when it closes -- and any press on the globe closes it --
 // so a follow held there was cancelled by the first drag. Aircraft.tsx, which
-// is always mounted, applies it as Cesium's trackedEntity.
-export const $followAircraft = atom(false);
+// is always mounted, applies it as Cesium's trackedEntity. On by default: the
+// chase view is what a viewer opens the page to see; untick it to roam.
+export const $followAircraft = atom(true);
 
 // Draw control-surface deflections at SURFACE_EXAGGERATION x their true angle.
 // Off by default: in cruise the real deflections are a few degrees on a 7-8 cm
