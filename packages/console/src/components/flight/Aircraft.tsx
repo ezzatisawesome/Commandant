@@ -37,6 +37,7 @@ import { telemetryClient } from "@/services/telemetry";
 import { IS_VIEW } from "@/lib/envs";
 import { nodeTransformations } from "@/lib/modelAnimation";
 import { MODEL_URL, loadModelMeta } from "@/stores/modelMeta.store";
+import { easedPose, startPoseEasing } from "@/lib/poseEase";
 
 // Live aircraft: a glTF model driven by MAVLink position + attitude, plus a
 // flight-path trail. Entities read the store inside CallbackProperty so updates
@@ -65,12 +66,14 @@ export default function Aircraft() {
 
 		entitiesRef.current.forEach((id) => $viewer.entities.removeById(id));
 
+		// The model, its triad and its level plane are drawn at the EASED pose
+		// (lib/poseEase): eased between 25 Hz samples, so the aircraft moves at the
+		// display's rate instead of in 40 ms steps.
+		const stopEasing = startPoseEasing();
+
 		const positionProp = new CallbackPositionProperty(() => {
-			const f = $aircraftStore.get();
-			if (!f || !hasFix(f.lat, f.lon) || !isNum(f.alt)) {
-				return undefined;
-			}
-			return Cartesian3.fromDegrees(f.lon!, f.lat!, f.alt);
+			const p = easedPose();
+			return p ? Cartesian3.fromDegrees(p.lon, p.lat, p.alt) : undefined;
 		}, false);
 
 		// Fixed rotation that reconciles the glTF's authoring axes with Cesium's body
@@ -90,12 +93,10 @@ export default function Aircraft() {
 
 		// The aircraft orientation with the glTF stand-up correction applied.
 		function currentOrientation(): Quaternion | undefined {
-			const f = $aircraftStore.get();
-			if (!f || !hasFix(f.lat, f.lon) || !isNum(f.alt)) {
-				return undefined;
-			}
-			const position = Cartesian3.fromDegrees(f.lon!, f.lat!, f.alt);
-			return Quaternion.multiply(flightQuat(position, f), correctionQuat, new Quaternion());
+			const p = easedPose();
+			if (!p) return undefined;
+			const position = Cartesian3.fromDegrees(p.lon, p.lat, p.alt);
+			return Quaternion.multiply(flightQuat(position, p), correctionQuat, new Quaternion());
 		}
 
 		const orientationProp = new CallbackProperty(() => currentOrientation(), false);
@@ -145,10 +146,10 @@ export default function Aircraft() {
 		// it doubles as the reference to align the model correction against.
 		const AXIS_LEN = 15; // metres
 		const bodyRot = () => {
-			const f = $aircraftStore.get();
-			if (!f || !hasFix(f.lat, f.lon) || !isNum(f.alt)) return undefined;
-			const position = Cartesian3.fromDegrees(f.lon!, f.lat!, f.alt);
-			return { position, rot: Matrix3.fromQuaternion(flightQuat(position, f), new Matrix3()) };
+			const p = easedPose();
+			if (!p) return undefined;
+			const position = Cartesian3.fromDegrees(p.lon, p.lat, p.alt);
+			return { position, rot: Matrix3.fromQuaternion(flightQuat(position, p), new Matrix3()) };
 		};
 		function axisLine(axis: Cartesian3, color: Color): Entity {
 			return $viewer!.entities.add({
@@ -180,9 +181,9 @@ export default function Aircraft() {
 		// axes against this level reference shows the aircraft's pitch and bank.
 		const PLANE_HALF = 12; // metres, half-extent of the quad
 		const horizPlaneCorners = () => {
-			const f = $aircraftStore.get();
-			if (!f || !hasFix(f.lat, f.lon) || !isNum(f.alt)) return undefined;
-			const position = Cartesian3.fromDegrees(f.lon!, f.lat!, f.alt);
+			const p = easedPose();
+			if (!p) return undefined;
+			const position = Cartesian3.fromDegrees(p.lon, p.lat, p.alt);
 			const enu = Matrix4.getMatrix3(Transforms.eastNorthUpToFixedFrame(position), new Matrix3());
 			const east = Matrix3.getColumn(enu, 0, new Cartesian3());
 			const north = Matrix3.getColumn(enu, 1, new Cartesian3());
@@ -362,6 +363,7 @@ export default function Aircraft() {
 		});
 
 		return () => {
+			stopEasing();
 			unsubFollow();
 			if (!$viewer.isDestroyed() && $viewer.trackedEntity === model) $viewer.trackedEntity = undefined;
 			animating = false;

@@ -26,10 +26,16 @@
 // stood in z to their station's 1 g lift x the live load factor (lib/wingLoads)
 // -- the wing's spanwise load as it flies. Hidden (zero height) when switched
 // off, on a stale link, or before gs has a load factor.
+//
+// Tail bars (`tailBars`): the same unit bars on the H-stab (standing up) and
+// the fins (pointing starboard), scaled along their surface's axis to the
+// surface's live force (lib/wingLoads `tailForceN`) x the bar's share of it per
+// metre of span, on the wing's own scale. Signed: a down-load on the tail
+// points down, a side force to port points to port.
 
 import { Cartesian3, CallbackProperty, NodeTransformationProperty, Quaternion } from "cesium";
 
-import { loadFactor } from "@/lib/wingLoads";
+import { loadFactor, tailForceN, type TailSurfaceSpec } from "@/lib/wingLoads";
 import type { TelemetryFrame } from "@/types/app";
 
 export interface SurfaceSpec {
@@ -57,12 +63,21 @@ export interface LiftBarSpec {
 	lift_N_per_m_1g: number;
 }
 
+export interface TailBarSpec {
+	node: string;
+	surface: string;
+	/** This station's share of its surface's force per metre of span, 1/m. */
+	share_per_m: number;
+}
+
 export interface ModelAnimation {
 	surfaces: SurfaceSpec[];
 	propellers: PropellerSpec[];
 	liftBars?: LiftBarSpec[];
 	/** A bar's height per (N/m of lift), m. */
 	liftBarMetresPerNPerM?: number;
+	tailSurfaces?: TailSurfaceSpec[];
+	tailBars?: TailBarSpec[];
 }
 
 /** What drives the animation: the live frame and the render clock, plus the
@@ -120,6 +135,14 @@ const LIFT_BAR_MIN_M = 1e-3;
 export function liftBarHeightM(bar: LiftBarSpec, metresPerNPerM: number, frame: TelemetryFrame | null): number {
 	const n = loadFactor(frame);
 	return n === null ? 0 : Math.max(0, bar.lift_N_per_m_1g * n * metresPerNPerM);
+}
+
+/** A tail bar's length now, m, signed along its surface's axis: zero without
+ *  the inputs its surface's force needs. */
+export function tailBarLengthM(bar: TailBarSpec, surface: TailSurfaceSpec | undefined,
+	metresPerNPerM: number, frame: TelemetryFrame | null): number {
+	const F = surface ? tailForceN(surface, frame) : null;
+	return F === null ? 0 : F * bar.share_per_m * metresPerNPerM;
 }
 
 /** Cesium nodeTransformations for a model entity (see AnimationInputs). */
@@ -186,6 +209,21 @@ export function nodeTransformations(anim: ModelAnimation, inputs: AnimationInput
 				const h = showLiftBars() ? liftBarHeightM(bar, k, frame()) : 0;
 				const out = (result as Cartesian3 | undefined) ?? new Cartesian3();
 				return h < LIFT_BAR_MIN_M ? Cartesian3.clone(ZERO, out) : Cartesian3.fromElements(1, 1, h, out);
+			}, false),
+		});
+	}
+	const tailSurfaces = new Map((anim.tailSurfaces ?? []).map((s) => [s.surface, s]));
+	for (const bar of anim.tailBars ?? []) {
+		const surface = tailSurfaces.get(bar.surface);
+		const sideways = surface?.axis[1] === 1;
+		out[bar.node] = new NodeTransformationProperty({
+			scale: new CallbackProperty((_t, result) => {
+				const h = showLiftBars() ? tailBarLengthM(bar, surface, k, frame()) : 0;
+				const out = (result as Cartesian3 | undefined) ?? new Cartesian3();
+				// A negative length is the bar reflected through its root: invertible,
+				// unlike a zero in one axis, so Cesium draws it pointing the other way.
+				if (Math.abs(h) < LIFT_BAR_MIN_M) return Cartesian3.clone(ZERO, out);
+				return sideways ? Cartesian3.fromElements(1, h, 1, out) : Cartesian3.fromElements(1, 1, h, out);
 			}, false),
 		});
 	}

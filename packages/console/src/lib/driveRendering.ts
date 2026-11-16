@@ -7,7 +7,9 @@
 // fence rings) is a CallbackProperty. So something has to translate "new data
 // arrived" into "please draw a frame". That is this.
 //
-// Without it the scene freezes visually; with it, render rate equals data rate.
+// Without it the scene freezes visually. Data alone sets the render rate for
+// everything but the aircraft; the aircraft, while its drawn pose is easing
+// between samples (lib/poseEase), draws on every display frame.
 
 import type { Viewer } from "cesium";
 
@@ -20,6 +22,7 @@ import { $derived } from "@/stores/derived.store";
 import {
 	$showTriad, $showHorizPlane, $showClearance, $showWind, $showSun,
 } from "@/stores/viewControls.store";
+import { easeUntilMs } from "@/lib/poseEase";
 
 /**
  * Hard ceiling on requested frames per second.
@@ -28,18 +31,16 @@ import {
  * state, several stores changing in one tick — must not translate into a burst
  * of renders.
  *
- * MEASURED: lowering this from 30 to 15 cut main-thread script time by 31% and
- * total task time by 29%, with the CPU throttled 4x to stand in for this
- * console's real situation beside a SITL simulator holding three of eight cores.
- * Cesium's per-frame scene update is the dominant cost in this application, and
- * it scales directly with how often a frame is requested.
- *
- * 15 Hz is not a visible compromise here: the aircraft covers under a metre per
- * frame at cruise, and the trail is a polyline, not an animation. Camera drags
- * and tile loads are unaffected — Cesium requests those renders itself and never
- * passes through this cap, so interaction stays as smooth as the display.
+ * It was 15, MEASURED to cut main-thread script time by 31% with the CPU
+ * throttled 4x beside a SITL holding three of eight cores. But at 15 Hz the
+ * aircraft visibly stepped (12 Hz in practice: a 25 Hz sample landing inside
+ * the budget was dropped), which is what an operator watching the model --
+ * its surfaces, its wing loads -- reads as a broken frame rate. 60 with the
+ * pose eased between samples is smooth; the cost is the per-frame scene
+ * update, paid only while the aircraft moves. Camera drags and tile loads are
+ * Cesium's own renders and never pass through this cap.
  */
-const MAX_FPS = 15;
+const MAX_FPS = 60;
 const MIN_INTERVAL_MS = 1000 / MAX_FPS;
 
 /**
@@ -72,10 +73,37 @@ export function driveRendering(viewer: Viewer): () => void {
 		else setTimeout(fire, 0);
 	};
 
+	// While the aircraft's drawn pose is still easing toward its newest sample,
+	// draw every animation frame (within the cap), and once more when it lands.
+	// A parked aircraft eases nowhere, so it costs only the data renders above.
+	// 0.9: rAF's own period jitters around 1/60 s, and a frame that arrives a
+	// hair early must not be skipped.
+	let easing = false;
+	let moved = false;      // this run of the loop drew an eased (in-between) pose
+	const ease = () => {
+		if (disposed || viewer.isDestroyed()) { easing = false; return; }
+		const now = performance.now();
+		const landed = now >= easeUntilMs();
+		if ((landed && moved) || (!landed && now - lastAt >= 0.9 * MIN_INTERVAL_MS)) {
+			lastAt = now;
+			viewer.scene.requestRender();
+		}
+		if (landed) { easing = false; return; }
+		moved = true;
+		requestAnimationFrame(ease);
+	};
+	const onAircraft = () => {
+		request();
+		if (easing || typeof requestAnimationFrame !== "function") return;
+		easing = true;
+		moved = false;
+		requestAnimationFrame(ease);
+	};
+
 	// `listen` rather than `subscribe`: subscribe fires immediately on attach,
 	// which would request a render per store just for mounting.
 	const unsubscribers = [
-		$aircraftStore.listen(request),
+		$aircraftStore.listen(onAircraft),
 		$trailTail.listen(request),
 		$targetTail.listen(request),
 		$missionItems.listen(request),

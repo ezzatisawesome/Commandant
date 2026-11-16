@@ -58,3 +58,67 @@ export function wingLoadNow(frame: TelemetryFrame | null, loads: WingLoads | nul
 		envelopePct: nStall ? (100 * n) / nStall : null,
 	};
 }
+
+// Tail loads: each tail surface's force, live, from the force model the sim
+// writes into the model (`animation.tailSurfaces`, aircraftsim mesh.py
+// `_tail_loads`) -- the H-stab's lift (+ up), the fins' side force (+ starboard):
+//
+//   trim_N_1g x n  +  q x S x (control_per_rad x deflection + beta_per_rad x beta)
+//
+// q from PX4's airspeed (equivalent: VFR_HUD, so sea-level density), the
+// deflection from PX4's output percent, and sideslip from the EKF's own
+// velocity and wind against the heading (`sideslipRad`).
+
+export interface TailSurfaceSpec {
+	surface: string;
+	/** The bar's direction in the model frame: [0,0,1] up, [0,1,0] starboard. */
+	axis: [number, number, number];
+	trim_N_1g: number;
+	S_ref_m2: number;
+	control: "elevator" | "rudder";
+	control_per_rad: number;
+	/** The FDM's deflection (rad) per PX4 output percent. */
+	control_rad_per_pct: number;
+	beta_per_rad: number;
+}
+
+const RHO0_KGM3 = 1.225;
+
+/** Sideslip, rad (+ = the air comes from the right, JSBSim's sign): the
+ *  air-relative velocity (EKF velocity minus the EKF's wind) against the
+ *  heading, in the level plane (bank and climb are not projected out). Null
+ *  without the velocity, the heading or a live wind estimate: on a windy day,
+ *  ground track alone would read the crab as sideslip. */
+export function sideslipRad(frame: TelemetryFrame | null): number | null {
+	const f = frame;
+	if (!f?.connected) return null;
+	const { vn, ve, yaw, windSpeed, windFromDeg } = f;
+	if (![vn, ve, yaw, windSpeed, windFromDeg].every((v) => typeof v === "number" && Number.isFinite(v))) return null;
+	const age = groupAgeMs(f.ages, "wind");
+	if (age !== null && age > GROUP_STALE_MS) return null;
+	const from = (windFromDeg! * Math.PI) / 180;
+	const aN = vn! + windSpeed! * Math.cos(from);   // the wind blows TOWARD from + 180 deg
+	const aE = ve! + windSpeed! * Math.sin(from);
+	const u = aN * Math.cos(yaw!) + aE * Math.sin(yaw!);
+	const v = -aN * Math.sin(yaw!) + aE * Math.cos(yaw!);
+	return u > 1 ? Math.atan2(v, u) : null;           // not flying forward through the air
+}
+
+/** A tail surface's force now, N along its axis; null when an input it needs is
+ *  missing or stale. */
+export function tailForceN(s: TailSurfaceSpec, frame: TelemetryFrame | null): number | null {
+	const n = loadFactor(frame);
+	const v = frame?.airspeed;
+	if (n === null || typeof v !== "number" || !Number.isFinite(v)) return null;
+	const pct = frame?.[s.control];
+	const delta = typeof pct === "number" && Number.isFinite(pct)
+		? Math.max(-100, Math.min(100, pct)) * s.control_rad_per_pct : 0;
+	let beta = 0;
+	if (s.beta_per_rad !== 0) {
+		const b = sideslipRad(frame);
+		if (b === null) return null;
+		beta = b;
+	}
+	const qS = 0.5 * RHO0_KGM3 * v * v * s.S_ref_m2;
+	return s.trim_N_1g * n + qS * (s.control_per_rad * delta + s.beta_per_rad * beta);
+}

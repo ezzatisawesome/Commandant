@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 import { driveRendering } from "@/lib/driveRendering";
+import { easeSample } from "@/lib/poseEase";
 import { $aircraftStore, $trailStore, pushFrame } from "@/stores/aircraft.store";
 import { $missionItems } from "@/stores/mission.store";
 import type { TelemetryFrame } from "@/types/app";
@@ -75,14 +76,14 @@ describe("driveRendering", () => {
 		flushFrames();
 		const base = v.renders;
 
-		// 100 frames of data inside ~200 ms of wall time. At a 30 fps ceiling that
-		// is at most ~6 renders, not 100.
+		// 100 frames of data inside ~200 ms of wall time. At a 60 fps ceiling that
+		// is at most ~12 renders, not 100.
 		for (let i = 0; i < 100; i++) {
 			pushFrame(frameAt(20_000 + i * 40, i * 5));
 			vi.advanceTimersByTime(2);
 		}
 		flushFrames();
-		expect(v.renders - base).toBeLessThanOrEqual(8);
+		expect(v.renders - base).toBeLessThanOrEqual(14);
 	});
 
 	it("asks for a frame whenever data actually moves, over time", () => {
@@ -113,9 +114,32 @@ describe("driveRendering", () => {
 			pushFrame(frameAt(41_000 + i * 40, 0));
 			vi.advanceTimersByTime(40);
 		}
-		// 2 s at a 30 fps ceiling is 60 renders max; well under the 120 that
+		// One render per 25 Hz frame at most (50), well under the 120 that
 		// continuous rendering at display refresh would have cost.
 		expect(v.renders - settled).toBeLessThanOrEqual(60);
+	});
+
+	it("draws every display frame while the aircraft's pose is easing, and stops when it lands", () => {
+		const v = fakeViewer();
+		stop = driveRendering(v as never);
+		easeSample(frameAt(70_000, 0));
+		vi.advanceTimersByTime(100);
+		const base = v.renders;
+
+		// One sample 40 ms after the last: eased over 40 ms, so the 16 ms rAF
+		// draws between it and the next -- several renders for one sample.
+		vi.advanceTimersByTime(-0);
+		easeSample(frameAt(70_040, 5));
+		pushFrame(frameAt(70_040, 5));
+		vi.advanceTimersByTime(40);
+		expect(v.renders - base).toBeGreaterThanOrEqual(2);
+
+		// Landed: nothing more without new data.
+		vi.advanceTimersByTime(100);
+		const landed = v.renders;
+		vi.advanceTimersByTime(500);
+		expect(v.renders).toBe(landed);
+		easeSample(null);
 	});
 
 	it("stops requesting after unsubscribe and after the viewer is destroyed", () => {
